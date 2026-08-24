@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
 
-use super::SharedState;
+use super::{ensure_loaded, GatewayError, SharedState};
 use crate::engine;
 use crate::registry::{ModelState, ModelStatus};
 use crate::residency;
@@ -217,6 +217,23 @@ async fn set_hot(
         state.models.entry(canonical.clone()).or_default().hot = body.on;
         if let Err(e) = state.save() {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    }
+
+    // hot means resident now, not "resident on next request" -- load
+    // eagerly so pinning a model actually delivers the no-cold-start
+    // promise instead of just exempting it from eviction later.
+    if body.on {
+        if let Err(e) = ensure_loaded(&app, &canonical).await {
+            let msg = match e {
+                GatewayError::CachedUnsupported(m)
+                | GatewayError::InsufficientRam(m)
+                | GatewayError::LoadFailed(m) => m,
+            };
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("marked hot but failed to load: {msg}"),
+            );
         }
     }
 

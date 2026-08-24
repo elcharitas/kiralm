@@ -6,3 +6,4 @@ bench/last_run.log
 bench/last_server.log
 bench/sweep.log
 .DS_Store
+.claude/

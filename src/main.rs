@@ -124,6 +124,10 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
 
     let router = api::build_router(app_state);
 
+    // bind TCP first: if another daemon already owns this port, fail fast
+    // here instead of deleting and re-creating its live unix socket file.
+    let tcp_listener = tokio::net::TcpListener::bind(&config.http_listen).await?;
+
     if config.unix_socket.exists() {
         std::fs::remove_file(&config.unix_socket)?;
     }
@@ -131,7 +135,6 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
-    let tcp_listener = tokio::net::TcpListener::bind(&config.http_listen).await?;
 
     tracing::info!(
         "nodelm serving on {} and {}",
