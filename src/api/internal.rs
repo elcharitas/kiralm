@@ -1,7 +1,7 @@
 //! `/api/*` routes — mirrors the CLI subcommand set plus what the UI
 //! needs (§2.5).
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -58,6 +58,10 @@ pub fn routes() -> Router<SharedState> {
         )
         .route("/api/models/:id/pull", get(pull_progress))
         .route("/api/models/:id/hot", post(set_hot))
+        .route("/api/cloud/status", get(cloud_status))
+        .route("/api/cloud/login", post(cloud_login))
+        .route("/api/cloud/login/progress", get(cloud_login_progress))
+        .route("/api/cloud/logout", post(cloud_logout))
 }
 
 fn err(status: StatusCode, message: impl Into<String>) -> Response {
@@ -325,4 +329,67 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn cloud_status(State(_app): State<SharedState>) -> Json<serde_json::Value> {
+    let (logged_in, device) = cloud::cloud_status();
+    Json(json!({"logged_in": logged_in, "device": device}))
+}
+
+/// Starts the device flow: the code/URL request is fast and synchronous
+/// so the response can carry it immediately, then the slow
+/// approve-and-poll half runs in a background task — same
+/// resolve()-now/download_and_verify()-in-background split `start_pull`
+/// uses.
+async fn cloud_login(State(app): State<SharedState>) -> Response {
+    let device = match cloud::request_device_code(&app.config).await {
+        Ok(d) => d,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+
+    let tx = app.login_channel(&device.device_code);
+    let config = app.config.clone();
+    let device_for_task = device.clone();
+    tokio::spawn(async move {
+        cloud::poll_device_token(&config, &device_for_task, Some(&tx)).await;
+    });
+
+    Json(json!({
+        "device_code": device.device_code,
+        "user_code": device.user_code,
+        "verification_uri": device.verification_uri,
+        "verification_uri_complete": device.verification_uri_complete,
+        "expires_in": device.expires_in,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginProgressQuery {
+    device_code: String,
+}
+
+async fn cloud_login_progress(
+    State(app): State<SharedState>,
+    Query(q): Query<LoginProgressQuery>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let tx = app.login_channel(&q.device_code);
+    let rx = tx.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|msg| async move {
+        match msg {
+            Ok(progress) => serde_json::to_string(&progress)
+                .ok()
+                .map(|json| Ok(Event::default().data(json))),
+            Err(_) => None, // lagged: drop, next event still arrives
+        }
+    });
+    use futures_util::StreamExt;
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn cloud_logout(State(_app): State<SharedState>) -> Response {
+    match cloud::logout() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }

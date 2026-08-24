@@ -125,37 +125,70 @@ fn device_label() -> String {
     )
 }
 
+/// Shared by `nodelm device` and `GET /api/cloud/status` — `None` when
+/// this machine has never completed a login.
+fn registered_device_label() -> Option<String> {
+    let raw = std::fs::read_to_string(device_id_path()).ok()?;
+    let id: DeviceId = serde_json::from_str(&raw).ok()?;
+    Some(format!("{} ({})", device_label(), &id.daemon_instance_id[..8]))
+}
+
 /// `nodelm device`: read-only, no network call.
 pub fn device_info() -> anyhow::Result<()> {
-    let Ok(raw) = std::fs::read_to_string(device_id_path()) else {
-        println!("Not yet registered — run 'nodelm login' first.");
-        return Ok(());
-    };
-    let Ok(id) = serde_json::from_str::<DeviceId>(&raw) else {
-        println!("Not yet registered — run 'nodelm login' first.");
-        return Ok(());
-    };
-    println!(
-        "This machine is registered as {} ({})",
-        device_label(),
-        &id.daemon_instance_id[..8]
-    );
+    match registered_device_label() {
+        Some(label) => println!("This machine is registered as {label}"),
+        None => println!("Not yet registered — run 'nodelm login' first."),
+    }
     Ok(())
+}
+
+/// `GET /api/cloud/status`'s read path: whether a valid token is on disk,
+/// plus the device label if this machine has ever registered.
+pub fn cloud_status() -> (bool, Option<String>) {
+    (ensure_token().is_ok(), registered_device_label())
 }
 
 // ---------------------------------------------------------------------
 // Device-flow login/logout
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceCodeResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
     #[serde(default = "default_interval")]
-    interval: u64,
+    pub interval: u64,
+}
+
+/// Progress event for the device-flow poll, broadcast over
+/// `GET /api/cloud/login/progress` — mirrors `pull::PullProgress`'s
+/// shape/lifecycle (§"Cloud integration"): one broadcast channel per
+/// in-flight login, subscribers just fan out.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoginProgress {
+    /// "pending" | "success" | "expired" | "error"
+    pub phase: String,
+    pub message: Option<String>,
+}
+
+pub type LoginProgressTx = tokio::sync::broadcast::Sender<LoginProgress>;
+
+/// Terminal (or in-flight) result of polling `device/token` once the
+/// device code has been requested — the reusable core both `nodelm login`
+/// and `POST /api/cloud/login`'s background task drive to completion.
+pub enum LoginOutcome {
+    Success,
+    Expired,
+    Error(String),
+}
+
+fn build_client(config: &Config) -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.cloud.request_timeout_secs))
+        .build()?)
 }
 
 fn default_interval() -> u64 {
@@ -180,12 +213,12 @@ struct DeviceTokenErrorBody {
     kind: String,
 }
 
-/// `nodelm login`: RFC 8628 device-authorization flow against nodelm-web.
-pub async fn login(config: &Config) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.cloud.request_timeout_secs))
-        .build()?;
-
+/// Step 1 of the RFC 8628 device-authorization flow: requests a
+/// device/user code pair. Fast, synchronous — safe to await directly in
+/// an HTTP handler before backgrounding the slow poll (`start_pull`'s
+/// `pull::resolve`/`download_and_verify` split is the template).
+pub async fn request_device_code(config: &Config) -> anyhow::Result<DeviceCodeResponse> {
+    let client = build_client(config)?;
     let daemon_instance_id = ensure_daemon_instance_id()?;
 
     let device: DeviceCodeResponse = client
@@ -200,6 +233,110 @@ pub async fn login(config: &Config) -> anyhow::Result<()> {
         .error_for_status()?
         .json()
         .await?;
+    Ok(device)
+}
+
+/// Step 2: polls `device/token` until approval, expiry, or a terminal
+/// error, saving credentials on success. Broadcasts each transition on
+/// `progress` when given, so both `nodelm login` (no channel, `None`) and
+/// the HTTP background task (`Some`) drive the exact same state machine.
+pub async fn poll_device_token(
+    config: &Config,
+    device: &DeviceCodeResponse,
+    progress: Option<&LoginProgressTx>,
+) -> LoginOutcome {
+    let send = |phase: &str, message: Option<String>| {
+        if let Some(tx) = progress {
+            let _ = tx.send(LoginProgress {
+                phase: phase.to_string(),
+                message,
+            });
+        }
+    };
+
+    let client = match build_client(config) {
+        Ok(c) => c,
+        Err(e) => {
+            send("error", Some(e.to_string()));
+            return LoginOutcome::Error(e.to_string());
+        }
+    };
+
+    send("pending", None);
+    let mut interval = Duration::from_secs(device.interval.max(1));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
+
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            send("expired", None);
+            return LoginOutcome::Expired;
+        }
+        tokio::time::sleep(interval).await;
+
+        let resp = match client
+            .post(format!("{}/api/auth/device/token", config.cloud.api_base_url))
+            .json(&serde_json::json!({
+                "device_code": device.device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                send("error", Some(e.to_string()));
+                return LoginOutcome::Error(e.to_string());
+            }
+        };
+
+        if resp.status().is_success() {
+            let token: DeviceTokenSuccess = match resp.json().await {
+                Ok(t) => t,
+                Err(e) => {
+                    send("error", Some(e.to_string()));
+                    return LoginOutcome::Error(e.to_string());
+                }
+            };
+            let creds = CloudCredentials {
+                access_token: token.access_token,
+                refresh_token: token.refresh_token,
+                expires_at: token.expires_at,
+            };
+            if let Err(e) = creds.save() {
+                send("error", Some(e.to_string()));
+                return LoginOutcome::Error(e.to_string());
+            }
+            send("success", None);
+            return LoginOutcome::Success;
+        }
+
+        let body: DeviceTokenError = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                send("error", Some(e.to_string()));
+                return LoginOutcome::Error(e.to_string());
+            }
+        };
+        match body.error.kind.as_str() {
+            "authorization_pending" => continue,
+            "slow_down" => interval += Duration::from_secs(5),
+            "expired" => {
+                send("expired", None);
+                return LoginOutcome::Expired;
+            }
+            other => {
+                send("error", Some(other.to_string()));
+                return LoginOutcome::Error(other.to_string());
+            }
+        }
+    }
+}
+
+/// `nodelm login`: terminal-printing consumer of `request_device_code` +
+/// `poll_device_token` — same output/exit-code behavior as before the
+/// HTTP path (`POST /api/cloud/login`) was added.
+pub async fn login(config: &Config) -> anyhow::Result<()> {
+    let device = request_device_code(config).await?;
 
     if let Some(complete) = &device.verification_uri_complete {
         println!("Then visit: {complete}");
@@ -214,49 +351,18 @@ pub async fn login(config: &Config) -> anyhow::Result<()> {
         device.expires_in
     );
 
-    let mut interval = Duration::from_secs(device.interval.max(1));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(device.expires_in);
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
+    match poll_device_token(config, &device, None).await {
+        LoginOutcome::Success => {
+            println!("Logged in. Cloud models are now available.");
+            Ok(())
+        }
+        LoginOutcome::Expired => {
             println!("Login expired before it was approved — run 'nodelm login' again.");
             std::process::exit(1);
         }
-        tokio::time::sleep(interval).await;
-
-        let resp = client
-            .post(format!("{}/api/auth/device/token", config.cloud.api_base_url))
-            .json(&serde_json::json!({
-                "device_code": device.device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            }))
-            .send()
-            .await?;
-
-        if resp.status().is_success() {
-            let token: DeviceTokenSuccess = resp.json().await?;
-            CloudCredentials {
-                access_token: token.access_token,
-                refresh_token: token.refresh_token,
-                expires_at: token.expires_at,
-            }
-            .save()?;
-            println!("Logged in. Cloud models are now available.");
-            return Ok(());
-        }
-
-        let body: DeviceTokenError = resp.json().await?;
-        match body.error.kind.as_str() {
-            "authorization_pending" => continue,
-            "slow_down" => interval += Duration::from_secs(5),
-            "expired" => {
-                println!("Login expired before it was approved — run 'nodelm login' again.");
-                std::process::exit(1);
-            }
-            other => {
-                println!("{other}");
-                std::process::exit(1);
-            }
+        LoginOutcome::Error(msg) => {
+            println!("{msg}");
+            std::process::exit(1);
         }
     }
 }
@@ -489,5 +595,29 @@ mod tests {
             expires_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
         };
         assert!(expired.expires_at.unwrap() < chrono::Utc::now());
+    }
+
+    /// `GET /api/cloud/status`'s JSON shape reads straight off this —
+    /// guards the field names the UI matches against.
+    #[test]
+    fn login_progress_serializes_phase_and_message() {
+        let event = LoginProgress {
+            phase: "pending".to_string(),
+            message: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(json, r#"{"phase":"pending","message":null}"#);
+    }
+
+    #[test]
+    fn cloud_status_reports_logged_out_with_no_device() {
+        // Only meaningful in a clean ~/.nodelm; skip on a machine that's
+        // actually logged in or registered.
+        if CloudCredentials::load().unwrap().is_some() || registered_device_label().is_some() {
+            return;
+        }
+        let (logged_in, device) = cloud_status();
+        assert!(!logged_in);
+        assert!(device.is_none());
     }
 }

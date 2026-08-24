@@ -12,6 +12,7 @@ use std::sync::Arc;
 use axum::Router;
 use parking_lot::RwLock;
 
+use crate::cloud::LoginProgressTx;
 use crate::config::Config;
 use crate::engine;
 use crate::pull::{PullProgress, ProgressTx};
@@ -25,6 +26,9 @@ pub struct AppState {
     pub state: RwLock<State>,
     /// In-flight pulls, keyed by canonical id, for SSE progress fan-out.
     pub pulls: RwLock<HashMap<String, ProgressTx>>,
+    /// In-flight cloud logins, keyed by device_code, for SSE progress
+    /// fan-out — same pattern as `pulls` above.
+    pub logins: RwLock<HashMap<String, LoginProgressTx>>,
     /// The supervised `cloudflared` child, if the tunnel is currently
     /// running (§"Tunnel client (daemon)") — in-memory only, like
     /// `ensure_loaded`'s reaper task; `state.tunnel` is the persisted
@@ -39,6 +43,7 @@ impl AppState {
             registry,
             state: RwLock::new(state),
             pulls: RwLock::new(HashMap::new()),
+            logins: RwLock::new(HashMap::new()),
             tunnel_child: parking_lot::Mutex::new(None),
         }
     }
@@ -53,6 +58,19 @@ impl AppState {
         self.pulls
             .write()
             .insert(canonical_id.to_string(), tx.clone());
+        tx
+    }
+
+    /// Gets (or lazily creates) the broadcast channel used to fan out
+    /// progress for a given device_code's in-flight login.
+    pub fn login_channel(&self, device_code: &str) -> LoginProgressTx {
+        if let Some(tx) = self.logins.read().get(device_code) {
+            return tx.clone();
+        }
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        self.logins
+            .write()
+            .insert(device_code.to_string(), tx.clone());
         tx
     }
 }

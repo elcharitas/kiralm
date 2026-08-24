@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, type ModelStatus, type StatusResponse } from "../api";
+import {
+  api,
+  type CloudLoginStart,
+  type CloudStatus,
+  type ModelStatus,
+  type StatusResponse,
+} from "../api";
 import { VerdictBadge } from "../components/VerdictBadge";
 import { HotToggle } from "../components/HotToggle";
 import { ProgressBar } from "../components/ProgressBar";
@@ -137,6 +143,8 @@ export function ModelsView({
         </form>
       </div>
 
+      <CloudLoginPanel onChange={refresh} />
+
       {pulling?.error && <div className="banner banner-bad">{pulling.error}</div>}
       {pulling && !pulling.error && !models.some((m) => m.id === pulling.id) && (
         <PullingRow
@@ -174,10 +182,16 @@ export function ModelsView({
               <td className="mono">{m.quant}</td>
               <td className="mono">{formatBytes(m.size_bytes)}</td>
               <td>
-                <VerdictBadge tier={m.verdict_tier} title={m.verdict_reason} />
+                {m.source === "cloud" ? (
+                  <span className="badge badge-cloud">Cloud</span>
+                ) : (
+                  <VerdictBadge tier={m.verdict_tier!} title={m.verdict_reason ?? undefined} />
+                )}
               </td>
               <td>
-                {m.loaded ? (
+                {m.source === "cloud" ? (
+                  <span className="dim">—</span>
+                ) : m.loaded ? (
                   <span className="dot-status">
                     <span className="dot dot-good" />
                     {formatBytes(m.rss_bytes)}
@@ -190,20 +204,24 @@ export function ModelsView({
                 )}
               </td>
               <td>
-                <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
+                {m.source === "local" && (
+                  <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
+                )}
               </td>
               <td>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-danger"
-                  disabled={busy === m.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    remove(m);
-                  }}
-                >
-                  Delete
-                </button>
+                {m.source === "local" && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-danger"
+                    disabled={busy === m.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      remove(m);
+                    }}
+                  >
+                    Delete
+                  </button>
+                )}
               </td>
             </tr>
           ))}
@@ -237,6 +255,108 @@ export function ModelsView({
       </table>
 
       {selected && <ModelDetailDrawer id={selected} onClose={() => setSelected(null)} />}
+    </div>
+  );
+}
+
+// Login affordance for cloud models (kept to this view, per SPEC's
+// single-dense-table rule — no separate cloud section elsewhere).
+function CloudLoginPanel({ onChange }: { onChange: () => void }) {
+  const [status, setStatus] = useState<CloudStatus | null>(null);
+  const [start, setStart] = useState<CloudLoginStart | null>(null);
+  const [progress, setProgress] = useState<{ phase: string; message: string | null } | null>(
+    null,
+  );
+  const [busy, setBusy] = useState(false);
+
+  const loadStatus = () => api.cloudStatus().then(setStatus, () => {});
+
+  useEffect(() => {
+    loadStatus();
+  }, []);
+
+  useEffect(() => {
+    if (!start) return;
+    const source = new EventSource(api.cloudLoginProgressUrl(start.device_code));
+    source.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data) as { phase: string; message: string | null };
+        setProgress(data);
+        if (data.phase === "success") {
+          source.close();
+          setStart(null);
+          loadStatus();
+          onChange();
+        } else if (data.phase === "expired" || data.phase === "error") {
+          source.close();
+        }
+      } catch {
+        // ignore malformed frame, next one carries fresh state
+      }
+    };
+    source.onerror = () => source.close();
+    return () => source.close();
+  }, [start]);
+
+  const login = async () => {
+    setBusy(true);
+    setProgress(null);
+    try {
+      setStart(await api.cloudLogin());
+    } catch (err) {
+      setProgress({ phase: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    setBusy(true);
+    try {
+      await api.cloudLogout();
+      await loadStatus();
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) return null;
+
+  if (status.logged_in) {
+    return (
+      <div className="banner banner-info cloud-login-banner">
+        <span>Cloud: logged in{status.device ? ` as ${status.device}` : ""}</span>
+        <button type="button" className="btn btn-ghost" disabled={busy} onClick={logout}>
+          Log out
+        </button>
+      </div>
+    );
+  }
+
+  if (start && progress?.phase !== "expired" && progress?.phase !== "error") {
+    const link = start.verification_uri_complete ?? start.verification_uri;
+    return (
+      <div className="banner banner-info cloud-login-banner">
+        <span>
+          Enter code <strong className="mono">{start.user_code}</strong> at{" "}
+          <a href={link} target="_blank" rel="noreferrer">
+            {link}
+          </a>
+        </span>
+        <span className="dim">Waiting for approval…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="banner banner-info cloud-login-banner">
+      <span>Log in for cloud models</span>
+      {progress?.phase === "expired" && <span className="dim">Code expired — try again.</span>}
+      {progress?.phase === "error" && <span className="banner-bad">{progress.message}</span>}
+      <button type="button" className="btn btn-accent" disabled={busy} onClick={login}>
+        Log in
+      </button>
     </div>
   );
 }

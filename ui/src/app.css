@@ -266,6 +266,11 @@
   color: var(--verdict-bad);
 }
 
+.badge-cloud {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
 /* Hot toggle */
 
 .hot-toggle {
@@ -346,6 +351,19 @@
 .banner-bad {
   background: var(--verdict-bad-bg);
   color: var(--verdict-bad);
+}
+
+.banner-info {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.cloud-login-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 /* Drawer */

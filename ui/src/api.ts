@@ -11,14 +11,15 @@ export type VerdictTier =
 export interface ModelStatus {
   id: string;
   aliases: string[];
+  source: "local" | "cloud";
   size_bytes: number;
   quant: string;
   hot: boolean;
   loaded: boolean;
   rss_bytes: number | null;
-  verdict: string;
-  verdict_reason: string;
-  verdict_tier: VerdictTier;
+  verdict: string | null;
+  verdict_reason: string | null;
+  verdict_tier: VerdictTier | null;
 }
 
 export interface StatusResponse {
@@ -57,6 +58,19 @@ export interface ApiError {
   error: { message: string; type?: string; param?: string; code?: string };
 }
 
+export interface CloudStatus {
+  logged_in: boolean;
+  device: string | null;
+}
+
+export interface CloudLoginStart {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string | null;
+  expires_in: number;
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => null);
   if (!res.ok) {
@@ -93,6 +107,16 @@ export const api = {
     ),
 
   pullProgressUrl: (id: string) => `/api/models/${encodeURIComponent(id)}/pull`,
+
+  cloudStatus: () => fetch("/api/cloud/status").then((r) => asJson<CloudStatus>(r)),
+
+  cloudLogin: () =>
+    fetch("/api/cloud/login", { method: "POST" }).then((r) => asJson<CloudLoginStart>(r)),
+
+  cloudLogout: () => fetch("/api/cloud/logout", { method: "POST" }).then((r) => asJson<void>(r)),
+
+  cloudLoginProgressUrl: (deviceCode: string) =>
+    `/api/cloud/login/progress?device_code=${encodeURIComponent(deviceCode)}`,
 };
 
 export interface ChatMessage {
