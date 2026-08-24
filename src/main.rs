@@ -11,6 +11,7 @@ mod pull;
 mod registry;
 mod residency;
 mod state;
+mod tunnel_auth;
 
 use std::sync::Arc;
 
@@ -148,16 +149,31 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     }
     let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
 
+    // Third listener, bearer-checked (SPEC.md "Remote-request auth") —
+    // the only thing `cloudflared`'s tunnel ingress ever points at.
+    // Bound unconditionally, same as `http_listen`; nothing reaches it
+    // from the public internet until `nodelm tunnel enable` configures
+    // the tunnel's ingress to target this port.
+    let tunnel_listener = tokio::net::TcpListener::bind(&config.tunnel.listen).await?;
+
     tracing::info!(
-        "nodelm serving on {} and {}",
+        "nodelm serving on {}, {} (unix), and {} (tunnel, bearer-checked)",
         config.http_listen,
-        config.unix_socket.display()
+        config.unix_socket.display(),
+        config.tunnel.listen
     );
 
     let tcp_router = router.clone();
     let tcp_task = tokio::spawn(async move {
         if let Err(e) = axum::serve(tcp_listener, tcp_router.into_make_service()).await {
             tracing::error!("tcp listener stopped: {e}");
+        }
+    });
+
+    let tunnel_router = router.clone().layer(axum::middleware::from_fn(tunnel_auth::require_tunnel_bearer));
+    let tunnel_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(tunnel_listener, tunnel_router.into_make_service()).await {
+            tracing::error!("tunnel listener stopped: {e}");
         }
     });
 
@@ -172,7 +188,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    let _ = tokio::join!(tcp_task, unix_task);
+    let _ = tokio::join!(tcp_task, unix_task, tunnel_task);
     Ok(())
 }
 

@@ -55,6 +55,15 @@ fn default_catalog_sync_on_startup() -> bool {
     true
 }
 
+fn default_cloudflared_bin() -> String {
+    // ponytail: naive default path, same posture as llama_server_bin above
+    "/opt/homebrew/bin/cloudflared".to_string()
+}
+
+fn default_tunnel_listen() -> String {
+    "127.0.0.1:11536".to_string()
+}
+
 /// `[cloud]` table (Cloud integration §"config.toml keys") — same
 /// all-`Option` + one-default-fn-per-field pattern as the rest of this
 /// file. Never mirrored into state.json (hand-edited static config).
@@ -91,6 +100,31 @@ impl Default for CloudConfig {
     }
 }
 
+/// `[tunnel]` table (§"Tunnel client (daemon)" -- Binary, and
+/// §"Remote-request auth" for `listen`) — same all-`Option` +
+/// default-fn pattern as the rest of this file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RawTunnelConfig {
+    cloudflared_bin: Option<String>,
+    listen: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TunnelConfig {
+    pub cloudflared_bin: String,
+    /// Second HTTP listener, tunnel-origin traffic only (§"Remote-request auth").
+    pub listen: String,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        TunnelConfig {
+            cloudflared_bin: default_cloudflared_bin(),
+            listen: default_tunnel_listen(),
+        }
+    }
+}
+
 /// On-disk config shape. Every field optional so a hand-edited partial
 /// file still parses; defaults fill the rest (§3).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -103,6 +137,8 @@ struct RawConfig {
     llama_server_port_range: Option<(u16, u16)>,
     #[serde(default)]
     cloud: RawCloudConfig,
+    #[serde(default)]
+    tunnel: RawTunnelConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +151,7 @@ pub struct Config {
     pub llama_server_bin: String,
     pub llama_server_port_range: (u16, u16),
     pub cloud: CloudConfig,
+    pub tunnel: TunnelConfig,
 }
 
 impl Default for Config {
@@ -127,6 +164,7 @@ impl Default for Config {
             llama_server_bin: default_llama_server_bin(),
             llama_server_port_range: default_port_range(),
             cloud: CloudConfig::default(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }
@@ -178,6 +216,10 @@ impl Config {
                     .cloud
                     .catalog_sync_on_startup
                     .unwrap_or(defaults.cloud.catalog_sync_on_startup),
+            },
+            tunnel: TunnelConfig {
+                cloudflared_bin: raw.tunnel.cloudflared_bin.unwrap_or(defaults.tunnel.cloudflared_bin),
+                listen: raw.tunnel.listen.unwrap_or(defaults.tunnel.listen),
             },
         })
     }

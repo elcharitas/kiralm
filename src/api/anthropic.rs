@@ -119,7 +119,7 @@ pub struct ResponseUsage {
 // Errors (§2.4: Anthropic shape, chosen strictly by route)
 // ---------------------------------------------------------------------
 
-fn anthropic_error(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Response {
+pub(crate) fn anthropic_error(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Response {
     let body = json!({
         "type": "error",
         "error": { "type": kind, "message": message.into() },

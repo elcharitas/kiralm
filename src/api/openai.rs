@@ -19,7 +19,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/v1/models", get(list_models))
 }
 
-fn openai_err(status: StatusCode, kind: &str, message: impl Into<String>, param: Option<&str>) -> Response {
+pub(crate) fn openai_err(status: StatusCode, kind: &str, message: impl Into<String>, param: Option<&str>) -> Response {
     (
         status,
         Json(json!({"error": {
