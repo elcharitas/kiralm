@@ -10,7 +10,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::routing::post;
+use axum::{Json, Router};
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,8 +20,12 @@ use super::openai::{
     ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
     ChatContent, ChatContentPart, ChatMessage as OpenAiMessage, ImageUrl,
 };
-use super::AppState;
-use crate::residency::EnsureLoadedError;
+use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
+use crate::state::ModelManifest;
+
+pub fn routes() -> Router<SharedState> {
+    Router::new().route("/v1/messages", post(messages))
+}
 
 // ---------------------------------------------------------------------
 // Request types
@@ -237,17 +242,18 @@ fn map_stop_reason(
 // Handler
 // ---------------------------------------------------------------------
 
-pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesRequest>) -> Response {
-    let Some(canonical_id) = state.registry.resolve(&req.model) else {
+pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRequest>) -> Response {
+    let Some(canonical_id) = resolve_model(&app, &req.model) else {
         return anthropic_error(
             StatusCode::NOT_FOUND,
             "not_found_error",
             format!("model '{}' not found", req.model),
         );
     };
-    let vision_capable = state
+    let vision_capable = app
         .registry
-        .manifest(&canonical_id)
+        .get_clone(&canonical_id)
+        .and_then(|ms| ModelManifest::load(&ms.gguf_path).ok())
         .map(|m| m.vision_capable)
         .unwrap_or(false);
 
@@ -257,36 +263,26 @@ pub async fn messages(State(state): State<AppState>, Json(req): Json<MessagesReq
         Err(resp) => return resp,
     };
 
-    let port = match state.residency.ensure_loaded(&canonical_id).await {
+    let port = match ensure_loaded(&app, &canonical_id).await {
         Ok(p) => p,
-        Err(EnsureLoadedError::NotFound) => {
-            return anthropic_error(
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-                format!("model '{}' not found", req.model),
-            )
-        }
-        Err(EnsureLoadedError::ColdStarting) => {
-            return anthropic_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded_error",
-                "model is still loading, try again shortly",
-            )
-        }
-        Err(EnsureLoadedError::Unsupported(msg)) => {
+        Err(GatewayError::CachedUnsupported(msg)) => {
             return anthropic_error(StatusCode::BAD_REQUEST, "invalid_request_error", msg)
         }
-        Err(EnsureLoadedError::Other(msg)) => {
+        Err(GatewayError::InsufficientRam(msg)) => {
+            return anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", msg)
+        }
+        Err(GatewayError::LoadFailed(msg)) => {
             return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg)
         }
     };
 
+    let http = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
 
     if stream {
-        stream_messages(state.http, url, openai_req, req.stop_sequences, canonical_id).await
+        stream_messages(http, url, openai_req, req.stop_sequences, canonical_id).await
     } else {
-        non_stream_messages(state.http, url, openai_req, req.stop_sequences).await
+        non_stream_messages(http, url, openai_req, req.stop_sequences).await
     }
 }
 
@@ -507,24 +503,60 @@ fn sse_json(event: &'static str, payload: serde_json::Value) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{ModelManifest, ModelRegistry};
-    use crate::residency::Residency;
+    use crate::config::Config;
+    use crate::registry::{ModelRegistry, ModelState};
+    use crate::state::{ExpertCount, ModelManifest, State};
     use axum::body::Body;
     use axum::http::Request;
-    use axum::routing::post;
-    use axum::Router;
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    fn test_state() -> AppState {
-        AppState {
-            registry: Arc::new(ModelRegistry::new()),
-            residency: Arc::new(Residency::new()),
-            http: reqwest::Client::new(),
-        }
+    /// Writes a manifest sidecar next to a unique temp "gguf" path and
+    /// registers a matching `ModelState`, so `messages()`'s vision_capable
+    /// lookup (which reads the sidecar off disk) resolves for real.
+    fn register_test_model(app: &SharedState, canonical_id: &str, alias: &str, vision_capable: bool) {
+        let gguf_path = std::env::temp_dir().join(format!(
+            "nodelm-test-{}-{}.gguf",
+            canonical_id.replace(['/', ':'], "_"),
+            uuid::Uuid::new_v4()
+        ));
+        let manifest = ModelManifest {
+            canonical_id: canonical_id.to_string(),
+            filename: gguf_path.file_name().unwrap().to_string_lossy().to_string(),
+            sha256: "deadbeef".to_string(),
+            size_bytes: 1,
+            architecture: "test".to_string(),
+            is_moe: false,
+            expert_count: None::<ExpertCount>,
+            context_length_trained: 4096,
+            vision_capable,
+            source_ref: canonical_id.to_string(),
+            pulled_at: chrono::Utc::now(),
+        };
+        manifest.write(&gguf_path).expect("write test manifest");
+
+        let mut model = ModelState::from_manifest(&manifest, false);
+        model.gguf_path = gguf_path;
+        app.registry.insert(model);
+        app.state.write().aliases.insert(alias.to_string(), canonical_id.to_string());
     }
 
-    fn router(state: AppState) -> Router {
+    fn mark_loaded(app: &SharedState, canonical_id: &str, port: u16) {
+        let mut model = app.registry.get_clone(canonical_id).unwrap();
+        model.status = crate::registry::ModelStatus::Loaded;
+        model.port = Some(port);
+        app.registry.insert(model);
+    }
+
+    fn test_state() -> SharedState {
+        Arc::new(super::super::AppState::new(
+            Config::default(),
+            Arc::new(ModelRegistry::new()),
+            State::default(),
+        ))
+    }
+
+    fn router(state: SharedState) -> Router {
         Router::new().route("/v1/messages", post(messages)).with_state(state)
     }
 
@@ -607,14 +639,7 @@ mod tests {
     #[tokio::test]
     async fn tool_use_block_is_400_invalid_request_error() {
         let state = test_state();
-        state.registry.register(
-            ModelManifest {
-                canonical_id: "org/repo:Q4".into(),
-                vision_capable: false,
-            },
-            &["alias"],
-        );
-        state.residency.set_loaded("org/repo:Q4", 9); // unused, request short-circuits first
+        register_test_model(&state, "org/repo:Q4", "alias", false);
         let app = router(state);
         let body = json!({
             "model": "alias",
@@ -663,14 +688,8 @@ mod tests {
         });
 
         let state = test_state();
-        state.registry.register(
-            ModelManifest {
-                canonical_id: "org/repo:Q4".into(),
-                vision_capable: false,
-            },
-            &["alias"],
-        );
-        state.residency.set_loaded("org/repo:Q4", port);
+        register_test_model(&state, "org/repo:Q4", "alias", false);
+        mark_loaded(&state, "org/repo:Q4", port);
         let app = router(state);
 
         let body = json!({
@@ -723,14 +742,8 @@ mod tests {
         });
 
         let state = test_state();
-        state.registry.register(
-            ModelManifest {
-                canonical_id: "org/repo:Q4".into(),
-                vision_capable: false,
-            },
-            &["alias"],
-        );
-        state.residency.set_loaded("org/repo:Q4", port);
+        register_test_model(&state, "org/repo:Q4", "alias", false);
+        mark_loaded(&state, "org/repo:Q4", port);
         let app = router(state);
 
         let body = json!({

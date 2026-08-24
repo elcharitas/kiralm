@@ -1,68 +1,30 @@
-//! `state.json` (daemon-owned, atomic rewrite) and the per-GGUF manifest
-//! sidecar. SPEC.md §3.
+//! `~/.nodelm/state.json` (daemon-owned, atomic rewrite) and the
+//! `<file>.gguf.json` manifest sidecars (§3).
 
-use std::collections::HashMap;
-use std::path::Path;
-
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VerdictCacheStatus {
-    Supported,
-    Unsupported,
+use crate::config::nodelm_home;
+
+pub fn state_path() -> PathBuf {
+    nodelm_home().join("state.json")
 }
 
+/// One GGUF's manifest sidecar, written once at pull time, immutable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerdictCache {
-    pub engine_version: String,
-    pub status: VerdictCacheStatus,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedModelState {
-    pub hot: bool,
-    pub last_used: DateTime<Utc>,
-    #[serde(default)]
-    pub verdict_cache: Option<VerdictCache>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct State {
-    #[serde(default)]
-    pub models: HashMap<String, PersistedModelState>,
-    #[serde(default)]
-    pub aliases: HashMap<String, String>,
-}
-
-impl State {
-    /// Missing file = fresh empty state (first daemon start).
-    pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(State::default());
-        }
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading state at {}", path.display()))?;
-        serde_json::from_str(&raw).with_context(|| format!("parsing state at {}", path.display()))
-    }
-
-    /// Atomic rewrite: write to a sibling tmp file, then rename over the
-    /// target so a crash mid-write never leaves a truncated state.json.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_path = path.with_extension("json.tmp");
-        let body = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp_path, body)
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, path)
-            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
-        Ok(())
-    }
+pub struct ModelManifest {
+    pub canonical_id: String,
+    pub filename: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub architecture: String,
+    pub is_moe: bool,
+    pub expert_count: Option<ExpertCount>,
+    pub context_length_trained: u64,
+    pub vision_capable: bool,
+    pub source_ref: String,
+    pub pulled_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,32 +33,96 @@ pub struct ExpertCount {
     pub active: u32,
 }
 
-/// `<file>.gguf.json` sidecar, written once at pull time, immutable after.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Manifest {
-    pub canonical_id: String,
-    pub filename: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    pub architecture: String,
-    pub is_moe: bool,
-    pub expert_count: Option<ExpertCount>,
-    pub context_length_trained: u32,
-    pub vision_capable: bool,
-    pub source_ref: String,
-    pub pulled_at: DateTime<Utc>,
-}
-
-impl Manifest {
-    pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading manifest at {}", path.display()))?;
-        serde_json::from_str(&raw)
-            .with_context(|| format!("parsing manifest at {}", path.display()))
+impl ModelManifest {
+    /// Sidecar path for a given GGUF file path: `<file>.gguf.json`.
+    pub fn sidecar_path_for(gguf_path: &Path) -> PathBuf {
+        let mut s = gguf_path.as_os_str().to_owned();
+        s.push(".json");
+        PathBuf::from(s)
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let body = serde_json::to_vec_pretty(self)?;
-        std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
+    pub fn load(gguf_path: &Path) -> anyhow::Result<ModelManifest> {
+        let raw = std::fs::read_to_string(Self::sidecar_path_for(gguf_path))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    /// Manifest sidecars are immutable once written (§3) — write is only
+    /// ever called once, at pull time.
+    pub fn write(&self, gguf_path: &Path) -> anyhow::Result<()> {
+        let path = Self::sidecar_path_for(gguf_path);
+        let body = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, body)?;
+        Ok(())
+    }
+
+    /// Loads every manifest sidecar found in `model_dir`.
+    pub fn load_all(model_dir: &Path) -> anyhow::Result<Vec<ModelManifest>> {
+        let mut out = Vec::new();
+        if !model_dir.exists() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(model_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(raw) = std::fs::read_to_string(&path) {
+                    if let Ok(m) = serde_json::from_str::<ModelManifest>(&raw) {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerdictCache {
+    pub engine_version: String,
+    /// "supported" | "unsupported"
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelEntry {
+    pub hot: bool,
+    pub last_used: Option<chrono::DateTime<chrono::Utc>>,
+    pub verdict_cache: Option<VerdictCache>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct State {
+    pub models: HashMap<String, ModelEntry>,
+    pub aliases: HashMap<String, String>,
+}
+
+impl State {
+    pub fn load() -> anyhow::Result<State> {
+        Self::load_from(&state_path())
+    }
+
+    pub fn load_from(path: &Path) -> anyhow::Result<State> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok(serde_json::from_str(&s)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Atomic rewrite: write to a tmp file in the same dir, then rename
+    /// over the target so a crash mid-write never leaves a torn file.
+    pub fn save(&self) -> anyhow::Result<()> {
+        self.save_to(&state_path())
+    }
+
+    pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 }
