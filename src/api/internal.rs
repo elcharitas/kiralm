@@ -2,15 +2,41 @@
 //! needs (§2.5).
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::Stream;
+use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
+
+/// The built UI (`ui/dist/`), embedded at compile time (§2, SPEC's UI
+/// section) — run `npm run build` in `ui/` before building the daemon.
+#[derive(RustEmbed)]
+#[folder = "ui/dist/"]
+struct Assets;
+
+/// Static-file fallback: serves the embedded SPA for any path that isn't
+/// `/v1/*` or `/api/*` (those already have their own routes and 404 on a
+/// genuine miss rather than falling through to index.html here).
+pub async fn static_handler(uri: Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    if path.starts_with("v1") || path.starts_with("api") {
+        return err(StatusCode::NOT_FOUND, "not found");
+    }
+    serve_asset(path).unwrap_or_else(|| {
+        serve_asset("index.html").unwrap_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
+    })
+}
+
+fn serve_asset(path: &str) -> Option<Response> {
+    let asset = Assets::get(path)?;
+    let mime = asset.metadata.mimetype();
+    Some(([(header::CONTENT_TYPE, mime)], asset.data).into_response())
+}
 
 use super::{ensure_loaded, GatewayError, SharedState};
 use crate::engine;
