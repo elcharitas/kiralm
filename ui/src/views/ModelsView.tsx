@@ -13,7 +13,7 @@ import { formatBytes } from "../format";
 import { usePullProgress } from "../hooks/usePullProgress";
 import { ModelDetailDrawer } from "./ModelDetailDrawer";
 
-// ponytail: plain hardcoded list, not a live catalog — edit this array to add/update entries.
+// ponytail: plain hardcoded list, not a live catalog; edit this array to add/update entries.
 const CATALOG: { name: string; ref: string; size: string; description: string }[] = [
   {
     name: "Qwen3 0.6B",
@@ -49,13 +49,13 @@ const CATALOG: { name: string; ref: string; size: string; description: string }[
     name: "OLMoE 1B-7B",
     ref: "unsloth/OLMoE-1B-7B-0924-Instruct-GGUF:Q4_K_M",
     size: "~4.3 GB",
-    description: "MoE model: 7B total, ~1B active — the over-RAM story.",
+    description: "MoE model: 7B total, ~1B active. The over-RAM story.",
   },
   {
     name: "Qwen3 30B-A3B",
     ref: "unsloth/Qwen3-30B-A3B-GGUF:Q4_K_M",
     size: "~18 GB",
-    description: "MoE model: 30B total, ~3B active — runs on modest RAM.",
+    description: "MoE model: 30B total, ~3B active. Runs on modest RAM.",
   },
   {
     name: "Mixtral 8x7B Instruct",
@@ -150,7 +150,7 @@ export function ModelsView({
         <PullingRow
           id={pulling.id}
           onDone={async () => {
-            if (localStorage.getItem("nodelm.defaultHotOnPull") === "true") {
+            if (localStorage.getItem("kiralm.defaultHotOnPull") === "true") {
               await api.setHot(pulling.id, true).catch(() => {});
             }
             refresh();
@@ -190,7 +190,7 @@ export function ModelsView({
               </td>
               <td>
                 {m.source === "cloud" ? (
-                  <span className="dim">—</span>
+                  <span className="dim">-</span>
                 ) : m.loaded ? (
                   <span className="dot-status">
                     <span className="dot dot-good" />
@@ -228,7 +228,7 @@ export function ModelsView({
           {models.length === 0 && (
             <tr>
               <td colSpan={7} className="table-empty">
-                No models downloaded yet — pull one below.
+                No models downloaded yet. Pull one below.
               </td>
             </tr>
           )}
@@ -260,7 +260,7 @@ export function ModelsView({
 }
 
 // Login affordance for cloud models (kept to this view, per SPEC's
-// single-dense-table rule — no separate cloud section elsewhere).
+// single-dense-table rule, no separate cloud section elsewhere).
 function CloudLoginPanel({ onChange }: { onChange: () => void }) {
   const [status, setStatus] = useState<CloudStatus | null>(null);
   const [start, setStart] = useState<CloudLoginStart | null>(null);
@@ -352,7 +352,7 @@ function CloudLoginPanel({ onChange }: { onChange: () => void }) {
   return (
     <div className="banner banner-info cloud-login-banner">
       <span>Log in for cloud models</span>
-      {progress?.phase === "expired" && <span className="dim">Code expired — try again.</span>}
+      {progress?.phase === "expired" && <span className="dim">Code expired. Try again.</span>}
       {progress?.phase === "error" && <span className="banner-bad">{progress.message}</span>}
       <button type="button" className="btn btn-accent" disabled={busy} onClick={login}>
         Log in
@@ -377,7 +377,7 @@ function PullingRow({ id, onDone }: { id: string; onDone: () => void }) {
       ) : (
         <ProgressBar
           percent={percent}
-          label={`${progress.status} — ${formatBytes(progress.bytes_downloaded)} / ${formatBytes(progress.total_bytes)}`}
+          label={`${progress.status}: ${formatBytes(progress.bytes_downloaded)} / ${formatBytes(progress.total_bytes)}`}
         />
       )}
     </div>

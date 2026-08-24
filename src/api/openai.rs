@@ -32,7 +32,7 @@ pub(crate) fn openai_err(status: StatusCode, kind: &str, message: impl Into<Stri
         .into_response()
 }
 
-/// Maps a `GatewayError` to its OpenAI-shaped response — the one place
+/// Maps a `GatewayError` to its OpenAI-shaped response. The one place
 /// this happens, so `AuthRequired` (raised both by `ensure_loaded` and,
 /// after routing, by the cloud forward step below) gets identical
 /// treatment either way.
@@ -65,8 +65,8 @@ async fn list_models(State(app): State<SharedState>) -> Json<serde_json::Value> 
                 "object": "model",
                 "created": pulled_at,
                 "owned_by": match m.source {
-                    ModelSource::Local => "nodelm",
-                    ModelSource::Cloud => "nodelm-cloud",
+                    ModelSource::Local => "kiralm",
+                    ModelSource::Cloud => "kiralm-cloud",
                 },
             })
         })
@@ -110,9 +110,9 @@ async fn chat_completions(
 
     // Local: exactly today's behavior, proxy byte-for-byte to the
     // spawned llama-server child, client's own `model` field untouched.
-    // Cloud: forward to nodelm-web instead, with a bearer token and the
+    // Cloud: forward to kiralm-web instead, with a bearer token and the
     // outgoing `model` swapped for the cloud model's stored `ref` (the
-    // client's requested alias/id is not what nodelm-web expects) —
+    // client's requested alias/id is not what kiralm-web expects),
     // same byte-passthrough/streaming logic otherwise (§"/v1/chat/
     // completions routing for cloud-sourced models").
     let (url, bearer, body) = match route {
@@ -157,12 +157,12 @@ async fn chat_completions(
     };
 
     // A cloud 401 (expired/revoked token) gets this daemon's own 401
-    // shape rather than nodelm-web's raw error body; every other
-    // upstream status — local or cloud — is passed through verbatim,
+    // shape rather than kiralm-web's raw error body; every other
+    // upstream status, local or cloud, is passed through verbatim,
     // same as always.
     if bearer.is_some() && upstream.status() == reqwest::StatusCode::UNAUTHORIZED {
         return gateway_error_response(GatewayError::AuthRequired(
-            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+            "cloud login expired or revoked. run 'kiralm login' again".to_string(),
         ));
     }
 

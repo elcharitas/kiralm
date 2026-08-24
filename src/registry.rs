@@ -23,8 +23,8 @@ pub enum ModelStatus {
 }
 
 /// Where a `ModelState` came from (Cloud integration §"ModelRegistry
-/// design for cloud models") — one registry, one resolve path, both
-/// kinds flow through the same `/v1/models`/`nodelm list` loop.
+/// design for cloud models"). One registry, one resolve path, both
+/// kinds flow through the same `/v1/models`/`kiralm list` loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
     Local,
@@ -32,7 +32,7 @@ pub enum ModelSource {
 }
 
 /// What `ensure_loaded` hands back to a chat-completion call site: a
-/// local port to proxy to, or a signal to forward to nodelm-web instead.
+/// local port to proxy to, or a signal to forward to kiralm-web instead.
 /// This is the one place "is this model spawnable locally" is decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelRoute {
@@ -73,7 +73,7 @@ pub struct Verdict {
 }
 
 /// Live ratio-based verdict per §5.2. Does NOT handle
-/// `UNSUPPORTED_ARCHITECTURE` — that's cached separately in state.json and
+/// `UNSUPPORTED_ARCHITECTURE`, which is cached separately in state.json and
 /// overrides this until a force-retry clears it (§5.2/§5.3).
 pub fn compute_ratio_verdict(is_moe: bool, model_size_bytes: u64, budget_bytes: u64) -> Verdict {
     let ratio = budget_bytes as f64 / model_size_bytes.max(1) as f64;
@@ -137,13 +137,13 @@ pub struct ModelState {
     pub mlocked: bool,
     pub last_used: Instant,
     /// `None` for `Cloud` entries: no RAM check ever ran (§5.2 doesn't
-    /// apply — there's no local file to weigh against headroom).
+    /// apply, since there's no local file to weigh against headroom).
     pub verdict: Option<Verdict>,
     pub source: ModelSource,
-    /// The catalog slug nodelm-web expects in the outgoing `model` field
+    /// The catalog slug kiralm-web expects in the outgoing `model` field
     /// when forwarding a chat completion (`CloudModel.id`, e.g.
-    /// `llama-3.1-70b` — nodelm-web/SPEC.md's `/api/v1/chat/completions`
-    /// requires the catalog slug, not the internal `ref`) — distinct
+    /// `llama-3.1-70b`; kiralm-web/SPEC.md's `/api/v1/chat/completions`
+    /// requires the catalog slug, not the internal `ref`). Distinct
     /// from `canonical_id`, which is this daemon's own namespaced id
     /// (§6/Id namespacing). `None` for `Local` entries.
     pub cloud_model_id: Option<String>,
@@ -177,15 +177,15 @@ impl ModelState {
         }
     }
 
-    /// Converts one raw nodelm-web catalog record into a registry entry
+    /// Converts one raw kiralm-web catalog record into a registry entry
     /// (Cloud integration §"Catalog sync"/"Merge into the registry").
     /// Returns `None` for a `kind` this daemon doesn't route chat
-    /// completions through yet — currently `local_pull` rows, which are
-    /// curated `nodelm pull` suggestions, not network-invocable models
-    /// (nodelm-web's own `/api/v1/models` excludes them too).
+    /// completions through yet. Currently `local_pull` rows, which are
+    /// curated `kiralm pull` suggestions, not network-invocable models
+    /// (kiralm-web's own `/api/v1/models` excludes them too).
     pub fn from_cloud_entry(m: &CloudModel) -> Option<ModelState> {
         // Id namespacing (§"Id namespacing"): Workers-AI-hosted models
-        // keep nodelm-web's own `@cf/...` ref under a `workers-ai/`
+        // keep kiralm-web's own `@cf/...` ref under a `workers-ai/`
         // prefix; anything else recognized as cloud-routable falls back
         // to `cloud/<catalog-id>` so future kinds don't collide.
         let canonical_id = match m.kind.as_str() {
@@ -242,7 +242,7 @@ impl ModelRegistry {
 
     /// Wholesale replace of every `Cloud`-sourced entry with a fresh
     /// batch from the latest catalog sync (Cloud integration §"Merge
-    /// into the registry") — local entries are untouched. A single write
+    /// into the registry"). Local entries are untouched. A single write
     /// lock so readers never see a half-swapped set.
     pub fn replace_cloud_entries(&self, entries: Vec<ModelState>) {
         let mut inner = self.inner.write();

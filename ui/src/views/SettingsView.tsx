@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { StatusResponse } from "../api";
 import { formatBytes } from "../format";
 
-const DEFAULT_HOT_KEY = "nodelm.defaultHotOnPull";
+const DEFAULT_HOT_KEY = "kiralm.defaultHotOnPull";
 
 export function SettingsView({ status }: { status: StatusResponse | null }) {
   const [defaultHot, setDefaultHot] = useState(
@@ -24,15 +24,15 @@ export function SettingsView({ status }: { status: StatusResponse | null }) {
       <section className="settings-section">
         <h3>Daemon config</h3>
         <p className="settings-hint">
-          Read from <code>~/.nodelm/config.toml</code>, hand-edited — restart the daemon after
+          Read from <code>~/.kiralm/config.toml</code>, hand-edited. Restart the daemon after
           changing it on disk.
         </p>
         <dl className="detail-grid">
           <dt>RAM headroom</dt>
-          <dd className="mono">{status?.config.ram_headroom_gb ?? "—"} GB</dd>
+          <dd className="mono">{status?.config.ram_headroom_gb ?? "-"} GB</dd>
 
           <dt>Model directory</dt>
-          <dd className="mono">{status?.config.model_dir ?? "—"}</dd>
+          <dd className="mono">{status?.config.model_dir ?? "-"}</dd>
 
           <dt>Total RAM</dt>
           <dd className="mono">{formatBytes(status?.ram.total_bytes)}</dd>
@@ -52,7 +52,7 @@ export function SettingsView({ status }: { status: StatusResponse | null }) {
           Mark newly pulled models Hot by default
         </label>
         <p className="settings-hint">
-          Local UI preference only — applied when you pull a model from the Models tab.
+          Local UI preference only, applied when you pull a model from the Models tab.
         </p>
       </section>
     </div>

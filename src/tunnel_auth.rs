@@ -1,6 +1,6 @@
 //! Bearer-auth middleware for the tunnel listener only (SPEC.md "Remote
 //! tunnel integration" §"Remote-request auth"). `http_listen` and the
-//! Unix socket stay exactly as they were — zero-auth, unchanged — this
+//! Unix socket stay exactly as they were, zero-auth, unchanged. This
 //! module is only ever layered onto the second, tunnel-only router.
 
 use axum::extract::Request;
@@ -10,15 +10,15 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::config::nodelm_home;
+use crate::config::kiralm_home;
 
 fn credentials_path() -> PathBuf {
-    nodelm_home().join("tunnel_credentials.json")
+    kiralm_home().join("tunnel_credentials.json")
 }
 
 /// Per-device tunnel credential, distinct from `CloudCredentials` (which
-/// is nodelm-web's, not this daemon's to gate remote requests with —
-/// see SPEC.md's "Tunnel credential" note). Minted by `nodelm tunnel
+/// is kiralm-web's, not this daemon's to gate remote requests with;
+/// see SPEC.md's "Tunnel credential" note). Minted by `kiralm tunnel
 /// enable` (outside this build's scope); this module only ever reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelCredentials {
@@ -38,7 +38,7 @@ impl TunnelCredentials {
         }
     }
 
-    // ponytail: unused until `nodelm tunnel enable` mints one for real
+    // ponytail: unused until `kiralm tunnel enable` mints one for real
     #[allow(dead_code)]
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&credentials_path())
@@ -58,7 +58,7 @@ impl TunnelCredentials {
     }
 }
 
-/// Byte-for-byte equal in time independent of *where* the mismatch is —
+/// Byte-for-byte equal in time independent of *where* the mismatch is,
 /// no early return on the first differing byte. Lengths differing is not
 /// itself hidden (a fixed-length uuid token makes that leak uninteresting
 /// here), matching the spec's "hand-rolled constant-time loop" allowance.
@@ -76,7 +76,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Pure decision, no I/O: the one thing that actually needs testing.
 /// Kept separate from disk access so tests never touch a shared path
 /// (env-var-based HOME overrides across parallel `cargo test` threads
-/// is a real hazard — `std::env::set_var` mutates process-global state
+/// is a real hazard: `std::env::set_var` mutates process-global state
 /// every test binary thread can read, poisoning unrelated tests on a
 /// panic; this sidesteps it entirely instead of trying to serialize it).
 fn is_valid_bearer(provided: Option<&str>, creds: Option<&TunnelCredentials>) -> bool {
@@ -99,7 +99,7 @@ fn unauthorized_response(path: &str) -> Response {
 /// `run_serve`). Missing/non-matching bearer -> 401 in the same shape
 /// `GatewayError::AuthRequired` already uses on each surface, before any
 /// handler runs. No credential on disk (tunnel never enabled) means every
-/// request is rejected — there is nothing valid to match against.
+/// request is rejected, since there is nothing valid to match against.
 pub async fn require_tunnel_bearer(req: Request, next: Next) -> Response {
     let provided = req
         .headers()
@@ -165,7 +165,7 @@ mod tests {
     // mutation, no shared global state, safe under parallel test threads.
     #[test]
     fn credentials_round_trip_to_disk() {
-        let dir = std::env::temp_dir().join(format!("nodelm-tunnel-creds-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kiralm-tunnel-creds-{}", uuid::Uuid::new_v4()));
         let path = dir.join("tunnel_credentials.json");
         let creds = TunnelCredentials { token: "round-trip-token".into() };
         creds.save_to(&path).unwrap();
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn load_from_missing_path_is_none_not_error() {
-        let path = std::env::temp_dir().join(format!("nodelm-tunnel-creds-missing-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("kiralm-tunnel-creds-missing-{}", uuid::Uuid::new_v4()));
         assert!(TunnelCredentials::load_from(&path).unwrap().is_none());
     }
 

@@ -1,14 +1,14 @@
-//! `~/.nodelm/state.json` (daemon-owned, atomic rewrite) and the
+//! `~/.kiralm/state.json` (daemon-owned, atomic rewrite) and the
 //! `<file>.gguf.json` manifest sidecars (§3).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::config::nodelm_home;
+use crate::config::kiralm_home;
 
 pub fn state_path() -> PathBuf {
-    nodelm_home().join("state.json")
+    kiralm_home().join("state.json")
 }
 
 /// One GGUF's manifest sidecar, written once at pull time, immutable.
@@ -46,7 +46,7 @@ impl ModelManifest {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    /// Manifest sidecars are immutable once written (§3) — write is only
+    /// Manifest sidecars are immutable once written (§3). Write is only
     /// ever called once, at pull time.
     pub fn write(&self, gguf_path: &Path) -> anyhow::Result<()> {
         let path = Self::sidecar_path_for(gguf_path);
@@ -91,9 +91,9 @@ pub struct ModelEntry {
     pub verdict_cache: Option<VerdictCache>,
 }
 
-/// Daemon-owned tunnel runtime state (§"Tunnel client (daemon)") — the
+/// Daemon-owned tunnel runtime state (§"Tunnel client (daemon)"). The
 /// raw Cloudflare token lives separately in `tunnel_token.json` (a
-/// secret, not status); this is just enough to report `nodelm tunnel
+/// secret, not status); this is just enough to report `kiralm tunnel
 /// status` and know whether to re-spawn `cloudflared` on daemon restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelState {

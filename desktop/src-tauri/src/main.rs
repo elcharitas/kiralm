@@ -12,20 +12,20 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
 
-/// Same shape/defaults as the daemon's own `~/.nodelm/config.toml`
+/// Same shape/defaults as the daemon's own `~/.kiralm/config.toml`
 /// (src/config.rs) -- only the one field this shell needs.
 #[derive(Deserialize, Default)]
 struct RawConfig {
     http_listen: Option<String>,
 }
 
-fn nodelm_home() -> PathBuf {
-    dirs::home_dir().expect("no home directory found").join(".nodelm")
+fn kiralm_home() -> PathBuf {
+    dirs::home_dir().expect("no home directory found").join(".kiralm")
 }
 
 /// Reads the daemon's configured address, same default it uses.
 fn read_http_listen() -> String {
-    let path = nodelm_home().join("config.toml");
+    let path = kiralm_home().join("config.toml");
     let raw: RawConfig = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
@@ -56,11 +56,11 @@ fn main() {
             if !is_listening(&addr) {
                 let (_rx, child) = app
                     .shell()
-                    .sidecar("nodelm")
-                    .expect("failed to resolve nodelm sidecar")
+                    .sidecar("kiralm")
+                    .expect("failed to resolve kiralm sidecar")
                     .args(["serve"])
                     .spawn()
-                    .expect("failed to spawn nodelm daemon");
+                    .expect("failed to spawn kiralm daemon");
                 app.state::<Mutex<AppState>>().lock().unwrap().child = Some(child);
 
                 // Poll for readiness, same 50x100ms budget as the CLI's
@@ -77,7 +77,7 @@ fn main() {
 
             let url = format!("http://{addr}");
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
-                .title("NodeLM")
+                .title("KiraLM")
                 .inner_size(1100.0, 760.0)
                 .build()?;
 
@@ -93,12 +93,12 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running nodelm desktop shell");
+        .expect("error while running kiralm desktop shell");
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show NodeLM", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, "hide", "Hide NodeLM", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show KiraLM", true, None::<&str>)?;
+    let hide = MenuItem::with_id(app, "hide", "Hide KiraLM", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &quit])?;
 

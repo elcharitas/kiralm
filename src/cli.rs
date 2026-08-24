@@ -1,5 +1,5 @@
 //! Subcommand handlers (§7). Every subcommand other than `serve` is a
-//! thin HTTP client over `~/.nodelm/nodelm.sock`, auto-spawning the
+//! thin HTTP client over `~/.kiralm/kiralm.sock`, auto-spawning the
 //! daemon if the socket isn't live.
 
 use http_body_util::{BodyExt, Full};
@@ -10,7 +10,7 @@ use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 use std::io::Write;
 use std::time::Duration;
 
-use crate::config::{nodelm_home, Config};
+use crate::config::{kiralm_home, Config};
 
 type UnixClient = Client<UnixConnector, Full<Bytes>>;
 
@@ -97,16 +97,16 @@ async fn stream_sse(
     Ok(())
 }
 
-/// Spawns `nodelm serve` detached (setsid, own session, so it survives
-/// the CLI exiting), redirected to `~/.nodelm/nodelm.log`, then polls
+/// Spawns `kiralm serve` detached (setsid, own session, so it survives
+/// the CLI exiting), redirected to `~/.kiralm/kiralm.log`, then polls
 /// the socket for readiness (§7 closing paragraph).
 async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
     if tokio::net::UnixStream::connect(&config.unix_socket).await.is_ok() {
         return Ok(());
     }
 
-    std::fs::create_dir_all(nodelm_home())?;
-    let log_path = nodelm_home().join("nodelm.log");
+    std::fs::create_dir_all(kiralm_home())?;
+    let log_path = kiralm_home().join("kiralm.log");
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -142,7 +142,7 @@ async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     anyhow::bail!(
-        "nodelm serve did not come up in time; check log at {}",
+        "kiralm serve did not come up in time; check log at {}",
         log_path.display()
     )
 }
@@ -239,8 +239,8 @@ pub async fn list(config: &Config) -> anyhow::Result<()> {
     for m in body["models"].as_array().cloned().unwrap_or_default() {
         let is_cloud = m["source"].as_str() == Some("cloud");
         // Cloud rows have no RAM verdict and no local hot/cold state
-        // (SPEC.md's Cloud integration §"GET /v1/models and nodelm
-        // list") — print "-" rather than routing through a value that
+        // (SPEC.md's Cloud integration §"GET /v1/models and kiralm
+        // list"). Print "-" rather than routing through a value that
         // was never computed for them.
         let verdict = if is_cloud { "-".to_string() } else { m["verdict"].as_str().unwrap_or("").to_string() };
         let hot = if is_cloud { "-".to_string() } else { m["hot"].as_bool().unwrap_or(false).to_string() };
@@ -362,8 +362,8 @@ pub async fn tunnel_status(config: &Config) -> anyhow::Result<()> {
         println!("Tunnel enabled, connected: https://{hostname}");
     } else {
         println!(
-            "Tunnel enabled but cloudflared is not running (crashed?) — \
-             try 'nodelm tunnel disable' then 'enable'"
+            "Tunnel enabled but cloudflared is not running (crashed?). \
+             try 'kiralm tunnel disable' then 'enable'"
         );
     }
     Ok(())

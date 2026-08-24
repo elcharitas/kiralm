@@ -17,7 +17,7 @@ export function HotToggle({
         e.stopPropagation();
         onChange(!on);
       }}
-      title={on ? "Hot — pinned resident, mlocked" : "Cold — loaded on demand"}
+      title={on ? "Hot, pinned resident, mlocked" : "Cold, loaded on demand"}
     >
       <span className="hot-toggle-dot" />
       {on ? "Hot" : "Cold"}

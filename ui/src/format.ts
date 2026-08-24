@@ -1,5 +1,5 @@
 export function formatBytes(bytes: number | null | undefined): string {
-  if (bytes == null) return "—";
+  if (bytes == null) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let n = bytes;
   let i = 0;

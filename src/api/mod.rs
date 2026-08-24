@@ -27,10 +27,10 @@ pub struct AppState {
     /// In-flight pulls, keyed by canonical id, for SSE progress fan-out.
     pub pulls: RwLock<HashMap<String, ProgressTx>>,
     /// In-flight cloud logins, keyed by device_code, for SSE progress
-    /// fan-out — same pattern as `pulls` above.
+    /// fan-out, same pattern as `pulls` above.
     pub logins: RwLock<HashMap<String, LoginProgressTx>>,
     /// The supervised `cloudflared` child, if the tunnel is currently
-    /// running (§"Tunnel client (daemon)") — in-memory only, like
+    /// running (§"Tunnel client (daemon)"), in-memory only, like
     /// `ensure_loaded`'s reaper task; `state.tunnel` is the persisted
     /// on/off record that survives a restart.
     pub tunnel_child: parking_lot::Mutex<Option<tokio::process::Child>>,
@@ -78,7 +78,7 @@ impl AppState {
 pub type SharedState = Arc<AppState>;
 
 /// (Re)builds a manifest's `ModelState` and inserts it into the live
-/// registry — used both at `serve` startup (one pass over every manifest
+/// registry. Used both at `serve` startup (one pass over every manifest
 /// on disk) and right after a pull completes (§8), so a freshly-pulled
 /// model is loadable without a daemon restart.
 pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
@@ -131,7 +131,7 @@ pub fn resolve_model(app: &SharedState, name: &str) -> Option<String> {
 }
 
 pub enum GatewayError {
-    /// Cached-unsupported architecture (§5.2/§5.3) — permanent, 4xx on
+    /// Cached-unsupported architecture (§5.2/§5.3). Permanent, 4xx on
     /// both surfaces, carries the real cached llama.cpp error text.
     CachedUnsupported(String),
     /// Won't fit even after evicting eligible cold models (§5.4).
@@ -146,11 +146,11 @@ pub enum GatewayError {
 
 /// Ensures `canonical_id` has a live `llama-server` child, spawning one
 /// synchronously if cold (admission control per §5.4 applies), and
-/// returns its port. Reuses an already-loaded child on repeat calls —
+/// returns its port. Reuses an already-loaded child on repeat calls,
 /// this is what keeps the model resident across requests (goal #2).
 ///
 /// STUB NOTE: no LRU eviction of cold models to make room, and no
-/// automatic-flag matrix beyond the always-on set (§4.3) — see
+/// automatic-flag matrix beyond the always-on set (§4.3). See
 /// engine.rs's module note. The owning residency agent should extend
 /// this rather than replace it wholesale; the admission math and
 /// registry bookkeeping here are real.
@@ -161,10 +161,10 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
         )));
     };
 
-    // Cloud entries never spawn a local child — this is the one and
+    // Cloud entries never spawn a local child. This is the one and
     // only place "is this model spawnable locally" is decided (Cloud
     // integration §"Routing choke point"). No admission check, no
-    // health poll: nodelm-web owns that model's residency, not us.
+    // health poll: kiralm-web owns that model's residency, not us.
     if existing.source == ModelSource::Cloud {
         return Ok(ModelRoute::Cloud);
     }
@@ -187,7 +187,7 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
 
     let ram = residency::read_ram_info();
     let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
-    // Cloud entries are always `Loaded` but occupy zero local RAM — the
+    // Cloud entries are always `Loaded` but occupy zero local RAM. The
     // admission budget only ever tracks locally-spawned children.
     let loaded_bytes: u64 = app
         .registry
@@ -254,9 +254,9 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
     // Detach: `kill_on_drop(true)` means simply letting `child` fall out
     // of scope here would kill the server we just started, and
     // `mem::forget` would leak a zombie once it exits. Instead hand it
-    // to a reaper task that just waits (never kills) — the registry only
+    // to a reaper task that just waits (never kills). The registry only
     // tracks the pid, which is enough for `DELETE`'s graceful-kill path.
-    // No supervising/restart task yet — see module STUB NOTE.
+    // No supervising/restart task yet. See module STUB NOTE.
     tokio::spawn(async move {
         let _ = child.wait().await;
     });

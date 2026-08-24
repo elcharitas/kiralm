@@ -1,7 +1,7 @@
 //! Admission control, headroom math, RSS watcher (§5).
 //!
 //! STUB NOTE: LRU eviction and the 5s-tick background RSS watcher (§5.4
-//! "Ongoing") are not implemented here — this worktree only needed the
+//! "Ongoing") are not implemented here. This worktree only needed the
 //! pre-spawn admission check for the pull load-verification pass (§8) and
 //! for `serve` to wire something real at startup. Whichever agent owns the
 //! full residency manager should replace `AdmissionState` with the real
@@ -15,7 +15,7 @@ pub struct RamInfo {
     pub available_bytes: u64,
 }
 
-/// Reads live RAM info. `.available_memory()`, not `.free_memory()` — it
+/// Reads live RAM info. `.available_memory()`, not `.free_memory()`, since it
 /// already accounts for reclaimable OS cache (§5.1).
 // ponytail: sysinfo 0.32 reliably returns 0 for available_memory() on
 // some macOS setups (reproduced here) -- fall back to free_memory(),

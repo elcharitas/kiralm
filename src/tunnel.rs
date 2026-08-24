@@ -1,13 +1,13 @@
 //! `cloudflared` detection, spawn/health-check/shutdown, and backend
 //! provisioning (SPEC.md "Remote tunnel (Cloudflare Tunnel) integration"
 //! §"Tunnel client (daemon)"). Mirrors `engine.rs`'s shape one-for-one
-//! rather than reinventing process supervision — shutdown reuses
+//! rather than reinventing process supervision, since shutdown reuses
 //! `engine::shutdown` verbatim.
 //!
-//! STUB NOTE: `provision()` below calls nodelm-web's real
-//! `POST /api/account/tunnel` shape (nodelm-web SPEC.md §12), but no live
+//! STUB NOTE: `provision()` below calls kiralm-web's real
+//! `POST /api/account/tunnel` shape (kiralm-web SPEC.md §12), but no live
 //! Cloudflare account was available to exercise it end to end in this
-//! build — same disclosure standard already used for the BYOK provider
+//! build, using the same disclosure standard already used for the BYOK provider
 //! lanes. `detect()`/`spawn()`/`check_connectivity()`/shutdown are all
 //! real and exercised against whatever `cloudflared` (if any) is on this
 //! machine.
@@ -19,9 +19,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
-use crate::config::{nodelm_home, Config};
+use crate::config::{kiralm_home, Config};
 
-/// `cloudflared --version` presence check (§"Binary") — fails fast with
+/// `cloudflared --version` presence check (§"Binary"). Fails fast with
 /// an install hint instead of letting `spawn()`'s raw `ENOENT` leak out.
 pub fn detect(cloudflared_bin: &str) -> anyhow::Result<()> {
     std::process::Command::new(cloudflared_bin)
@@ -29,7 +29,7 @@ pub fn detect(cloudflared_bin: &str) -> anyhow::Result<()> {
         .output()
         .map_err(|_| {
             anyhow::anyhow!(
-                "cloudflared not found at {cloudflared_bin} — brew install cloudflared, \
+                "cloudflared not found at {cloudflared_bin}. Install it via 'brew install cloudflared', \
                  or set tunnel.cloudflared_bin"
             )
         })?;
@@ -37,12 +37,12 @@ pub fn detect(cloudflared_bin: &str) -> anyhow::Result<()> {
 }
 
 fn log_path() -> PathBuf {
-    nodelm_home().join("logs").join("tunnel.log")
+    kiralm_home().join("logs").join("tunnel.log")
 }
 
-/// Spawns `cloudflared tunnel run --token <token>` — Cloudflare's real
+/// Spawns `cloudflared tunnel run --token <token>`, Cloudflare's real
 /// remotely-managed-tunnel invocation. `token` is the opaque base64
-/// credentials blob nodelm-web's provisioning endpoint returns; this
+/// credentials blob kiralm-web's provisioning endpoint returns; this
 /// daemon never parses it, only passes it through (§"Process supervision").
 pub async fn spawn(cloudflared_bin: &str, token: &str) -> anyhow::Result<Child> {
     let path = log_path();
@@ -68,8 +68,8 @@ pub fn is_alive(child: &mut Child) -> bool {
 }
 
 /// Best-effort `GET http://127.0.0.1:20241/ready` (cloudflared's default
-/// metrics port) with a 1s timeout, used by `nodelm tunnel status` on top
-/// of `is_alive` — falls back to "unconfirmed" rather than blocking if
+/// metrics port) with a 1s timeout, used by `kiralm tunnel status` on top
+/// of `is_alive`. Falls back to "unconfirmed" rather than blocking if
 /// that port doesn't answer. This exact port number is unverified against
 /// a real `cloudflared` install in this build (§"Health check").
 pub async fn check_connectivity() -> bool {
@@ -89,7 +89,7 @@ pub async fn check_connectivity() -> bool {
 // ---------------------------------------------------------------------
 
 /// `POST {api_base_url}/api/account/tunnel`'s 201 shape, verbatim
-/// (nodelm-web SPEC.md §12).
+/// (kiralm-web SPEC.md §12).
 #[derive(Debug, Deserialize)]
 pub struct Provisioned {
     #[allow(dead_code)] // not read yet; kept for parity with the wire shape
@@ -99,10 +99,10 @@ pub struct Provisioned {
     pub token: String,
 }
 
-/// Calls nodelm-web to provision a real Cloudflare Tunnel for this
+/// Calls kiralm-web to provision a real Cloudflare Tunnel for this
 /// device, bearer-authed with the same cloud login token cloud-model
 /// routing already uses (§"Tunnel provisioning"). Unverified against a
-/// live backend/Cloudflare account — see module STUB NOTE.
+/// live backend/Cloudflare account. See module STUB NOTE.
 pub async fn provision(config: &Config) -> anyhow::Result<Provisioned> {
     let token = crate::cloud::ensure_token()?;
     let client = reqwest::Client::builder()
@@ -125,7 +125,7 @@ pub async fn provision(config: &Config) -> anyhow::Result<Provisioned> {
 // ---------------------------------------------------------------------
 
 fn tunnel_token_path() -> PathBuf {
-    nodelm_home().join("tunnel_token.json")
+    kiralm_home().join("tunnel_token.json")
 }
 
 /// The raw Cloudflare tunnel token `provision()` returns, persisted 0600
@@ -172,25 +172,25 @@ mod tests {
         assert!(err.to_string().contains("cloudflared not found"));
     }
 
-    /// Guards the provisioning response shape against nodelm-web SPEC.md
-    /// §12 drift — this daemon must deserialize it byte-for-byte.
+    /// Guards the provisioning response shape against kiralm-web SPEC.md
+    /// §12 drift. This daemon must deserialize it byte-for-byte.
     #[test]
     fn provisioned_deserializes_post_account_tunnel_shape() {
-        let raw = r#"{"tunnel_id":"t1","cf_tunnel_id":"cf-uuid","hostname":"x-abcd1234.tunnels.nodelm.dev","tunnel_status":"pending","token":"base64blob"}"#;
+        let raw = r#"{"tunnel_id":"t1","cf_tunnel_id":"cf-uuid","hostname":"x-abcd1234.tunnels.kiralm.dev","tunnel_status":"pending","token":"base64blob"}"#;
         let p: Provisioned = serde_json::from_str(raw).unwrap();
         assert_eq!(p.cf_tunnel_id, "cf-uuid");
-        assert_eq!(p.hostname, "x-abcd1234.tunnels.nodelm.dev");
+        assert_eq!(p.hostname, "x-abcd1234.tunnels.kiralm.dev");
         assert_eq!(p.token, "base64blob");
     }
 
     // `TunnelToken` resolves its path off the process-global `HOME` env
-    // var, same caveat `tunnel_auth`'s tests document — one at a time.
+    // var, same caveat `tunnel_auth`'s tests document, so run one at a time.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn tunnel_token_round_trips_with_owner_only_perms() {
         let _guard = HOME_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("nodelm-tunnel-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("kiralm-tunnel-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("HOME", &dir);
 

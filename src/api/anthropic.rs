@@ -1,6 +1,6 @@
 //! Anthropic-compatible `POST /v1/messages` (SPEC.md §2.2). Real
 //! translation to/from the OpenAI chat-completion shape (`api/openai.rs`)
-//! that a `llama-server` child speaks, not a byte passthrough — request and
+//! that a `llama-server` child speaks, not a byte passthrough. Request and
 //! response schemas differ entirely, and streaming needs a stateful
 //! event-by-event translator.
 
@@ -127,7 +127,7 @@ pub(crate) fn anthropic_error(status: StatusCode, kind: &'static str, message: i
     (status, Json(body)).into_response()
 }
 
-/// Maps a `GatewayError` to its Anthropic-shaped response — the one
+/// Maps a `GatewayError` to its Anthropic-shaped response. The one
 /// place this happens, so `AuthRequired` (raised both by `ensure_loaded`
 /// and, after routing, by the cloud forward step) gets identical
 /// treatment either way.
@@ -296,9 +296,9 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
 
     let http = reqwest::Client::new();
     // Same routing branch as `/v1/chat/completions` (§"/v1/chat/
-    // completions routing for cloud-sourced models" — the translator
+    // completions routing for cloud-sourced models"). The translator
     // below doesn't know or care whether the child is local or cloud,
-    // only that `ensure_loaded` handed it a route to call).
+    // only that `ensure_loaded` handed it a route to call.
     let (url, bearer, openai_req) = match route {
         ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, openai_req),
         ModelRoute::Cloud => {
@@ -312,7 +312,7 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
                 .and_then(|ms| ms.cloud_model_id)
                 .unwrap_or_else(|| canonical_id.clone());
             let mut req = openai_req;
-            req.model = cloud_model_id; // nodelm-web expects the catalog slug, not our alias
+            req.model = cloud_model_id; // kiralm-web expects the catalog slug, not our alias
             (
                 format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
                 Some(token),
@@ -351,7 +351,7 @@ async fn non_stream_messages(
     };
     if bearer.is_some() && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return gateway_error_response(GatewayError::AuthRequired(
-            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+            "cloud login expired or revoked. run 'kiralm login' again".to_string(),
         ));
     }
     if !resp.status().is_success() {
@@ -428,7 +428,7 @@ async fn stream_messages(
     };
     if bearer.is_some() && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return gateway_error_response(GatewayError::AuthRequired(
-            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+            "cloud login expired or revoked. run 'kiralm login' again".to_string(),
         ));
     }
     if !resp.status().is_success() {
@@ -578,7 +578,7 @@ mod tests {
     /// lookup (which reads the sidecar off disk) resolves for real.
     fn register_test_model(app: &SharedState, canonical_id: &str, alias: &str, vision_capable: bool) {
         let gguf_path = std::env::temp_dir().join(format!(
-            "nodelm-test-{}-{}.gguf",
+            "kiralm-test-{}-{}.gguf",
             canonical_id.replace(['/', ':'], "_"),
             uuid::Uuid::new_v4()
         ));

@@ -1,4 +1,4 @@
-//! `/api/*` routes — mirrors the CLI subcommand set plus what the UI
+//! `/api/*` routes. Mirrors the CLI subcommand set plus what the UI
 //! needs (§2.5).
 
 use axum::extract::{Path, Query, State};
@@ -14,9 +14,9 @@ use serde_json::json;
 use std::convert::Infallible;
 
 /// The built UI (`ui/dist/`), embedded at compile time (§2, SPEC's UI
-/// section) — run `npm run build` in `ui/` before building the daemon.
+/// section). Run `npm run build` in `ui/` before building the daemon.
 // ponytail: cargo won't notice ui/dist/ changes on its own (no
-// rerun-if-changed) -- touch this file or `cargo clean -p nodelm`
+// rerun-if-changed) -- touch this file or `cargo clean -p kiralm`
 // after rebuilding the UI. Add a build.rs if this bites often.
 #[derive(RustEmbed)]
 #[folder = "ui/dist/"]
@@ -105,7 +105,7 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
 /// The "merged-catalog read path" (Cloud integration §"Catalog sync"):
 /// always serves the current registry immediately, but kicks off a
 /// background re-fetch if the cache is older than
-/// `catalog_sync_interval_secs` — the on-demand half of the sync
+/// `catalog_sync_interval_secs`, the on-demand half of the sync
 /// trigger, sibling to the one-shot startup fetch in `main.rs`.
 fn maybe_refresh_cloud_models(app: &SharedState) {
     let stale = match cloud::cache_age_secs() {
@@ -180,7 +180,7 @@ async fn start_pull(State(app): State<SharedState>, Json(body): Json<PullRequest
         match crate::pull::download_and_verify(&resolved, &config, &app_for_task.state, Some(tx.clone())).await {
             Ok(()) => {
                 // Load-verification may still have found the model
-                // unsupported — that's still success from the pipeline's
+                // unsupported. That's still success from the pipeline's
                 // point of view (§8 closing note), so register it either
                 // way: a fresh manifest now exists on disk for it.
                 if let Ok(manifest) =
@@ -241,7 +241,7 @@ async fn set_hot(
 
     if body.on {
         // Admission check against the sum of all *hot* models' sizes
-        // (§5.4) — this is what makes "hot models are never evicted"
+        // (§5.4). This is what makes "hot models are never evicted"
         // safe without discovering the overrun later at eviction time.
         let ram = residency::read_ram_info();
         let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
@@ -305,7 +305,7 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
         return err(StatusCode::NOT_FOUND, format!("model '{id}' not found"));
     };
 
-    // Unload if running (SIGTERM/SIGKILL per §4.4), by pid — this stub
+    // Unload if running (SIGTERM/SIGKILL per §4.4), by pid. This stub
     // registry doesn't hold the tokio::process::Child handle, only the
     // pid, which is enough to signal it directly.
     if let (ModelStatus::Loaded, Some(pid)) = (&ms.status, ms.pid) {
@@ -338,7 +338,7 @@ async fn cloud_status(State(_app): State<SharedState>) -> Json<serde_json::Value
 
 /// Starts the device flow: the code/URL request is fast and synchronous
 /// so the response can carry it immediately, then the slow
-/// approve-and-poll half runs in a background task — same
+/// approve-and-poll half runs in a background task, the same
 /// resolve()-now/download_and_verify()-in-background split `start_pull`
 /// uses.
 async fn cloud_login(State(app): State<SharedState>) -> Response {

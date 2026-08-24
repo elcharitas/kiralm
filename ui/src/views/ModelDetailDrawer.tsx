@@ -43,7 +43,7 @@ export function ModelDetailDrawer({ id, onClose }: { id: string; onClose: () => 
               <dt>Mixture-of-Experts</dt>
               <dd>
                 {manifest.is_moe
-                  ? `yes — ${manifest.expert_count?.active}/${manifest.expert_count?.total} active`
+                  ? `yes: ${manifest.expert_count?.active}/${manifest.expert_count?.total} active`
                   : "no (dense)"}
               </dd>
 
@@ -71,9 +71,9 @@ export function ModelDetailDrawer({ id, onClose }: { id: string; onClose: () => 
               <dd>{formatRelativeTime(manifest.last_used)}</dd>
 
               <dt>mlock</dt>
-              <dd>{manifest.hot ? "locked (hot)" : "not locked — toggle Hot to pin"}</dd>
+              <dd>{manifest.hot ? "locked (hot)" : "not locked, toggle Hot to pin"}</dd>
             </dl>
-            {/* context-size override has no /api write route yet in SPEC — add when one lands */}
+            {/* context-size override has no /api write route yet in SPEC, add when one lands */}
           </div>
         )}
       </aside>

@@ -3,7 +3,7 @@
 //!
 //! STUB NOTE: this worktree only needed enough of the engine to run the
 //! pull load-verification pass (§8 step 4) and to give `serve` something
-//! real to construct. The full automatic-flag matrix (§4.3 — MoE expert
+//! real to construct. The full automatic-flag matrix (§4.3, MoE expert
 //! offload, KV cache quant tiering, context-size-vs-remaining-RAM sizing,
 //! `-md` draft pairing) and the steady-state health/RSS watcher (§4.4
 //! "while loaded") belong to whichever agent owns residency's runtime
@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
-use crate::config::nodelm_home;
+use crate::config::kiralm_home;
 
 /// `llama-server --version`'s output, used to key the verdict cache
 /// (§3/§5.2) so an engine upgrade invalidates stale `unsupported` tags.
@@ -37,7 +37,7 @@ pub fn log_path_for(canonical_id: &str) -> PathBuf {
     let mut hasher = Sha1::new();
     hasher.update(canonical_id.as_bytes());
     let digest = hex::encode(hasher.finalize());
-    nodelm_home().join("logs").join(format!("{digest}.log"))
+    kiralm_home().join("logs").join(format!("{digest}.log"))
 }
 
 /// Finds a free port in `range` (inclusive), bind-retrying past ports
@@ -57,7 +57,7 @@ pub fn allocate_port(range: (u16, u16)) -> anyhow::Result<u16> {
 
 /// Always-on flags per §4.3. The RAM/MoE/hot-conditional flags (offload,
 /// ctx sizing, ctk/ctv, --mlock, -md) are the fuller residency manager's
-/// job — see module STUB NOTE.
+/// job. See module STUB NOTE.
 fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
     vec![
         "-m".to_string(),
@@ -72,7 +72,7 @@ fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
 }
 
 /// Spawns `llama-server`, piping stdout/stderr to
-/// `~/.nodelm/logs/<sha1(canonical_id)>.log` (never the daemon's own
+/// `~/.kiralm/logs/<sha1(canonical_id)>.log` (never the daemon's own
 /// stdout, §4.4).
 pub async fn spawn(
     llama_bin: &str,
@@ -128,7 +128,7 @@ pub async fn send_tiny_completion(port: u16) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
     let body = serde_json::json!({
-        "model": "nodelm-load-verify",
+        "model": "kiralm-load-verify",
         "messages": [{"role": "user", "content": "hi"}],
         "max_tokens": 1,
         "stream": false,

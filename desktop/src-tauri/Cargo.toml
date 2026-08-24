@@ -1,7 +1,7 @@
 [package]
-name = "nodelm-desktop"
+name = "kiralm-desktop"
 version = "0.1.0"
-description = "NodeLM desktop shell"
+description = "KiraLM desktop shell"
 edition = "2021"
 
 [build-dependencies]

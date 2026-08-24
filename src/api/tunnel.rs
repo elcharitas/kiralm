@@ -1,5 +1,5 @@
-//! `/api/tunnel/*` — daemon-owned `cloudflared` supervision, called by
-//! the `nodelm tunnel` CLI subcommands over the local socket (SPEC.md
+//! `/api/tunnel/*`, daemon-owned `cloudflared` supervision, called by
+//! the `kiralm tunnel` CLI subcommands over the local socket (SPEC.md
 //! "Remote tunnel (Cloudflare Tunnel) integration" §"Tunnel client
 //! (daemon)").
 
@@ -25,14 +25,14 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({"error": message.into()}))).into_response()
 }
 
-/// `nodelm tunnel enable`: detect the binary, provision (or reuse a
+/// `kiralm tunnel enable`: detect the binary, provision (or reuse a
 /// stored token from a prior `enable`), spawn, mint the local bearer
 /// credential if none exists yet, persist state.
 async fn enable(State(app): State<SharedState>) -> Response {
     if app.state.read().tunnel.as_ref().is_some_and(|t| t.enabled) {
         return err(
             StatusCode::BAD_REQUEST,
-            "tunnel already enabled — run 'nodelm tunnel disable' first",
+            "tunnel already enabled, run 'kiralm tunnel disable' first",
         );
     }
     if let Err(e) = tunnel::detect(&app.config.tunnel.cloudflared_bin) {
@@ -40,8 +40,8 @@ async fn enable(State(app): State<SharedState>) -> Response {
     }
 
     // A `disable` leaves the provisioned Cloudflare tunnel + its token in
-    // place (§"Tunnel client (daemon)" CLI table) — re-enabling reuses
-    // both rather than round-tripping nodelm-web/Cloudflare again.
+    // place (§"Tunnel client (daemon)" CLI table). Re-enabling reuses
+    // both rather than round-tripping kiralm-web/Cloudflare again.
     let prior = app.state.read().tunnel.clone();
     let (cf_token, hostname, cf_tunnel_id) = match (tunnel::TunnelToken::load(), prior) {
         (Ok(Some(stored)), Some(prev)) => (stored.token, prev.hostname, prev.cf_tunnel_id),
@@ -87,7 +87,7 @@ async fn enable(State(app): State<SharedState>) -> Response {
     Json(json!({"hostname": hostname})).into_response()
 }
 
-/// `nodelm tunnel disable`: kills the supervised child (`engine::shutdown`
+/// `kiralm tunnel disable`: kills the supervised child (`engine::shutdown`
 /// verbatim) and flips `state.tunnel.enabled = false`. The backend-side
 /// Cloudflare resource and the stored token are left alone.
 async fn disable(State(app): State<SharedState>) -> Response {
@@ -109,8 +109,8 @@ async fn disable(State(app): State<SharedState>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `nodelm tunnel status`: cross-checks persisted state against the live
-/// child (§"Health check" — process-alive) plus a best-effort
+/// `kiralm tunnel status`: cross-checks persisted state against the live
+/// child (§"Health check", process-alive) plus a best-effort
 /// connectivity probe.
 async fn status(State(app): State<SharedState>) -> Response {
     let Some(t) = app.state.read().tunnel.clone() else {
@@ -140,9 +140,9 @@ async fn status(State(app): State<SharedState>) -> Response {
 }
 
 /// Re-spawns `cloudflared` on daemon startup if `state.json` says the
-/// tunnel was left enabled (§"Daemon-restart behavior") — no new
+/// tunnel was left enabled (§"Daemon-restart behavior"). No new
 /// Cloudflare API call. A failed re-spawn (missing binary, revoked
-/// token) just warns and leaves `enabled = true` so `nodelm tunnel
+/// token) just warns and leaves `enabled = true` so `kiralm tunnel
 /// status` reports the crash honestly instead of silently flipping off.
 pub async fn respawn_if_enabled(app: &SharedState) {
     let enabled = app.state.read().tunnel.as_ref().is_some_and(|t| t.enabled);
@@ -157,8 +157,8 @@ pub async fn respawn_if_enabled(app: &SharedState) {
         Ok(Some(t)) => t,
         Ok(None) => {
             tracing::warn!(
-                "tunnel: state.json says enabled but no stored token was found — \
-                 try 'nodelm tunnel disable' then 'enable'"
+                "tunnel: state.json says enabled but no stored token was found. \
+                 try 'kiralm tunnel disable' then 'enable'"
             );
             return;
         }

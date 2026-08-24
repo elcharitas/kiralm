@@ -1,4 +1,4 @@
-//! `nodelm` binary entry point: arg parse -> dispatch to `cli.rs` or the
+//! `kiralm` binary entry point: arg parse -> dispatch to `cli.rs` or the
 //! `serve` daemon (§1, §7).
 
 mod api;
@@ -27,7 +27,7 @@ use crate::registry::ModelRegistry;
 use crate::state::{ModelManifest, State};
 
 #[derive(Parser)]
-#[command(name = "nodelm", about = "Local AI inference gateway")]
+#[command(name = "kiralm", about = "Local AI inference gateway")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -56,7 +56,7 @@ enum Command {
     Hot { name: String, state: String },
     /// Delete a downloaded model.
     Rm { name: String },
-    /// Device-flow login against nodelm-web, for cloud models.
+    /// Device-flow login against kiralm-web, for cloud models.
     Login,
     /// Deletes stored cloud credentials.
     Logout,
@@ -136,11 +136,11 @@ fn repl_prompt() -> anyhow::Result<String> {
 /// Wires the daemon together: loads state + manifests into the registry,
 /// then serves the OpenAI/Anthropic/internal API on both listeners (§2).
 async fn run_serve(config: Config) -> anyhow::Result<()> {
-    let home = config::nodelm_home();
+    let home = config::kiralm_home();
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&config.model_dir)?;
     std::fs::create_dir_all(home.join("logs"))?;
-    std::fs::write(home.join("nodelm.pid"), std::process::id().to_string())?;
+    std::fs::write(home.join("kiralm.pid"), std::process::id().to_string())?;
 
     let state = State::load()?;
 
@@ -171,15 +171,15 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     }
     let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
 
-    // Third listener, bearer-checked (SPEC.md "Remote-request auth") —
+    // Third listener, bearer-checked (SPEC.md "Remote-request auth"),
     // the only thing `cloudflared`'s tunnel ingress ever points at.
     // Bound unconditionally, same as `http_listen`; nothing reaches it
-    // from the public internet until `nodelm tunnel enable` configures
+    // from the public internet until `kiralm tunnel enable` configures
     // the tunnel's ingress to target this port.
     let tunnel_listener = tokio::net::TcpListener::bind(&config.tunnel.listen).await?;
 
     tracing::info!(
-        "nodelm serving on {}, {} (unix), and {} (tunnel, bearer-checked)",
+        "kiralm serving on {}, {} (unix), and {} (tunnel, bearer-checked)",
         config.http_listen,
         config.unix_socket.display(),
         config.tunnel.listen
@@ -202,12 +202,12 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     let unix_task = tokio::spawn(serve_unix(unix_listener, router));
 
     // Re-spawn `cloudflared` if it was left enabled across a restart
-    // (§"Daemon-restart behavior") — after listeners are already bound,
+    // (§"Daemon-restart behavior"), after listeners are already bound,
     // same ordering catalog-sync-at-boot uses.
     api::tunnel::respawn_if_enabled(&app_state_for_tunnel).await;
 
     // One non-blocking sync after the listeners are already accepting
-    // (Cloud integration §"Catalog sync") — detached, never awaited, so
+    // (Cloud integration §"Catalog sync"). Detached, never awaited, so
     // a slow or unreachable backend can never delay `serve` startup.
     if cloud_config.catalog_sync_on_startup {
         tokio::spawn(async move {
@@ -219,7 +219,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Both listeners route to the same handlers (§2) — axum 0.7's
+/// Both listeners route to the same handlers (§2). axum 0.7's
 /// `serve()` only accepts `TcpListener`, so the Unix socket gets its own
 /// small accept loop mirroring axum's own TCP implementation.
 async fn serve_unix(listener: tokio::net::UnixListener, router: axum::Router) {

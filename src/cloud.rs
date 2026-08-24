@@ -1,12 +1,12 @@
-//! Cloud auth (device-flow login/logout + token storage) and nodelm-web
+//! Cloud auth (device-flow login/logout + token storage) and kiralm-web
 //! catalog fetch/merge (SPEC.md's "Cloud integration" section). Lives in
 //! one module because the spec puts all `credentials.json`/
 //! `cloud_catalog.json` I/O together:
 //!
-//! - Token storage (`CloudCredentials`, `ensure_token`) — every
+//! - Token storage (`CloudCredentials`, `ensure_token`). Every
 //!   cloud-model code path reads a token through here, never touching
 //!   the file directly. `login`/`logout` are the only writers.
-//! - Catalog sync (`sync_cloud_models`) — fetches nodelm-web's public
+//! - Catalog sync (`sync_cloud_models`). Fetches kiralm-web's public
 //!   model catalog, caches it to disk, and merges it into the live
 //!   `ModelRegistry` when a token is present.
 
@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::config::{nodelm_home, Config};
+use crate::config::{kiralm_home, Config};
 
 fn credentials_path() -> PathBuf {
-    nodelm_home().join("credentials.json")
+    kiralm_home().join("credentials.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,11 +66,11 @@ impl CloudCredentials {
 /// `credentials.json` directly (§"Token storage").
 pub fn ensure_token() -> anyhow::Result<String> {
     let Some(creds) = CloudCredentials::load()? else {
-        anyhow::bail!("not logged in — run 'nodelm login'");
+        anyhow::bail!("not logged in. run 'kiralm login'");
     };
     if let Some(expires_at) = creds.expires_at {
         if expires_at < chrono::Utc::now() {
-            anyhow::bail!("cloud login expired — run 'nodelm login' again");
+            anyhow::bail!("cloud login expired. run 'kiralm login' again");
         }
     }
     Ok(creds.access_token)
@@ -81,7 +81,7 @@ pub fn ensure_token() -> anyhow::Result<String> {
 // ---------------------------------------------------------------------
 
 fn device_id_path() -> PathBuf {
-    nodelm_home().join("device_id.json")
+    kiralm_home().join("device_id.json")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ struct DeviceId {
 }
 
 /// Read-or-create the per-machine `daemon_instance_id`, persisted to
-/// `~/.nodelm/device_id.json` — stable across logins so the backend
+/// `~/.kiralm/device_id.json`, stable across logins so the backend
 /// upserts one `devices` row per machine instead of creating a new one
 /// each time (§"Device identity").
 pub fn ensure_daemon_instance_id() -> anyhow::Result<String> {
@@ -114,7 +114,7 @@ pub fn ensure_daemon_instance_id() -> anyhow::Result<String> {
 }
 
 /// Self-description sent as `label` on `device/code` and shown by
-/// `nodelm device` — recomputed each call, never cached (§"Device identity").
+/// `kiralm device`. Recomputed each call, never cached (§"Device identity").
 fn device_label() -> String {
     use sysinfo::System;
     format!(
@@ -125,7 +125,7 @@ fn device_label() -> String {
     )
 }
 
-/// Shared by `nodelm device` and `GET /api/cloud/status` — `None` when
+/// Shared by `kiralm device` and `GET /api/cloud/status`. `None` when
 /// this machine has never completed a login.
 fn registered_device_label() -> Option<String> {
     let raw = std::fs::read_to_string(device_id_path()).ok()?;
@@ -133,11 +133,11 @@ fn registered_device_label() -> Option<String> {
     Some(format!("{} ({})", device_label(), &id.daemon_instance_id[..8]))
 }
 
-/// `nodelm device`: read-only, no network call.
+/// `kiralm device`: read-only, no network call.
 pub fn device_info() -> anyhow::Result<()> {
     match registered_device_label() {
         Some(label) => println!("This machine is registered as {label}"),
-        None => println!("Not yet registered — run 'nodelm login' first."),
+        None => println!("Not yet registered. Run 'kiralm login' first."),
     }
     Ok(())
 }
@@ -164,7 +164,7 @@ pub struct DeviceCodeResponse {
 }
 
 /// Progress event for the device-flow poll, broadcast over
-/// `GET /api/cloud/login/progress` — mirrors `pull::PullProgress`'s
+/// `GET /api/cloud/login/progress`. Mirrors `pull::PullProgress`'s
 /// shape/lifecycle (§"Cloud integration"): one broadcast channel per
 /// in-flight login, subscribers just fan out.
 #[derive(Debug, Clone, Serialize)]
@@ -177,7 +177,7 @@ pub struct LoginProgress {
 pub type LoginProgressTx = tokio::sync::broadcast::Sender<LoginProgress>;
 
 /// Terminal (or in-flight) result of polling `device/token` once the
-/// device code has been requested — the reusable core both `nodelm login`
+/// device code has been requested. The reusable core both `kiralm login`
 /// and `POST /api/cloud/login`'s background task drive to completion.
 pub enum LoginOutcome {
     Success,
@@ -214,7 +214,7 @@ struct DeviceTokenErrorBody {
 }
 
 /// Step 1 of the RFC 8628 device-authorization flow: requests a
-/// device/user code pair. Fast, synchronous — safe to await directly in
+/// device/user code pair. Fast, synchronous, so safe to await directly in
 /// an HTTP handler before backgrounding the slow poll (`start_pull`'s
 /// `pull::resolve`/`download_and_verify` split is the template).
 pub async fn request_device_code(config: &Config) -> anyhow::Result<DeviceCodeResponse> {
@@ -238,7 +238,7 @@ pub async fn request_device_code(config: &Config) -> anyhow::Result<DeviceCodeRe
 
 /// Step 2: polls `device/token` until approval, expiry, or a terminal
 /// error, saving credentials on success. Broadcasts each transition on
-/// `progress` when given, so both `nodelm login` (no channel, `None`) and
+/// `progress` when given, so both `kiralm login` (no channel, `None`) and
 /// the HTTP background task (`Some`) drive the exact same state machine.
 pub async fn poll_device_token(
     config: &Config,
@@ -332,8 +332,8 @@ pub async fn poll_device_token(
     }
 }
 
-/// `nodelm login`: terminal-printing consumer of `request_device_code` +
-/// `poll_device_token` — same output/exit-code behavior as before the
+/// `kiralm login`: terminal-printing consumer of `request_device_code` +
+/// `poll_device_token`. Same output/exit-code behavior as before the
 /// HTTP path (`POST /api/cloud/login`) was added.
 pub async fn login(config: &Config) -> anyhow::Result<()> {
     let device = request_device_code(config).await?;
@@ -357,7 +357,7 @@ pub async fn login(config: &Config) -> anyhow::Result<()> {
             Ok(())
         }
         LoginOutcome::Expired => {
-            println!("Login expired before it was approved — run 'nodelm login' again.");
+            println!("Login expired before it was approved. Run 'kiralm login' again.");
             std::process::exit(1);
         }
         LoginOutcome::Error(msg) => {
@@ -367,7 +367,7 @@ pub async fn login(config: &Config) -> anyhow::Result<()> {
     }
 }
 
-/// `nodelm logout`: deletes stored credentials, idempotent.
+/// `kiralm logout`: deletes stored credentials, idempotent.
 pub fn logout() -> anyhow::Result<()> {
     let existed = credentials_path().exists();
     CloudCredentials::delete()?;
@@ -380,7 +380,7 @@ pub fn logout() -> anyhow::Result<()> {
 }
 
 /// Best-effort browser open; a headless box or missing binary falls
-/// through silently — the printed URL is always the real fallback.
+/// through silently. The printed URL is always the real fallback.
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
@@ -425,7 +425,7 @@ struct CloudModelsResponse {
 }
 
 fn cache_path() -> PathBuf {
-    nodelm_home().join("cloud_catalog.json")
+    kiralm_home().join("cloud_catalog.json")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -468,14 +468,14 @@ pub fn cache_age_secs() -> Option<i64> {
 static LAST_FETCH_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Guards against a thundering herd of concurrent fetches when several
-/// `/api/status` polls land in the same stale window — the staleness
+/// `/api/status` polls land in the same stale window. The staleness
 /// gate itself only checks the *previous* fetch's timestamp, so without
 /// this a burst of requests before that fetch lands would each spawn
 /// their own.
 static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Fetches `GET {api_base_url}/api/models`, caches it to disk, and (only
-/// when a valid token is present) merges it into `registry` — never
+/// when a valid token is present) merges it into `registry`. Never
 /// blocks or breaks anything on a network failure (§"Catalog sync",
 /// §"Merge into the registry"). Meant to be run inside `tokio::spawn`.
 pub async fn sync_cloud_models(api_base_url: &str, registry: &crate::registry::ModelRegistry) {
@@ -550,7 +550,7 @@ async fn sync_cloud_models_inner(api_base_url: &str, registry: &crate::registry:
 mod tests {
     use super::*;
 
-    /// Guards the `ref` rename against schema drift — nodelm-web's
+    /// Guards the `ref` rename against schema drift. kiralm-web's
     /// GET /api/models shape is fixed and this daemon must deserialize
     /// it byte-for-byte (SPEC.md's "Catalog sync").
     #[test]
@@ -597,8 +597,8 @@ mod tests {
         assert!(expired.expires_at.unwrap() < chrono::Utc::now());
     }
 
-    /// `GET /api/cloud/status`'s JSON shape reads straight off this —
-    /// guards the field names the UI matches against.
+    /// `GET /api/cloud/status`'s JSON shape reads straight off this.
+    /// Guards the field names the UI matches against.
     #[test]
     fn login_progress_serializes_phase_and_message() {
         let event = LoginProgress {
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn cloud_status_reports_logged_out_with_no_device() {
-        // Only meaningful in a clean ~/.nodelm; skip on a machine that's
+        // Only meaningful in a clean ~/.kiralm; skip on a machine that's
         // actually logged in or registered.
         if CloudCredentials::load().unwrap().is_some() || registered_device_label().is_some() {
             return;

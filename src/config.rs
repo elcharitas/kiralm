@@ -1,25 +1,25 @@
-//! `~/.nodelm/config.toml` load/parse/defaults. Hand-edited, static (§3).
+//! `~/.kiralm/config.toml` load/parse/defaults. Hand-edited, static (§3).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// `~/.nodelm` — everything nodelm owns lives under here.
-pub fn nodelm_home() -> PathBuf {
+/// `~/.kiralm`. Everything kiralm owns lives under here.
+pub fn kiralm_home() -> PathBuf {
     dirs::home_dir()
         .expect("no home directory found")
-        .join(".nodelm")
+        .join(".kiralm")
 }
 
 pub fn default_config_path() -> PathBuf {
-    nodelm_home().join("config.toml")
+    kiralm_home().join("config.toml")
 }
 
 fn default_unix_socket() -> PathBuf {
-    nodelm_home().join("nodelm.sock")
+    kiralm_home().join("kiralm.sock")
 }
 
 fn default_model_dir() -> PathBuf {
-    nodelm_home().join("models")
+    kiralm_home().join("models")
 }
 
 fn default_http_listen() -> String {
@@ -40,7 +40,7 @@ fn default_cloud_api_base_url() -> String {
 }
 
 fn default_cloud_client_id() -> String {
-    "nodelm-cli".to_string()
+    "kiralm-cli".to_string()
 }
 
 fn default_cloud_request_timeout_secs() -> u64 {
@@ -64,7 +64,7 @@ fn default_tunnel_listen() -> String {
     "127.0.0.1:11536".to_string()
 }
 
-/// `[cloud]` table (Cloud integration §"config.toml keys") — same
+/// `[cloud]` table (Cloud integration §"config.toml keys"). Same
 /// all-`Option` + one-default-fn-per-field pattern as the rest of this
 /// file. Never mirrored into state.json (hand-edited static config).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -81,7 +81,7 @@ pub struct CloudConfig {
     pub api_base_url: String,
     pub client_id: String,
     /// Covers device/code, device/token poll, and chat-completion proxy
-    /// calls only — the background `GET /api/models` fetch uses a fixed
+    /// calls only. The background `GET /api/models` fetch uses a fixed
     /// 3s timeout instead (see `cloud.rs`), deliberately non-configurable.
     pub request_timeout_secs: u64,
     pub catalog_sync_interval_secs: u64,
@@ -101,7 +101,7 @@ impl Default for CloudConfig {
 }
 
 /// `[tunnel]` table (§"Tunnel client (daemon)" -- Binary, and
-/// §"Remote-request auth" for `listen`) — same all-`Option` +
+/// §"Remote-request auth" for `listen`). Same all-`Option` +
 /// default-fn pattern as the rest of this file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawTunnelConfig {
@@ -170,7 +170,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Loads `~/.nodelm/config.toml`, falling back to defaults for any
+    /// Loads `~/.kiralm/config.toml`, falling back to defaults for any
     /// field that's absent or if the file doesn't exist at all.
     pub fn load() -> anyhow::Result<Config> {
         Config::load_from(&default_config_path())

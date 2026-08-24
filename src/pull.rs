@@ -23,7 +23,7 @@ pub struct PullProgress {
 }
 
 /// Broadcast, not mpsc: `/api/models/:id/pull` SSE only has a listener
-/// while a download row is expanded/active (§2.5) — sends with no
+/// while a download row is expanded/active (§2.5). Sends with no
 /// subscriber are fine to drop.
 pub type ProgressTx = tokio::sync::broadcast::Sender<PullProgress>;
 
@@ -94,7 +94,7 @@ struct ResolvedFile {
     expected_sha256: Option<String>,
 }
 
-/// Result of the fast, synchronous resolve phase — enough to know the
+/// Result of the fast, synchronous resolve phase. Enough to know the
 /// canonical id before the slow download starts (needed because
 /// `POST /api/models/pull` must return `{"id": "<canonical_id>"}`
 /// immediately, §2.5).
@@ -108,11 +108,11 @@ pub struct Resolved {
 }
 
 /// Resolves `<ref>` against the HF repo's file listing (§8 step 1).
-/// Fast (one HF API call) — safe to run synchronously in a request
+/// Fast (one HF API call), so safe to run synchronously in a request
 /// handler before spawning the actual download.
 pub async fn resolve(ref_str: &str) -> anyhow::Result<Resolved> {
     let parsed = parse_ref(ref_str)?;
-    let client = reqwest::Client::builder().user_agent("nodelm/0.1").build()?;
+    let client = reqwest::Client::builder().user_agent("kiralm/0.1").build()?;
     let resolved = resolve_file(&client, &parsed).await?;
     let quant = parsed
         .quant
@@ -257,7 +257,7 @@ async fn download_with_resume(
 
     let mut stream = resp.bytes_stream();
     use futures_util::StreamExt;
-    // Throttle progress events to ~1MB steps — reqwest's stream chunks
+    // Throttle progress events to ~1MB steps, since reqwest's stream chunks
     // are much smaller, and one broadcast send per chunk floods
     // subscribers for no visible UI benefit.
     let emit_every = 1 << 20;
@@ -296,7 +296,7 @@ pub async fn download_and_verify(
     progress: Option<ProgressTx>,
 ) -> anyhow::Result<()> {
     let canonical_id = &resolved.canonical_id;
-    let client = reqwest::Client::builder().user_agent("nodelm/0.1").build()?;
+    let client = reqwest::Client::builder().user_agent("kiralm/0.1").build()?;
 
     std::fs::create_dir_all(&config.model_dir)?;
     let final_path = config.model_dir.join(&resolved.filename);
@@ -383,7 +383,7 @@ pub async fn download_and_verify(
     .await;
 
     // Mutate the live in-memory state (shared with the rest of the
-    // daemon via AppState), not a disk-only round-trip — otherwise a
+    // daemon via AppState), not a disk-only round-trip. Otherwise a
     // freshly-cached unsupported verdict wouldn't take effect until a
     // daemon restart, defeating the point of caching it (§5.2/§8).
     let engine_version = engine::detect_version(&config.llama_server_bin);
@@ -420,7 +420,7 @@ pub async fn download_and_verify(
     }
 
     // File and manifest are kept regardless of load outcome (§8 closing
-    // note) — an unsupported verdict means this engine build can't load
+    // note). An unsupported verdict means this engine build can't load
     // this architecture, not that the download is corrupt.
     Ok(())
 }

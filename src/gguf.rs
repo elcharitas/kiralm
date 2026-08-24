@@ -1,4 +1,4 @@
-//! Minimal GGUF header/metadata reader — just enough to pull the fields
+//! Minimal GGUF header/metadata reader, just enough to pull the fields
 //! `pull.rs` needs for the manifest sidecar (§3): architecture, MoE
 //! expert counts, trained context length. Stops before tensor data, never
 //! reads the (multi-GB) weights themselves.
@@ -183,7 +183,7 @@ mod tests {
     #[ignore]
     fn gguf_real_file() {
         let path = std::path::Path::new(
-            "/Users/elcharitas/Workspace/nodelm/models/olmoe-1b-7b-instruct-q4_k_m.gguf",
+            "/Users/elcharitas/Workspace/kiralm/models/olmoe-1b-7b-instruct-q4_k_m.gguf",
         );
         let meta = read_metadata(path).expect("should parse header");
         assert_eq!(meta.architecture, "olmoe");

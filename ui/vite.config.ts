@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Dev-only: proxy API calls to the nodelm daemon so `npm run dev` works
+// Dev-only: proxy API calls to the kiralm daemon so `npm run dev` works
 // without rebuilding the embedded dist/ into the Rust binary each time.
 export default defineConfig({
   plugins: [react()],

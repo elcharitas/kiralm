@@ -1,6 +1,6 @@
-// Typed client for NodeLM's internal (/api/*) and OpenAI-compatible (/v1/*)
+// Typed client for KiraLM's internal (/api/*) and OpenAI-compatible (/v1/*)
 // routes. Same-origin: the daemon serves this SPA alongside the API, so no
-// base URL config is needed — plain relative fetches everywhere.
+// base URL config is needed. Plain relative fetches everywhere.
 
 export type VerdictTier =
   | "FITS_FAST"
@@ -159,7 +159,7 @@ export async function streamChat(
         const delta: string | undefined = chunk.choices?.[0]?.delta?.content;
         if (delta) onToken(delta);
       } catch {
-        // partial/malformed line, skip — next chunk carries the rest
+        // partial/malformed line, skip since the next chunk carries the rest
       }
     }
   }

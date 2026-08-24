@@ -904,6 +904,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiralm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "dirs",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "hyperlocal",
+ "libc",
+ "parking_lot",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -988,41 +1023,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "nodelm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "dirs",
- "futures-util",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "hyperlocal",
- "libc",
- "parking_lot",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "sysinfo",
- "tokio",
- "tokio-stream",
- "toml",
- "tower 0.4.13",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

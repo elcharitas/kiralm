@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the NodeLM shell window",
+  "description": "Capabilities for the KiraLM shell window",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -11,7 +11,7 @@
     "shell:allow-open",
     {
       "identifier": "shell:allow-execute",
-      "allow": [{ "name": "binaries/nodelm", "sidecar": true, "args": ["serve"] }]
+      "allow": [{ "name": "binaries/kiralm", "sidecar": true, "args": ["serve"] }]
     }
   ]
 }
