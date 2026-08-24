@@ -17,12 +17,19 @@ pub struct RamInfo {
 
 /// Reads live RAM info. `.available_memory()`, not `.free_memory()` — it
 /// already accounts for reclaimable OS cache (§5.1).
+// ponytail: sysinfo 0.32 reliably returns 0 for available_memory() on
+// some macOS setups (reproduced here) -- fall back to free_memory(),
+// which undercounts reclaimable pages but is never wrong-in-a-scary-way.
+// This is display-only (see admission math in check_admission, which
+// never reads available_bytes); upgrade path is bumping sysinfo once
+// upstream fixes it.
 pub fn read_ram_info() -> RamInfo {
     let mut sys = System::new();
     sys.refresh_memory();
+    let available = sys.available_memory();
     RamInfo {
         total_bytes: sys.total_memory(),
-        available_bytes: sys.available_memory(),
+        available_bytes: if available > 0 { available } else { sys.free_memory() },
     }
 }
 
