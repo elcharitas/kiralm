@@ -82,7 +82,7 @@ fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
         "quant": m.canonical_id.rsplit(':').next().unwrap_or(""),
         "hot": m.hot,
         "loaded": matches!(m.status, ModelStatus::Loaded),
-        "rss_bytes": serde_json::Value::Null,
+        "rss_bytes": m.pid.and_then(residency::read_rss_bytes),
         "verdict": m.verdict.tier.as_str(),
         "verdict_reason": m.verdict.reason,
         "verdict_tier": m.verdict.tier.as_str(),

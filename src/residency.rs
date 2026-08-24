@@ -39,6 +39,15 @@ pub fn headroom_bytes(total_ram_bytes: u64, configured_gb: Option<f64>) -> u64 {
     (gb * GB) as u64
 }
 
+/// Reads a loaded child `llama-server`'s real resident memory (§5.4 RSS
+/// reporting). `None` if the pid is gone (already exited).
+pub fn read_rss_bytes(pid: u32) -> Option<u64> {
+    let mut sys = System::new();
+    let pid = sysinfo::Pid::from_u32(pid);
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    sys.process(pid).map(|p| p.memory())
+}
+
 /// Pre-spawn admission check (§5.4): reject unless
 /// `sum(loaded) + new <= total - headroom`. Returns the shortfall in
 /// bytes as `Err` when it doesn't fit.
