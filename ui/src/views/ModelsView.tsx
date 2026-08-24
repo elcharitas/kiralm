@@ -7,6 +7,58 @@ import { formatBytes } from "../format";
 import { usePullProgress } from "../hooks/usePullProgress";
 import { ModelDetailDrawer } from "./ModelDetailDrawer";
 
+// ponytail: plain hardcoded list, not a live catalog — edit this array to add/update entries.
+const CATALOG: { name: string; ref: string; size: string; description: string }[] = [
+  {
+    name: "Qwen3 0.6B",
+    ref: "unsloth/Qwen3-0.6B-GGUF:Q8_0",
+    size: "~0.7 GB",
+    description: "Tiny dense model, runs anywhere, good for quick tests.",
+  },
+  {
+    name: "Llama 3.2 1B Instruct",
+    ref: "unsloth/Llama-3.2-1B-Instruct-GGUF:Q8_0",
+    size: "~1.3 GB",
+    description: "Small dense general model for constrained machines.",
+  },
+  {
+    name: "Qwen3 4B Instruct",
+    ref: "unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M",
+    size: "~2.5 GB",
+    description: "Solid everyday dense model, cheap to keep hot.",
+  },
+  {
+    name: "Llama 3.1 8B Instruct",
+    ref: "unsloth/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M",
+    size: "~4.9 GB",
+    description: "Popular general-purpose dense model.",
+  },
+  {
+    name: "Qwen2.5 14B Instruct",
+    ref: "unsloth/Qwen2.5-14B-Instruct-GGUF:Q4_K_M",
+    size: "~9 GB",
+    description: "Larger dense model for stronger reasoning.",
+  },
+  {
+    name: "OLMoE 1B-7B",
+    ref: "unsloth/OLMoE-1B-7B-0924-Instruct-GGUF:Q4_K_M",
+    size: "~4.3 GB",
+    description: "MoE model: 7B total, ~1B active — the over-RAM story.",
+  },
+  {
+    name: "Qwen3 30B-A3B",
+    ref: "unsloth/Qwen3-30B-A3B-GGUF:Q4_K_M",
+    size: "~18 GB",
+    description: "MoE model: 30B total, ~3B active — runs on modest RAM.",
+  },
+  {
+    name: "Mixtral 8x7B Instruct",
+    ref: "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF:Q4_K_M",
+    size: "~26 GB",
+    description: "Larger MoE model, needs more RAM but still under-dense-equivalent.",
+  },
+];
+
 export function ModelsView({
   status,
   refresh,
@@ -19,10 +71,7 @@ export function ModelsView({
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
-  const submitPull = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const ref = pullRef.trim();
-    if (!ref) return;
+  const pull = async (ref: string) => {
     try {
       const { id } = await api.pull(ref);
       setPulling({ id, error: null });
@@ -30,6 +79,13 @@ export function ModelsView({
     } catch (err) {
       setPulling({ id: ref, error: err instanceof Error ? err.message : String(err) });
     }
+  };
+
+  const submitPull = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const ref = pullRef.trim();
+    if (!ref) return;
+    await pull(ref);
   };
 
   const toggleHot = async (m: ModelStatus, force = false) => {
@@ -93,6 +149,31 @@ export function ModelsView({
           }}
         />
       )}
+
+      <div className="catalog">
+        <h2 className="catalog-title">Curated models</h2>
+        <div className="catalog-grid">
+          {CATALOG.map((c) => {
+            const already = models.some((m) => m.id === c.ref || m.aliases.includes(c.ref));
+            return (
+              <div key={c.ref} className="catalog-card">
+                <div className="catalog-card-name">{c.name}</div>
+                <div className="catalog-card-size mono">{c.size}</div>
+                <div className="catalog-card-desc">{c.description}</div>
+                <div className="catalog-card-ref mono">{c.ref}</div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={already}
+                  onClick={() => pull(c.ref)}
+                >
+                  {already ? "Downloaded" : "Pull"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       <table className="table">
         <thead>
