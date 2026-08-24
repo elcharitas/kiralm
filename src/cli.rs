@@ -232,13 +232,24 @@ pub async fn list(config: &Config) -> anyhow::Result<()> {
     if !status.is_success() {
         print_error_and_exit(status, &body);
     }
-    println!("{:<40} {:<20} {:<6} {:<8}", "MODEL", "VERDICT", "HOT", "LOADED");
+    println!(
+        "{:<40} {:<8} {:<20} {:<6} {:<8}",
+        "MODEL", "SOURCE", "VERDICT", "HOT", "LOADED"
+    );
     for m in body["models"].as_array().cloned().unwrap_or_default() {
+        let is_cloud = m["source"].as_str() == Some("cloud");
+        // Cloud rows have no RAM verdict and no local hot/cold state
+        // (SPEC.md's Cloud integration §"GET /v1/models and nodelm
+        // list") — print "-" rather than routing through a value that
+        // was never computed for them.
+        let verdict = if is_cloud { "-".to_string() } else { m["verdict"].as_str().unwrap_or("").to_string() };
+        let hot = if is_cloud { "-".to_string() } else { m["hot"].as_bool().unwrap_or(false).to_string() };
         println!(
-            "{:<40} {:<20} {:<6} {:<8}",
+            "{:<40} {:<8} {:<20} {:<6} {:<8}",
             m["id"].as_str().unwrap_or(""),
-            m["verdict"].as_str().unwrap_or(""),
-            m["hot"].as_bool().unwrap_or(false),
+            m["source"].as_str().unwrap_or("local"),
+            verdict,
+            hot,
             m["loaded"].as_bool().unwrap_or(false),
         );
     }
@@ -253,15 +264,17 @@ pub async fn ps(config: &Config) -> anyhow::Result<()> {
     println!("{:<40} {:<12} {:<10}", "MODEL", "HOT", "RSS_BYTES");
     for m in body["models"].as_array().cloned().unwrap_or_default() {
         if m["loaded"].as_bool().unwrap_or(false) {
-            println!(
-                "{:<40} {:<12} {:<10}",
-                m["id"].as_str().unwrap_or(""),
-                m["hot"].as_bool().unwrap_or(false),
+            let is_cloud = m["source"].as_str() == Some("cloud");
+            let hot = if is_cloud { "-".to_string() } else { m["hot"].as_bool().unwrap_or(false).to_string() };
+            let rss = if is_cloud {
+                "-".to_string()
+            } else {
                 m["rss_bytes"]
                     .as_u64()
                     .map(|n| n.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-            );
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            println!("{:<40} {:<12} {:<10}", m["id"].as_str().unwrap_or(""), hot, rss);
         }
     }
     Ok(())

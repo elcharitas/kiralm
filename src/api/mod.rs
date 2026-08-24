@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use crate::config::Config;
 use crate::engine;
 use crate::pull::{PullProgress, ProgressTx};
-use crate::registry::{self, ModelRegistry, ModelStatus};
+use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource, ModelStatus};
 use crate::residency;
 use crate::state::{ModelManifest, State};
 
@@ -82,7 +82,7 @@ pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
 
     let mut model_state = registry::ModelState::from_manifest(manifest, hot);
     model_state.gguf_path = app.config.model_dir.join(&manifest.filename);
-    model_state.verdict = verdict;
+    model_state.verdict = Some(verdict);
     app.registry.insert(model_state);
 }
 
@@ -112,6 +112,10 @@ pub enum GatewayError {
     InsufficientRam(String),
     /// Spawn/health-check/tiny-completion failed transiently (§4.4).
     LoadFailed(String),
+    /// No stored token, an expired one, or a backend 401 on an actual
+    /// cloud chat call (Cloud integration §"Logged-out / invalid-token
+    /// behavior"). Sibling to the three arms above, same 4xx treatment.
+    AuthRequired(String),
 }
 
 /// Ensures `canonical_id` has a live `llama-server` child, spawning one
@@ -124,16 +128,24 @@ pub enum GatewayError {
 /// engine.rs's module note. The owning residency agent should extend
 /// this rather than replace it wholesale; the admission math and
 /// registry bookkeeping here are real.
-pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<u16, GatewayError> {
+pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<ModelRoute, GatewayError> {
     let Some(existing) = app.registry.get_clone(canonical_id) else {
         return Err(GatewayError::LoadFailed(format!(
             "model '{canonical_id}' not in registry"
         )));
     };
 
+    // Cloud entries never spawn a local child — this is the one and
+    // only place "is this model spawnable locally" is decided (Cloud
+    // integration §"Routing choke point"). No admission check, no
+    // health poll: nodelm-web owns that model's residency, not us.
+    if existing.source == ModelSource::Cloud {
+        return Ok(ModelRoute::Cloud);
+    }
+
     if let ModelStatus::Loaded = existing.status {
         if let Some(port) = existing.port {
-            return Ok(port);
+            return Ok(ModelRoute::Local(port));
         }
     }
 
@@ -149,11 +161,17 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<u16,
 
     let ram = residency::read_ram_info();
     let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
+    // Cloud entries are always `Loaded` but occupy zero local RAM — the
+    // admission budget only ever tracks locally-spawned children.
     let loaded_bytes: u64 = app
         .registry
         .list()
         .into_iter()
-        .filter(|m| matches!(m.status, ModelStatus::Loaded) && m.canonical_id != canonical_id)
+        .filter(|m| {
+            m.source == ModelSource::Local
+                && matches!(m.status, ModelStatus::Loaded)
+                && m.canonical_id != canonical_id
+        })
         .map(|m| m.size_bytes)
         .sum();
     if let Err(shortfall) =
@@ -224,5 +242,5 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<u16,
     loaded.last_used = std::time::Instant::now();
     app.registry.insert(loaded);
 
-    Ok(port)
+    Ok(ModelRoute::Local(port))
 }

@@ -42,8 +42,9 @@ fn serve_asset(path: &str) -> Option<Response> {
 }
 
 use super::{ensure_loaded, GatewayError, SharedState};
+use crate::cloud;
 use crate::engine;
-use crate::registry::{ModelState, ModelStatus};
+use crate::registry::{ModelSource, ModelState, ModelStatus};
 use crate::residency;
 use crate::state::ModelManifest;
 
@@ -71,6 +72,8 @@ fn resolve(app: &SharedState, name: &str) -> Option<String> {
 }
 
 async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
+    maybe_refresh_cloud_models(&app);
+
     let ram = residency::read_ram_info();
     let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
 
@@ -95,6 +98,25 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
     }))
 }
 
+/// The "merged-catalog read path" (Cloud integration §"Catalog sync"):
+/// always serves the current registry immediately, but kicks off a
+/// background re-fetch if the cache is older than
+/// `catalog_sync_interval_secs` — the on-demand half of the sync
+/// trigger, sibling to the one-shot startup fetch in `main.rs`.
+fn maybe_refresh_cloud_models(app: &SharedState) {
+    let stale = match cloud::cache_age_secs() {
+        Some(age) => age >= app.config.cloud.catalog_sync_interval_secs as i64,
+        None => true, // never fetched
+    };
+    if !stale {
+        return;
+    }
+    let app = app.clone();
+    tokio::spawn(async move {
+        cloud::sync_cloud_models(&app.config.cloud.api_base_url, &app.registry).await;
+    });
+}
+
 fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
     let aliases: Vec<String> = app
         .state
@@ -107,14 +129,15 @@ fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
     json!({
         "id": m.canonical_id,
         "aliases": aliases,
+        "source": match m.source { ModelSource::Local => "local", ModelSource::Cloud => "cloud" },
         "size_bytes": m.size_bytes,
         "quant": m.canonical_id.rsplit(':').next().unwrap_or(""),
         "hot": m.hot,
         "loaded": matches!(m.status, ModelStatus::Loaded),
         "rss_bytes": m.pid.and_then(residency::read_rss_bytes),
-        "verdict": m.verdict.tier.as_str(),
-        "verdict_reason": m.verdict.reason,
-        "verdict_tier": m.verdict.tier.as_str(),
+        "verdict": m.verdict.as_ref().map(|v| v.tier.as_str()),
+        "verdict_reason": m.verdict.as_ref().map(|v| v.reason.clone()),
+        "verdict_tier": m.verdict.as_ref().map(|v| v.tier.as_str()),
     })
 }
 
@@ -222,7 +245,7 @@ async fn set_hot(
             .registry
             .list()
             .into_iter()
-            .filter(|m| m.hot && m.canonical_id != canonical)
+            .filter(|m| m.source == crate::registry::ModelSource::Local && m.hot && m.canonical_id != canonical)
             .map(|m| m.size_bytes)
             .sum();
         if let Err(shortfall) =
@@ -257,7 +280,8 @@ async fn set_hot(
             let msg = match e {
                 GatewayError::CachedUnsupported(m)
                 | GatewayError::InsufficientRam(m)
-                | GatewayError::LoadFailed(m) => m,
+                | GatewayError::LoadFailed(m)
+                | GatewayError::AuthRequired(m) => m,
             };
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,

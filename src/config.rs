@@ -35,6 +35,62 @@ fn default_port_range() -> (u16, u16) {
     (8700, 8799)
 }
 
+fn default_cloud_api_base_url() -> String {
+    "http://localhost:3003".to_string()
+}
+
+fn default_cloud_client_id() -> String {
+    "nodelm-cli".to_string()
+}
+
+fn default_cloud_request_timeout_secs() -> u64 {
+    10
+}
+
+fn default_catalog_sync_interval_secs() -> u64 {
+    3600
+}
+
+fn default_catalog_sync_on_startup() -> bool {
+    true
+}
+
+/// `[cloud]` table (Cloud integration §"config.toml keys") — same
+/// all-`Option` + one-default-fn-per-field pattern as the rest of this
+/// file. Never mirrored into state.json (hand-edited static config).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RawCloudConfig {
+    api_base_url: Option<String>,
+    client_id: Option<String>,
+    request_timeout_secs: Option<u64>,
+    catalog_sync_interval_secs: Option<u64>,
+    catalog_sync_on_startup: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloudConfig {
+    pub api_base_url: String,
+    pub client_id: String,
+    /// Covers device/code, device/token poll, and chat-completion proxy
+    /// calls only — the background `GET /api/models` fetch uses a fixed
+    /// 3s timeout instead (see `cloud.rs`), deliberately non-configurable.
+    pub request_timeout_secs: u64,
+    pub catalog_sync_interval_secs: u64,
+    pub catalog_sync_on_startup: bool,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        CloudConfig {
+            api_base_url: default_cloud_api_base_url(),
+            client_id: default_cloud_client_id(),
+            request_timeout_secs: default_cloud_request_timeout_secs(),
+            catalog_sync_interval_secs: default_catalog_sync_interval_secs(),
+            catalog_sync_on_startup: default_catalog_sync_on_startup(),
+        }
+    }
+}
+
 /// On-disk config shape. Every field optional so a hand-edited partial
 /// file still parses; defaults fill the rest (§3).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -45,6 +101,8 @@ struct RawConfig {
     http_listen: Option<String>,
     llama_server_bin: Option<String>,
     llama_server_port_range: Option<(u16, u16)>,
+    #[serde(default)]
+    cloud: RawCloudConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +114,7 @@ pub struct Config {
     pub http_listen: String,
     pub llama_server_bin: String,
     pub llama_server_port_range: (u16, u16),
+    pub cloud: CloudConfig,
 }
 
 impl Default for Config {
@@ -67,6 +126,7 @@ impl Default for Config {
             http_listen: default_http_listen(),
             llama_server_bin: default_llama_server_bin(),
             llama_server_port_range: default_port_range(),
+            cloud: CloudConfig::default(),
         }
     }
 }
@@ -103,6 +163,22 @@ impl Config {
             llama_server_port_range: raw
                 .llama_server_port_range
                 .unwrap_or(defaults.llama_server_port_range),
+            cloud: CloudConfig {
+                api_base_url: raw.cloud.api_base_url.unwrap_or(defaults.cloud.api_base_url),
+                client_id: raw.cloud.client_id.unwrap_or(defaults.cloud.client_id),
+                request_timeout_secs: raw
+                    .cloud
+                    .request_timeout_secs
+                    .unwrap_or(defaults.cloud.request_timeout_secs),
+                catalog_sync_interval_secs: raw
+                    .cloud
+                    .catalog_sync_interval_secs
+                    .unwrap_or(defaults.cloud.catalog_sync_interval_secs),
+                catalog_sync_on_startup: raw
+                    .cloud
+                    .catalog_sync_on_startup
+                    .unwrap_or(defaults.cloud.catalog_sync_on_startup),
+            },
         })
     }
 }

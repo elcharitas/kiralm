@@ -3,6 +3,7 @@
 
 mod api;
 mod cli;
+mod cloud;
 mod config;
 mod engine;
 mod gguf;
@@ -53,6 +54,10 @@ enum Command {
     Hot { name: String, state: String },
     /// Delete a downloaded model.
     Rm { name: String },
+    /// Device-flow login against nodelm-web, for cloud models.
+    Login,
+    /// Deletes stored cloud credentials.
+    Logout,
 }
 
 #[tokio::main]
@@ -89,6 +94,8 @@ async fn main() -> anyhow::Result<()> {
             cli::hot(&config, &name, on).await
         }
         Command::Rm { name } => cli::rm(&config, &name).await,
+        Command::Login => cloud::login(&config).await,
+        Command::Logout => cloud::logout(),
     }
 }
 
@@ -122,6 +129,8 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
         api::register_model(&app_state, &manifest);
     }
 
+    let cloud_config = app_state.config.cloud.clone();
+    let registry_for_sync = app_state.registry.clone();
     let router = api::build_router(app_state);
 
     // bind TCP first: if another daemon already owns this port, fail fast
@@ -150,6 +159,15 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     });
 
     let unix_task = tokio::spawn(serve_unix(unix_listener, router));
+
+    // One non-blocking sync after the listeners are already accepting
+    // (Cloud integration §"Catalog sync") — detached, never awaited, so
+    // a slow or unreachable backend can never delay `serve` startup.
+    if cloud_config.catalog_sync_on_startup {
+        tokio::spawn(async move {
+            cloud::sync_cloud_models(&cloud_config.api_base_url, &registry_for_sync).await;
+        });
+    }
 
     let _ = tokio::join!(tcp_task, unix_task);
     Ok(())

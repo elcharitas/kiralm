@@ -21,6 +21,8 @@ use super::openai::{
     ChatContent, ChatContentPart, ChatMessage as OpenAiMessage, ImageUrl,
 };
 use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
+use crate::cloud;
+use crate::registry::ModelRoute;
 use crate::state::ModelManifest;
 
 pub fn routes() -> Router<SharedState> {
@@ -123,6 +125,27 @@ fn anthropic_error(status: StatusCode, kind: &'static str, message: impl Into<St
         "error": { "type": kind, "message": message.into() },
     });
     (status, Json(body)).into_response()
+}
+
+/// Maps a `GatewayError` to its Anthropic-shaped response — the one
+/// place this happens, so `AuthRequired` (raised both by `ensure_loaded`
+/// and, after routing, by the cloud forward step) gets identical
+/// treatment either way.
+fn gateway_error_response(e: GatewayError) -> Response {
+    match e {
+        GatewayError::CachedUnsupported(msg) => {
+            anthropic_error(StatusCode::BAD_REQUEST, "invalid_request_error", msg)
+        }
+        GatewayError::InsufficientRam(msg) => {
+            anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", msg)
+        }
+        GatewayError::LoadFailed(msg) => {
+            anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg)
+        }
+        GatewayError::AuthRequired(msg) => {
+            anthropic_error(StatusCode::UNAUTHORIZED, "authentication_error", msg)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -266,36 +289,57 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
         Err(resp) => return resp,
     };
 
-    let port = match ensure_loaded(&app, &canonical_id).await {
-        Ok(p) => p,
-        Err(GatewayError::CachedUnsupported(msg)) => {
-            return anthropic_error(StatusCode::BAD_REQUEST, "invalid_request_error", msg)
-        }
-        Err(GatewayError::InsufficientRam(msg)) => {
-            return anthropic_error(StatusCode::SERVICE_UNAVAILABLE, "overloaded_error", msg)
-        }
-        Err(GatewayError::LoadFailed(msg)) => {
-            return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg)
-        }
+    let route = match ensure_loaded(&app, &canonical_id).await {
+        Ok(r) => r,
+        Err(e) => return gateway_error_response(e),
     };
 
     let http = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    // Same routing branch as `/v1/chat/completions` (§"/v1/chat/
+    // completions routing for cloud-sourced models" — the translator
+    // below doesn't know or care whether the child is local or cloud,
+    // only that `ensure_loaded` handed it a route to call).
+    let (url, bearer, openai_req) = match route {
+        ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, openai_req),
+        ModelRoute::Cloud => {
+            let token = match cloud::ensure_token() {
+                Ok(t) => t,
+                Err(e) => return gateway_error_response(GatewayError::AuthRequired(e.to_string())),
+            };
+            let cloud_model_id = app
+                .registry
+                .get_clone(&canonical_id)
+                .and_then(|ms| ms.cloud_model_id)
+                .unwrap_or_else(|| canonical_id.clone());
+            let mut req = openai_req;
+            req.model = cloud_model_id; // nodelm-web expects the catalog slug, not our alias
+            (
+                format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
+                Some(token),
+                req,
+            )
+        }
+    };
 
     if stream {
-        stream_messages(http, url, openai_req, req.stop_sequences, canonical_id).await
+        stream_messages(http, url, bearer, openai_req, req.stop_sequences, canonical_id).await
     } else {
-        non_stream_messages(http, url, openai_req, req.stop_sequences).await
+        non_stream_messages(http, url, bearer, openai_req, req.stop_sequences).await
     }
 }
 
 async fn non_stream_messages(
     http: reqwest::Client,
     url: String,
+    bearer: Option<String>,
     openai_req: ChatCompletionRequest,
     stop_sequences: Option<Vec<String>>,
 ) -> Response {
-    let resp = match http.post(&url).json(&openai_req).send().await {
+    let mut req = http.post(&url).json(&openai_req);
+    if let Some(token) = &bearer {
+        req = req.bearer_auth(token);
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return anthropic_error(
@@ -305,6 +349,11 @@ async fn non_stream_messages(
             )
         }
     };
+    if bearer.is_some() && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return gateway_error_response(GatewayError::AuthRequired(
+            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+        ));
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -358,11 +407,16 @@ async fn non_stream_messages(
 async fn stream_messages(
     http: reqwest::Client,
     url: String,
+    bearer: Option<String>,
     openai_req: ChatCompletionRequest,
     stop_sequences: Option<Vec<String>>,
     canonical_id: String,
 ) -> Response {
-    let resp = match http.post(&url).json(&openai_req).send().await {
+    let mut req = http.post(&url).json(&openai_req);
+    if let Some(token) = &bearer {
+        req = req.bearer_auth(token);
+    }
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return anthropic_error(
@@ -372,6 +426,11 @@ async fn stream_messages(
             )
         }
     };
+    if bearer.is_some() && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return gateway_error_response(GatewayError::AuthRequired(
+            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+        ));
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

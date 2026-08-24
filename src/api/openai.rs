@@ -9,6 +9,8 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
+use crate::cloud;
+use crate::registry::{ModelRoute, ModelSource};
 use crate::state::ModelManifest;
 
 pub fn routes() -> Router<SharedState> {
@@ -30,6 +32,25 @@ fn openai_err(status: StatusCode, kind: &str, message: impl Into<String>, param:
         .into_response()
 }
 
+/// Maps a `GatewayError` to its OpenAI-shaped response — the one place
+/// this happens, so `AuthRequired` (raised both by `ensure_loaded` and,
+/// after routing, by the cloud forward step below) gets identical
+/// treatment either way.
+fn gateway_error_response(e: GatewayError) -> Response {
+    match e {
+        GatewayError::CachedUnsupported(msg) => {
+            openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", msg, None)
+        }
+        GatewayError::InsufficientRam(msg) => {
+            openai_err(StatusCode::SERVICE_UNAVAILABLE, "invalid_request_error", msg, None)
+        }
+        GatewayError::LoadFailed(msg) => openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None),
+        GatewayError::AuthRequired(msg) => {
+            openai_err(StatusCode::UNAUTHORIZED, "authentication_error", msg, None)
+        }
+    }
+}
+
 async fn list_models(State(app): State<SharedState>) -> Json<serde_json::Value> {
     let data: Vec<_> = app
         .registry
@@ -43,7 +64,10 @@ async fn list_models(State(app): State<SharedState>) -> Json<serde_json::Value> 
                 "id": m.canonical_id,
                 "object": "model",
                 "created": pulled_at,
-                "owned_by": "nodelm",
+                "owned_by": match m.source {
+                    ModelSource::Local => "nodelm",
+                    ModelSource::Cloud => "nodelm-cloud",
+                },
             })
         })
         .collect();
@@ -77,23 +101,50 @@ async fn chat_completions(
         );
     };
 
-    let port = match ensure_loaded(&app, &canonical).await {
-        Ok(p) => p,
-        Err(GatewayError::CachedUnsupported(msg)) => {
-            return openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", msg, None)
-        }
-        Err(GatewayError::InsufficientRam(msg)) => {
-            return openai_err(StatusCode::SERVICE_UNAVAILABLE, "invalid_request_error", msg, None)
-        }
-        Err(GatewayError::LoadFailed(msg)) => {
-            return openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None)
-        }
+    let route = match ensure_loaded(&app, &canonical).await {
+        Ok(r) => r,
+        Err(e) => return gateway_error_response(e),
     };
 
     let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Local: exactly today's behavior, proxy byte-for-byte to the
+    // spawned llama-server child, client's own `model` field untouched.
+    // Cloud: forward to nodelm-web instead, with a bearer token and the
+    // outgoing `model` swapped for the cloud model's stored `ref` (the
+    // client's requested alias/id is not what nodelm-web expects) —
+    // same byte-passthrough/streaming logic otherwise (§"/v1/chat/
+    // completions routing for cloud-sourced models").
+    let (url, bearer, body) = match route {
+        ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, body),
+        ModelRoute::Cloud => {
+            let token = match cloud::ensure_token() {
+                Ok(t) => t,
+                Err(e) => return gateway_error_response(GatewayError::AuthRequired(e.to_string())),
+            };
+            let cloud_model_id = app
+                .registry
+                .get_clone(&canonical)
+                .and_then(|ms| ms.cloud_model_id)
+                .unwrap_or_else(|| canonical.clone());
+            let mut body = body;
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("model".to_string(), serde_json::Value::String(cloud_model_id));
+            }
+            (
+                format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
+                Some(token),
+                body,
+            )
+        }
+    };
+
     let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
-    let upstream = match client.post(&url).json(&body).send().await {
+    let mut req = client.post(&url).json(&body);
+    if let Some(token) = &bearer {
+        req = req.bearer_auth(token);
+    }
+    let upstream = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return openai_err(
@@ -104,6 +155,16 @@ async fn chat_completions(
             )
         }
     };
+
+    // A cloud 401 (expired/revoked token) gets this daemon's own 401
+    // shape rather than nodelm-web's raw error body; every other
+    // upstream status — local or cloud — is passed through verbatim,
+    // same as always.
+    if bearer.is_some() && upstream.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return gateway_error_response(GatewayError::AuthRequired(
+            "cloud login expired or revoked — run 'nodelm login' again".to_string(),
+        ));
+    }
 
     let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::OK);
 

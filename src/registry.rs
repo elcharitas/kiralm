@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::cloud::CloudModel;
 use crate::state::ModelManifest;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,6 +20,24 @@ pub enum ModelStatus {
     Loading,
     Loaded,
     Failed(String),
+}
+
+/// Where a `ModelState` came from (Cloud integration §"ModelRegistry
+/// design for cloud models") — one registry, one resolve path, both
+/// kinds flow through the same `/v1/models`/`nodelm list` loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelSource {
+    Local,
+    Cloud,
+}
+
+/// What `ensure_loaded` hands back to a chat-completion call site: a
+/// local port to proxy to, or a signal to forward to nodelm-web instead.
+/// This is the one place "is this model spawnable locally" is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelRoute {
+    Local(u16),
+    Cloud,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +136,17 @@ pub struct ModelState {
     pub port: Option<u16>,
     pub mlocked: bool,
     pub last_used: Instant,
-    pub verdict: Verdict,
+    /// `None` for `Cloud` entries: no RAM check ever ran (§5.2 doesn't
+    /// apply — there's no local file to weigh against headroom).
+    pub verdict: Option<Verdict>,
+    pub source: ModelSource,
+    /// The catalog slug nodelm-web expects in the outgoing `model` field
+    /// when forwarding a chat completion (`CloudModel.id`, e.g.
+    /// `llama-3.1-70b` — nodelm-web/SPEC.md's `/api/v1/chat/completions`
+    /// requires the catalog slug, not the internal `ref`) — distinct
+    /// from `canonical_id`, which is this daemon's own namespaced id
+    /// (§6/Id namespacing). `None` for `Local` entries.
+    pub cloud_model_id: Option<String>,
 }
 
 impl ModelState {
@@ -138,12 +167,49 @@ impl ModelState {
             port: None,
             mlocked: false,
             last_used: Instant::now(),
-            verdict: Verdict {
+            verdict: Some(Verdict {
                 tier: VerdictTier::NotRecommended,
                 reason: "not yet evaluated".to_string(),
                 tok_per_sec_multiplier: None,
-            },
+            }),
+            source: ModelSource::Local,
+            cloud_model_id: None,
         }
+    }
+
+    /// Converts one raw nodelm-web catalog record into a registry entry
+    /// (Cloud integration §"Catalog sync"/"Merge into the registry").
+    /// Returns `None` for a `kind` this daemon doesn't route chat
+    /// completions through yet — currently `local_pull` rows, which are
+    /// curated `nodelm pull` suggestions, not network-invocable models
+    /// (nodelm-web's own `/api/v1/models` excludes them too).
+    pub fn from_cloud_entry(m: &CloudModel) -> Option<ModelState> {
+        // Id namespacing (§"Id namespacing"): Workers-AI-hosted models
+        // keep nodelm-web's own `@cf/...` ref under a `workers-ai/`
+        // prefix; anything else recognized as cloud-routable falls back
+        // to `cloud/<catalog-id>` so future kinds don't collide.
+        let canonical_id = match m.kind.as_str() {
+            "workers_ai" => format!("workers-ai/{}", m.r#ref),
+            "local_pull" => return None,
+            _ => format!("cloud/{}", m.id),
+        };
+        Some(ModelState {
+            canonical_id,
+            gguf_path: PathBuf::new(),
+            architecture: String::new(),
+            is_moe: false,
+            expert_count: None,
+            size_bytes: m.size_bytes.unwrap_or(0),
+            hot: false,
+            status: ModelStatus::Loaded,
+            pid: None,
+            port: None,
+            mlocked: false,
+            last_used: Instant::now(),
+            verdict: None,
+            source: ModelSource::Cloud,
+            cloud_model_id: Some(m.id.clone()),
+        })
     }
 }
 
@@ -172,6 +238,18 @@ impl ModelRegistry {
 
     pub fn remove(&self, canonical_id: &str) {
         self.inner.write().remove(canonical_id);
+    }
+
+    /// Wholesale replace of every `Cloud`-sourced entry with a fresh
+    /// batch from the latest catalog sync (Cloud integration §"Merge
+    /// into the registry") — local entries are untouched. A single write
+    /// lock so readers never see a half-swapped set.
+    pub fn replace_cloud_entries(&self, entries: Vec<ModelState>) {
+        let mut inner = self.inner.write();
+        inner.retain(|_, m| m.source != ModelSource::Cloud);
+        for entry in entries {
+            inner.insert(entry.canonical_id.clone(), entry);
+        }
     }
 
     /// Resolution order (§6): alias exact match -> canonical id; else
@@ -214,5 +292,82 @@ mod tests {
         assert_eq!(compute_ratio_verdict(false, 100, 100).tier, VerdictTier::FitsFast);
         // even close to fitting, dense over-RAM is NOT_RECOMMENDED, not degraded
         assert_eq!(compute_ratio_verdict(false, 100, 99).tier, VerdictTier::NotRecommended);
+    }
+
+    fn cloud_model(kind: &str, id: &str, r#ref: &str) -> CloudModel {
+        CloudModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            r#ref: r#ref.to_string(),
+            kind: kind.to_string(),
+            size_bytes: None,
+            description: None,
+            enabled: true,
+            sort_order: 0,
+        }
+    }
+
+    #[test]
+    fn cloud_entry_namespacing_and_no_ram_story() {
+        let m = ModelState::from_cloud_entry(&cloud_model(
+            "workers_ai",
+            "llama-3.1-70b",
+            "@cf/meta/llama-3.1-70b-instruct",
+        ))
+        .unwrap();
+        assert_eq!(m.canonical_id, "workers-ai/@cf/meta/llama-3.1-70b-instruct");
+        assert_eq!(m.cloud_model_id.as_deref(), Some("llama-3.1-70b"));
+        assert_eq!(m.source, ModelSource::Cloud);
+        assert_eq!(m.status, ModelStatus::Loaded);
+        assert!(m.verdict.is_none());
+        assert_eq!(m.gguf_path, PathBuf::new());
+        assert!(m.port.is_none() && m.pid.is_none() && !m.mlocked && !m.hot);
+    }
+
+    #[test]
+    fn cloud_entry_falls_back_to_cloud_prefix_for_unknown_kind() {
+        let m = ModelState::from_cloud_entry(&cloud_model("byok", "my-model", "gpt-4o")).unwrap();
+        assert_eq!(m.canonical_id, "cloud/my-model");
+    }
+
+    #[test]
+    fn local_pull_rows_are_not_cloud_models() {
+        assert!(ModelState::from_cloud_entry(&cloud_model("local_pull", "x", "y")).is_none());
+    }
+
+    #[test]
+    fn replace_cloud_entries_leaves_local_models_alone() {
+        let registry = ModelRegistry::new();
+        let mut local = ModelState::from_manifest(
+            &ModelManifest {
+                canonical_id: "local-model".to_string(),
+                filename: "x.gguf".to_string(),
+                sha256: String::new(),
+                size_bytes: 1,
+                architecture: "llama".to_string(),
+                is_moe: false,
+                expert_count: None,
+                context_length_trained: 0,
+                vision_capable: false,
+                source_ref: String::new(),
+                pulled_at: chrono::Utc::now(),
+            },
+            false,
+        );
+        local.canonical_id = "local-model".to_string();
+        registry.insert(local);
+
+        let cloud_entry = ModelState::from_cloud_entry(&cloud_model("workers_ai", "a", "@cf/a")).unwrap();
+        registry.replace_cloud_entries(vec![cloud_entry]);
+        assert!(registry.get_clone("local-model").is_some());
+        assert!(registry.get_clone("workers-ai/@cf/a").is_some());
+
+        // A second sync with a different model wholesale-replaces the
+        // first cloud batch but still doesn't touch the local entry.
+        let cloud_entry2 = ModelState::from_cloud_entry(&cloud_model("workers_ai", "b", "@cf/b")).unwrap();
+        registry.replace_cloud_entries(vec![cloud_entry2]);
+        assert!(registry.get_clone("local-model").is_some());
+        assert!(registry.get_clone("workers-ai/@cf/a").is_none());
+        assert!(registry.get_clone("workers-ai/@cf/b").is_some());
     }
 }
