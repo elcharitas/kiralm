@@ -74,7 +74,10 @@ pub enum InputBlock {
 
 #[derive(Debug, Deserialize)]
 pub struct ImageSource {
+    // "type" (always "base64") isn't branched on; only media_type/data
+    // feed the data-URI built below.
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub kind: String,
     pub media_type: String,
     pub data: String,
