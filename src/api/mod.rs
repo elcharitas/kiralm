@@ -93,6 +93,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(openai::routes())
         .merge(anthropic::routes())
         .merge(internal::routes())
+        .fallback(internal::static_handler)
         .with_state(state)
 }
 
