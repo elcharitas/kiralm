@@ -1,32 +1,48 @@
+//! Entry point. Full CLI dispatch (`cli.rs`) and the HTTP surface
+//! (`api/`) are separate build tracks; this wires up config, state, the
+//! model registry, and the residency manager/watcher — the daemon core.
+//!
+//! Several public methods below (hot-toggle, verdict cache, manifest
+//! read/write) have no caller yet in this partial build — `api/` and
+//! `pull.rs` are the consumers, built on other branches.
+#![allow(dead_code)]
+
+mod config;
+mod engine;
 mod registry;
 mod residency;
+mod state;
 
-use registry::{compute_verdict, ModelKind};
-use residency::{available_ram_bytes, check_admission, resolve_headroom_bytes, total_ram_bytes};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-// ponytail: no CLI/daemon wiring yet, this module owns hardware-safety
-// logic only. Other modules (config.rs, engine.rs, api/) plug in later.
-fn main() {
-    let total = total_ram_bytes();
-    let available = available_ram_bytes();
-    let headroom = resolve_headroom_bytes(total, None).expect("headroom floor check");
-    println!(
-        "total RAM: {:.2} GB, available: {:.2} GB, headroom reserved: {:.2} GB",
-        total as f64 / 1e9,
-        available as f64 / 1e9,
-        headroom as f64 / 1e9
-    );
+use anyhow::Result;
 
-    let budget = total.saturating_sub(headroom);
-    let sample_size_bytes = 4_000_000_000u64; // ~4GB GGUF, e.g. OLMoE Q4_K_M
-    let verdict = compute_verdict(ModelKind::Moe, sample_size_bytes, budget);
-    println!("sample MoE model verdict: {:?}", verdict);
+use config::Config;
+use registry::ModelRegistry;
+use residency::ResidencyManager;
+use state::State;
 
-    match check_admission(0, sample_size_bytes, total, headroom) {
-        Ok(()) => println!("admission: OK, model would be allowed to load"),
-        Err(rejected) => println!(
-            "admission: refused, short by {:.2} GB",
-            rejected.shortfall_bytes as f64 / 1e9
-        ),
-    }
+fn nodelm_home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".nodelm")
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let home = nodelm_home();
+    std::fs::create_dir_all(&home)?;
+
+    let config = Config::load(&home.join("config.toml"))?;
+    let state_path = home.join("state.json");
+    let state = State::load(&state_path)?;
+
+    let registry = Arc::new(ModelRegistry::new());
+    let residency = Arc::new(ResidencyManager::new(registry.clone(), config, home.clone(), state, state_path));
+    let _watcher = residency.clone().spawn_watcher();
+
+    println!("nodelm daemon core up (home={})", home.display());
+
+    tokio::signal::ctrl_c().await?;
+    residency.shutdown_all().await;
+    Ok(())
 }
