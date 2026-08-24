@@ -8,3 +8,6 @@ bench/sweep.log
 .DS_Store
 .claude/
 .playwright-mcp/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/binaries/*
