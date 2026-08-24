@@ -5,6 +5,19 @@ Hugging Face, runs them as managed `llama-server` child processes, and
 exposes OpenAI- and Anthropic-compatible HTTP APIs on your machine. A
 single `nodelm` binary is both the CLI and the daemon.
 
+## Prerequisites
+
+NodeLM spawns `llama-server` to actually run models — it doesn't bundle
+it. Install llama.cpp first:
+
+```
+brew install llama.cpp
+```
+
+By default NodeLM looks for the binary at `/opt/homebrew/bin/llama-server`
+(brew's default path); override via `llama_server_bin` in `config.toml`
+if yours lives elsewhere.
+
 ## Build
 
 ```
