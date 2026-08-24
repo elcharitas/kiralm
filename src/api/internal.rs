@@ -15,6 +15,9 @@ use std::convert::Infallible;
 
 /// The built UI (`ui/dist/`), embedded at compile time (§2, SPEC's UI
 /// section) — run `npm run build` in `ui/` before building the daemon.
+// ponytail: cargo won't notice ui/dist/ changes on its own (no
+// rerun-if-changed) -- touch this file or `cargo clean -p nodelm`
+// after rebuilding the UI. Add a build.rs if this bites often.
 #[derive(RustEmbed)]
 #[folder = "ui/dist/"]
 struct Assets;

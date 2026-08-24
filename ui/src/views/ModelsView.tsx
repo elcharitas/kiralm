@@ -150,31 +150,6 @@ export function ModelsView({
         />
       )}
 
-      <div className="catalog">
-        <h2 className="catalog-title">Curated models</h2>
-        <div className="catalog-grid">
-          {CATALOG.map((c) => {
-            const already = models.some((m) => m.id === c.ref || m.aliases.includes(c.ref));
-            return (
-              <div key={c.ref} className="catalog-card">
-                <div className="catalog-card-name">{c.name}</div>
-                <div className="catalog-card-size mono">{c.size}</div>
-                <div className="catalog-card-desc">{c.description}</div>
-                <div className="catalog-card-ref mono">{c.ref}</div>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  disabled={already}
-                  onClick={() => pull(c.ref)}
-                >
-                  {already ? "Downloaded" : "Pull"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       <table className="table">
         <thead>
           <tr>
@@ -235,10 +210,29 @@ export function ModelsView({
           {models.length === 0 && (
             <tr>
               <td colSpan={7} className="table-empty">
-                No models downloaded yet — pull one above (e.g. unsloth/Qwen3-30B-A3B:Q6_K).
+                No models downloaded yet — pull one below.
               </td>
             </tr>
           )}
+          {CATALOG.filter(
+            (c) => !models.some((m) => m.id === c.ref || m.aliases.includes(c.ref))
+          ).map((c) => (
+            <tr key={c.ref} className="table-row-catalog">
+              <td>
+                <div className="model-name">{c.name}</div>
+                <div className="model-aliases mono">{c.ref}</div>
+              </td>
+              <td className="mono">{c.ref.split(":").pop()}</td>
+              <td className="mono">{c.size}</td>
+              <td className="dim">{c.description}</td>
+              <td className="dim">not downloaded</td>
+              <td colSpan={2}>
+                <button type="button" className="btn btn-ghost" onClick={() => pull(c.ref)}>
+                  Pull
+                </button>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
 
