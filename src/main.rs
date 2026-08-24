@@ -11,6 +11,7 @@ mod pull;
 mod registry;
 mod residency;
 mod state;
+mod tunnel;
 mod tunnel_auth;
 
 use std::sync::Arc;
@@ -61,6 +62,21 @@ enum Command {
     Logout,
     /// Shows this machine's registered device identity.
     Device,
+    /// Enable/disable/check the Cloudflare Tunnel remote connection.
+    Tunnel {
+        #[command(subcommand)]
+        cmd: TunnelCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelCommand {
+    /// Provisions (or reuses) a tunnel and starts `cloudflared`.
+    Enable,
+    /// Stops `cloudflared`; the backend-side tunnel stays provisioned.
+    Disable,
+    /// Reports whether the tunnel is enabled and `cloudflared` is alive.
+    Status,
 }
 
 #[tokio::main]
@@ -100,6 +116,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Login => cloud::login(&config).await,
         Command::Logout => cloud::logout(),
         Command::Device => cloud::device_info(),
+        Command::Tunnel { cmd } => match cmd {
+            TunnelCommand::Enable => cli::tunnel_enable(&config).await,
+            TunnelCommand::Disable => cli::tunnel_disable(&config).await,
+            TunnelCommand::Status => cli::tunnel_status(&config).await,
+        },
     }
 }
 
@@ -135,6 +156,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
 
     let cloud_config = app_state.config.cloud.clone();
     let registry_for_sync = app_state.registry.clone();
+    let app_state_for_tunnel = app_state.clone();
     let router = api::build_router(app_state);
 
     // bind TCP first: if another daemon already owns this port, fail fast
@@ -178,6 +200,11 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     });
 
     let unix_task = tokio::spawn(serve_unix(unix_listener, router));
+
+    // Re-spawn `cloudflared` if it was left enabled across a restart
+    // (§"Daemon-restart behavior") — after listeners are already bound,
+    // same ordering catalog-sync-at-boot uses.
+    api::tunnel::respawn_if_enabled(&app_state_for_tunnel).await;
 
     // One non-blocking sync after the listeners are already accepting
     // (Cloud integration §"Catalog sync") — detached, never awaited, so

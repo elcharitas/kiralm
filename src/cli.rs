@@ -329,6 +329,46 @@ pub async fn hot(config: &Config, name: &str, on: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn tunnel_enable(config: &Config) -> anyhow::Result<()> {
+    let (status, body) = request(config, Method::POST, "/api/tunnel/enable", None).await?;
+    if !status.is_success() {
+        print_error_and_exit(status, &body);
+    }
+    let hostname = body["hostname"].as_str().unwrap_or("");
+    println!("Tunnel enabled: https://{hostname}");
+    Ok(())
+}
+
+pub async fn tunnel_disable(config: &Config) -> anyhow::Result<()> {
+    let (status, body) = request(config, Method::POST, "/api/tunnel/disable", None).await?;
+    if !status.is_success() && status != StatusCode::NO_CONTENT {
+        print_error_and_exit(status, &body);
+    }
+    println!("Tunnel disabled.");
+    Ok(())
+}
+
+pub async fn tunnel_status(config: &Config) -> anyhow::Result<()> {
+    let (status, body) = request(config, Method::GET, "/api/tunnel/status", None).await?;
+    if !status.is_success() {
+        print_error_and_exit(status, &body);
+    }
+    if !body["enabled"].as_bool().unwrap_or(false) {
+        println!("Tunnel disabled.");
+        return Ok(());
+    }
+    let hostname = body["hostname"].as_str().unwrap_or("");
+    if body["running"].as_bool().unwrap_or(false) {
+        println!("Tunnel enabled, connected: https://{hostname}");
+    } else {
+        println!(
+            "Tunnel enabled but cloudflared is not running (crashed?) — \
+             try 'nodelm tunnel disable' then 'enable'"
+        );
+    }
+    Ok(())
+}
+
 pub async fn rm(config: &Config, name: &str) -> anyhow::Result<()> {
     let path = format!("/api/models/{}", encode_path_segment(name));
     let (status, body) = request(config, Method::DELETE, &path, None).await?;

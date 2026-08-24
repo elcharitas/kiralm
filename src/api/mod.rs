@@ -4,6 +4,7 @@
 pub mod anthropic;
 pub mod internal;
 pub mod openai;
+pub mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +25,11 @@ pub struct AppState {
     pub state: RwLock<State>,
     /// In-flight pulls, keyed by canonical id, for SSE progress fan-out.
     pub pulls: RwLock<HashMap<String, ProgressTx>>,
+    /// The supervised `cloudflared` child, if the tunnel is currently
+    /// running (§"Tunnel client (daemon)") — in-memory only, like
+    /// `ensure_loaded`'s reaper task; `state.tunnel` is the persisted
+    /// on/off record that survives a restart.
+    pub tunnel_child: parking_lot::Mutex<Option<tokio::process::Child>>,
 }
 
 impl AppState {
@@ -33,6 +39,7 @@ impl AppState {
             registry,
             state: RwLock::new(state),
             pulls: RwLock::new(HashMap::new()),
+            tunnel_child: parking_lot::Mutex::new(None),
         }
     }
 
@@ -93,6 +100,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(openai::routes())
         .merge(anthropic::routes())
         .merge(internal::routes())
+        .merge(tunnel::routes())
         .fallback(internal::static_handler)
         .with_state(state)
 }

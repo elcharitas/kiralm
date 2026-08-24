@@ -91,10 +91,23 @@ pub struct ModelEntry {
     pub verdict_cache: Option<VerdictCache>,
 }
 
+/// Daemon-owned tunnel runtime state (§"Tunnel client (daemon)") — the
+/// raw Cloudflare token lives separately in `tunnel_token.json` (a
+/// secret, not status); this is just enough to report `nodelm tunnel
+/// status` and know whether to re-spawn `cloudflared` on daemon restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TunnelState {
+    pub enabled: bool,
+    pub hostname: String,
+    pub cf_tunnel_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
     pub models: HashMap<String, ModelEntry>,
     pub aliases: HashMap<String, String>,
+    #[serde(default)]
+    pub tunnel: Option<TunnelState>,
 }
 
 impl State {
