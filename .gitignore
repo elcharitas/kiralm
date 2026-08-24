@@ -7,3 +7,4 @@ bench/last_server.log
 bench/sweep.log
 .DS_Store
 .claude/
+.playwright-mcp/
