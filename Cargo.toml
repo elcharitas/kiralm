@@ -1,0 +1,23 @@
+[package]
+name = "nodelm"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "nodelm"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "time", "io-util", "sync", "fs", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+parking_lot = "0.12"
+sysinfo = "0.32"
+chrono = { version = "0.4", features = ["serde"] }
+sha1 = "0.10"
+hex = "0.4"
+nix = { version = "0.29", features = ["signal", "process"] }
+dirs = "5"
