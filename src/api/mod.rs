@@ -1,7 +1,7 @@
-//! HTTP surface (SPEC.md §2). Only the OpenAI-compatible routes are wired
-//! here for now; `anthropic.rs` (§2.2) and `internal.rs` (§2.5) land in
-//! their own passes and aren't part of this worktree.
+//! HTTP surface (SPEC.md §2). `internal.rs` (§2.5) lands in cli-daemon's
+//! pass; wired here once that branch merges.
 
+pub mod anthropic;
 pub mod openai;
 
 use std::sync::Arc;
