@@ -1,0 +1,21 @@
+[package]
+name = "nodelm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nodelm"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+futures-util = "0.3"
+async-stream = "0.3"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
