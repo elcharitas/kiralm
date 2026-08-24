@@ -58,6 +58,8 @@ enum Command {
     Login,
     /// Deletes stored cloud credentials.
     Logout,
+    /// Shows this machine's registered device identity.
+    Device,
 }
 
 #[tokio::main]
@@ -96,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Rm { name } => cli::rm(&config, &name).await,
         Command::Login => cloud::login(&config).await,
         Command::Logout => cloud::logout(),
+        Command::Device => cloud::device_info(),
     }
 }
 

@@ -77,6 +77,73 @@ pub fn ensure_token() -> anyhow::Result<String> {
 }
 
 // ---------------------------------------------------------------------
+// Device identity
+// ---------------------------------------------------------------------
+
+fn device_id_path() -> PathBuf {
+    nodelm_home().join("device_id.json")
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DeviceId {
+    daemon_instance_id: String,
+}
+
+/// Read-or-create the per-machine `daemon_instance_id`, persisted to
+/// `~/.nodelm/device_id.json` — stable across logins so the backend
+/// upserts one `devices` row per machine instead of creating a new one
+/// each time (§"Device identity").
+pub fn ensure_daemon_instance_id() -> anyhow::Result<String> {
+    if let Ok(raw) = std::fs::read_to_string(device_id_path()) {
+        if let Ok(existing) = serde_json::from_str::<DeviceId>(&raw) {
+            return Ok(existing.daemon_instance_id);
+        }
+    }
+
+    let id = DeviceId {
+        daemon_instance_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let path = device_id_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&id)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(id.daemon_instance_id)
+}
+
+/// Self-description sent as `label` on `device/code` and shown by
+/// `nodelm device` — recomputed each call, never cached (§"Device identity").
+fn device_label() -> String {
+    use sysinfo::System;
+    format!(
+        "{} ({} {})",
+        System::host_name().unwrap_or_default(),
+        System::name().unwrap_or_default(),
+        System::os_version().unwrap_or_default()
+    )
+}
+
+/// `nodelm device`: read-only, no network call.
+pub fn device_info() -> anyhow::Result<()> {
+    let Ok(raw) = std::fs::read_to_string(device_id_path()) else {
+        println!("Not yet registered — run 'nodelm login' first.");
+        return Ok(());
+    };
+    let Ok(id) = serde_json::from_str::<DeviceId>(&raw) else {
+        println!("Not yet registered — run 'nodelm login' first.");
+        return Ok(());
+    };
+    println!(
+        "This machine is registered as {} ({})",
+        device_label(),
+        &id.daemon_instance_id[..8]
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
 // Device-flow login/logout
 // ---------------------------------------------------------------------
 
@@ -119,9 +186,15 @@ pub async fn login(config: &Config) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(config.cloud.request_timeout_secs))
         .build()?;
 
+    let daemon_instance_id = ensure_daemon_instance_id()?;
+
     let device: DeviceCodeResponse = client
         .post(format!("{}/api/auth/device/code", config.cloud.api_base_url))
-        .json(&serde_json::json!({ "client_id": config.cloud.client_id }))
+        .json(&serde_json::json!({
+            "client_id": config.cloud.client_id,
+            "daemon_instance_id": daemon_instance_id,
+            "label": device_label(),
+        }))
         .send()
         .await?
         .error_for_status()?
