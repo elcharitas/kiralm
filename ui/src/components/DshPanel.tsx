@@ -16,7 +16,6 @@ export function DshPanel() {
   const [selected, setSelected] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<string[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(false);
-  const [pkg, setPkg] = useState("");
   const { toast, confirm } = useDialogs();
 
   const loadStatus = () => api.dshStatus().then(setStatus, () => {});
@@ -73,18 +72,6 @@ export function DshPanel() {
     }
   };
 
-  const installPlugin = async () => {
-    if (!selected || !pkg.trim()) return;
-    try {
-      const result = await api.installDshPlugin(selected, pkg.trim());
-      setPlugins(result.plugins);
-      setPkg("");
-      toast(`${pkg.trim()} installed`, "success");
-    } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
-    }
-  };
-
   const removePlugin = async (name: string) => {
     if (!selected) return;
     try {
@@ -106,20 +93,9 @@ export function DshPanel() {
           <span className="mono truncate">{selected}</span>
         </div>
 
-        <div className="skills-add-form">
-          <input
-            className="mcp-field mono"
-            placeholder="npm package (e.g. @dsh-plugins/example)"
-            value={pkg}
-            onChange={(e) => setPkg(e.target.value)}
-          />
-          <div className="modal-actions">
-            <button type="button" className="btn btn-accent" disabled={!pkg.trim()} onClick={installPlugin}>
-              Install
-            </button>
-          </div>
-        </div>
-
+        {/* Installing by package name moved to the Plugins tab (dsh
+            source kind); this view stays read-only-plus-remove so a
+            stray install can still be cleaned up per profile. */}
         {pluginsLoading ? (
           <p className="settings-hint">Loading…</p>
         ) : plugins.length === 0 ? (

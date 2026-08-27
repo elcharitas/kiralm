@@ -217,6 +217,23 @@ export interface DshStatus {
   version: string | null;
 }
 
+// GET /api/plugins/catalog's per-row shape: kiralm-web's cloud catalog
+// (GET /api/plugins) plus a real `installed` flag re-derived from the
+// matching backend's own live state -- not a separate install registry.
+export type PluginSourceKind = "claude_marketplace" | "agent_plugin" | "dsh";
+
+export interface CatalogPlugin {
+  id: string;
+  name: string;
+  description: string | null;
+  source_kind: PluginSourceKind;
+  source: string;
+  plugin_name: string | null;
+  enabled: boolean;
+  sort_order: number;
+  installed: boolean;
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -507,6 +524,19 @@ export const api = {
     fetch(`/api/dsh/profiles/${encodeURIComponent(name)}/plugins/${encodeURIComponent(pkg)}`, {
       method: "DELETE",
     }).then((r) => asJson<{ plugins: string[] }>(r)),
+
+  listPluginCatalog: () =>
+    fetch("/api/plugins/catalog").then((r) => asJson<{ data: CatalogPlugin[] }>(r)),
+
+  installCatalogPlugin: (id: string) =>
+    fetch(`/api/plugins/catalog/${encodeURIComponent(id)}/install`, { method: "POST" }).then((r) =>
+      asJson<unknown>(r),
+    ),
+
+  uninstallCatalogPlugin: (id: string) =>
+    fetch(`/api/plugins/catalog/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) =>
+      asJson<unknown>(r),
+    ),
 };
 
 export interface GenerationState {

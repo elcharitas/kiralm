@@ -13,6 +13,7 @@ mod gguf;
 mod git;
 mod marketplace;
 mod mcp;
+mod plugin_catalog;
 mod pull;
 mod registry;
 mod residency;
@@ -234,8 +235,12 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     // Detached, never awaited, so a slow or unreachable backend can
     // never delay `serve` startup.
     if cloud_config.catalog_sync_on_startup {
+        let plugin_api_base_url = cloud_config.api_base_url.clone();
         tokio::spawn(async move {
             cloud::sync_cloud_models(&cloud_config.api_base_url, &registry_for_sync).await;
+        });
+        tokio::spawn(async move {
+            plugin_catalog::sync_cloud_plugins(&plugin_api_base_url).await;
         });
     }
 

@@ -9,6 +9,7 @@ pub mod internal;
 pub mod marketplace;
 pub mod mcp;
 pub mod openai;
+pub mod plugin_catalog;
 pub mod tunnel;
 
 use std::collections::HashMap;
@@ -255,6 +256,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(marketplace::routes())
         .merge(agent_plugin::routes())
         .merge(dsh::routes())
+        .merge(plugin_catalog::routes())
         .fallback(internal::static_handler)
         .with_state(state)
 }

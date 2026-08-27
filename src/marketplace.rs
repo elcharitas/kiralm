@@ -67,7 +67,9 @@ fn sanitize_slug(raw: &str) -> String {
 
 /// The repo name from a git URL (`https://.../owner/repo(.git)` or the
 /// scp-like `git@host:owner/repo.git`), used as the marketplace's slug.
-fn slug_from_url(url: &str) -> Result<String, String> {
+/// `pub(crate)` so plugin_catalog.rs can derive the same slug without
+/// re-adding the marketplace, for installed-state checks.
+pub(crate) fn slug_from_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim().trim_end_matches('/').trim_end_matches(".git");
     let last = trimmed.rsplit(['/', ':']).next().unwrap_or("");
     let slug = sanitize_slug(last);

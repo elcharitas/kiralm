@@ -14,9 +14,9 @@ import {
   PanelRightClose,
   Plug,
   Plus,
+  Puzzle,
   Shapes,
   Sparkles,
-  Store,
   User,
 } from "lucide-react";
 import type { StatusResponse } from "../api";
@@ -24,8 +24,8 @@ import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
 import { DshPanel } from "./DshPanel";
-import { MarketplacePanel } from "./MarketplacePanel";
 import { McpPanel } from "./McpPanel";
+import { PluginsPanel } from "./PluginsPanel";
 import { Select } from "./Select";
 import { SkillsPanel } from "./SkillsPanel";
 
@@ -100,7 +100,7 @@ export function RightPanel({
 
   const [tab, setTab] = useState<string>("diff");
   const activeTab =
-    tab === "skills" || tab === "mcp" || tab === "marketplace" || tab === "dsh" || files.some((f) => f.filename === tab)
+    tab === "skills" || tab === "mcp" || tab === "plugins" || tab === "dsh" || files.some((f) => f.filename === tab)
       ? tab
       : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -171,13 +171,13 @@ export function RightPanel({
         <button
           type="button"
           className={
-            activeTab === "marketplace"
+            activeTab === "plugins"
               ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
               : "right-panel-tab right-panel-tab-diff"
           }
-          onClick={() => setTab("marketplace")}
+          onClick={() => setTab("plugins")}
         >
-          <Store size={14} /> Marketplace
+          <Puzzle size={14} /> Plugins
         </button>
         <button
           type="button"
@@ -208,7 +208,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "marketplace" && activeTab !== "dsh" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "plugins" && activeTab !== "dsh" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -230,8 +230,8 @@ export function RightPanel({
           <SkillsPanel />
         ) : activeTab === "mcp" ? (
           <McpPanel />
-        ) : activeTab === "marketplace" ? (
-          <MarketplacePanel />
+        ) : activeTab === "plugins" ? (
+          <PluginsPanel />
         ) : activeTab === "dsh" ? (
           <DshPanel />
         ) : files.length === 0 ? (
