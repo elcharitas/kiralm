@@ -1,6 +1,7 @@
-//! Shared app state + router assembly for both listeners (§2). Both the
+//! Shared app state + router assembly for both listeners. Both the
 //! Unix socket and the TCP listener route to the same handlers.
 
+pub mod agent;
 pub mod anthropic;
 pub mod internal;
 pub mod openai;
@@ -9,43 +10,165 @@ pub mod tunnel;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::Router;
 use parking_lot::RwLock;
+use tokio::sync::broadcast;
 
+use crate::chats::Chats;
 use crate::cloud::LoginProgressTx;
 use crate::config::Config;
 use crate::engine;
 use crate::pull::{PullProgress, ProgressTx};
 use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource, ModelStatus};
 use crate::residency;
+use crate::settings::Settings;
 use crate::state::{ModelManifest, State};
+
+/// A chat session's server-side generation record: written by the
+/// background task draining the upstream stream (openai.rs), read by
+/// both the live response (via `tap`, while still running) and the
+/// reconnect/poll endpoint (via `state`, at any time, even after the
+/// task that wrote it is long gone).
+pub struct SessionGeneration {
+    pub state: RwLock<GenerationState>,
+    /// Live raw-SSE tap for whoever made the original request. `Some`
+    /// only while generation is in flight; the background task drops
+    /// its sender on completion, which closes this for any still-
+    /// attached response stream (recv() -> Closed) without touching
+    /// `state`, which stays readable forever after.
+    pub tap: parking_lot::Mutex<Option<broadcast::Sender<Bytes>>>,
+    /// The background task draining upstream, so an explicit stop (not
+    /// just a dropped response) can actually cancel the upstream
+    /// connection -- aborting it is what tells llama-server to stop
+    /// generating, same as dropping the connection always did before.
+    pub task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct GenerationState {
+    pub model: String,
+    pub text: String,
+    pub running: bool,
+    pub error: Option<String>,
+    /// Real tool calls made this turn, in order --
+    /// what the UI's "Worked for Xm Ys" collapsible actually expands to.
+    #[serde(default)]
+    pub steps: Vec<crate::tools::ToolStep>,
+}
 
 pub struct AppState {
     pub config: Config,
     pub registry: Arc<ModelRegistry>,
     pub state: RwLock<State>,
+    /// UI preferences (~/.kiralm/settings.json), edited from Settings >
+    /// General -- distinct from `state` (daemon-managed) and `config`
+    /// (process-level, config.toml).
+    pub settings: RwLock<Settings>,
+    /// Persisted chat history (~/.kiralm/chats.json), replacing what
+    /// used to live only in the browser's localStorage.
+    pub chats: RwLock<Chats>,
     /// In-flight pulls, keyed by canonical id, for SSE progress fan-out.
     pub pulls: RwLock<HashMap<String, ProgressTx>>,
     /// In-flight cloud logins, keyed by device_code, for SSE progress
     /// fan-out, same pattern as `pulls` above.
     pub logins: RwLock<HashMap<String, LoginProgressTx>>,
     /// The supervised `cloudflared` child, if the tunnel is currently
-    /// running (§"Tunnel client (daemon)"), in-memory only, like
+    /// running, in-memory only, like
     /// `ensure_loaded`'s reaper task; `state.tunnel` is the persisted
     /// on/off record that survives a restart.
     pub tunnel_child: parking_lot::Mutex<Option<tokio::process::Child>>,
+    /// Chat generations, keyed by the UI's session id, decoupled from
+    /// any one HTTP connection so generation keeps running/buffering
+    /// server-side even once the UI stops watching it.
+    // Entries never expire, unbounded growth over a very long daemon
+    // uptime with many sessions -- add a size/age-based sweep if that
+    // ever shows up in practice.
+    pub generations: RwLock<HashMap<String, Arc<SessionGeneration>>>,
 }
 
 impl AppState {
-    pub fn new(config: Config, registry: Arc<ModelRegistry>, state: State) -> AppState {
+    pub fn new(config: Config, registry: Arc<ModelRegistry>, state: State, settings: Settings, chats: Chats) -> AppState {
         AppState {
             config,
             registry,
             state: RwLock::new(state),
+            settings: RwLock::new(settings),
+            chats: RwLock::new(chats),
             pulls: RwLock::new(HashMap::new()),
             logins: RwLock::new(HashMap::new()),
             tunnel_child: parking_lot::Mutex::new(None),
+            generations: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Starts a fresh generation record for `session_id`, replacing any
+    /// prior one (a session only ever has one generation in flight at a
+    /// time). Returns it plus the subscriber for the initiating
+    /// response, subscribed before the background task starts sending
+    /// so no early tokens are missed.
+    pub fn start_generation(
+        &self,
+        session_id: &str,
+        model: &str,
+    ) -> (Arc<SessionGeneration>, broadcast::Receiver<Bytes>) {
+        let (tx, rx) = broadcast::channel(256);
+        let sg = Arc::new(SessionGeneration {
+            state: RwLock::new(GenerationState {
+                model: model.to_string(),
+                text: String::new(),
+                running: true,
+                error: None,
+                steps: Vec::new(),
+            }),
+            tap: parking_lot::Mutex::new(Some(tx)),
+            task: parking_lot::Mutex::new(None),
+        });
+        self.generations
+            .write()
+            .insert(session_id.to_string(), sg.clone());
+        (sg, rx)
+    }
+
+    /// Stops a session's in-flight generation, if any: aborts the
+    /// background task, which drops its upstream connection and so
+    /// actually tells llama-server to stop rather than just detaching
+    /// the UI's view of it.
+    pub fn stop_generation(&self, session_id: &str) -> bool {
+        let Some(sg) = self.generations.read().get(session_id).cloned() else {
+            return false;
+        };
+        if let Some(handle) = sg.task.lock().take() {
+            handle.abort();
+        }
+        *sg.tap.lock() = None;
+        let mut st = sg.state.write();
+        let was_running = st.running;
+        st.running = false;
+        was_running
+    }
+
+    /// Buffered-so-far text + running flag for a session, for a client
+    /// that reconnects or polls instead of watching the live stream.
+    /// Empty/not-running for a session that never generated anything.
+    pub fn generation_snapshot(&self, session_id: &str) -> GenerationState {
+        self.generations
+            .read()
+            .get(session_id)
+            .map(|sg| sg.state.read().clone())
+            .unwrap_or_default()
+    }
+
+    /// Session ids with generation currently in flight, for the
+    /// sidebar's status dots to poll cheaply regardless of which
+    /// session is focused.
+    pub fn running_generation_ids(&self) -> Vec<String> {
+        self.generations
+            .read()
+            .iter()
+            .filter(|(_, sg)| sg.state.read().running)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Gets (or lazily creates) the broadcast channel used to fan out
@@ -79,7 +202,7 @@ pub type SharedState = Arc<AppState>;
 
 /// (Re)builds a manifest's `ModelState` and inserts it into the live
 /// registry. Used both at `serve` startup (one pass over every manifest
-/// on disk) and right after a pull completes (§8), so a freshly-pulled
+/// on disk) and right after a pull completes, so a freshly-pulled
 /// model is loadable without a daemon restart.
 pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
     let ram = residency::read_ram_info();
@@ -112,7 +235,7 @@ pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
 }
 
 /// Assembles the full route table: OpenAI-compatible, Anthropic-compatible,
-/// and internal `/api/*` routes (§2.1, §2.2, §2.5).
+/// and internal `/api/*` routes.
 pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .merge(openai::routes())
@@ -124,33 +247,32 @@ pub fn build_router(state: SharedState) -> Router {
 }
 
 /// Resolves a name (alias or canonical) via the registry + state.json's
-/// alias map (§6).
+/// alias map.
 pub fn resolve_model(app: &SharedState, name: &str) -> Option<String> {
     let aliases = app.state.read().aliases.clone();
     app.registry.resolve(name, &aliases)
 }
 
 pub enum GatewayError {
-    /// Cached-unsupported architecture (§5.2/§5.3). Permanent, 4xx on
+    /// Cached-unsupported architecture. Permanent, 4xx on
     /// both surfaces, carries the real cached llama.cpp error text.
     CachedUnsupported(String),
-    /// Won't fit even after evicting eligible cold models (§5.4).
+    /// Won't fit even after evicting eligible cold models.
     InsufficientRam(String),
-    /// Spawn/health-check/tiny-completion failed transiently (§4.4).
+    /// Spawn/health-check/tiny-completion failed transiently.
     LoadFailed(String),
     /// No stored token, an expired one, or a backend 401 on an actual
-    /// cloud chat call (Cloud integration §"Logged-out / invalid-token
-    /// behavior"). Sibling to the three arms above, same 4xx treatment.
+    /// cloud chat call. Sibling to the three arms above, same 4xx treatment.
     AuthRequired(String),
 }
 
 /// Ensures `canonical_id` has a live `llama-server` child, spawning one
-/// synchronously if cold (admission control per §5.4 applies), and
+/// synchronously if cold (admission control applies), and
 /// returns its port. Reuses an already-loaded child on repeat calls,
-/// this is what keeps the model resident across requests (goal #2).
+/// this is what keeps the model resident across requests.
 ///
 /// STUB NOTE: no LRU eviction of cold models to make room, and no
-/// automatic-flag matrix beyond the always-on set (§4.3). See
+/// automatic-flag matrix beyond the always-on set. See
 /// engine.rs's module note. The owning residency agent should extend
 /// this rather than replace it wholesale; the admission math and
 /// registry bookkeeping here are real.
@@ -162,9 +284,9 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
     };
 
     // Cloud entries never spawn a local child. This is the one and
-    // only place "is this model spawnable locally" is decided (Cloud
-    // integration §"Routing choke point"). No admission check, no
-    // health poll: kiralm-web owns that model's residency, not us.
+    // only place "is this model spawnable locally" is decided. No
+    // admission check, no health poll: kiralm-web owns that model's
+    // residency, not us.
     if existing.source == ModelSource::Cloud {
         return Ok(ModelRoute::Cloud);
     }

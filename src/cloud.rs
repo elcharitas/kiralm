@@ -1,7 +1,6 @@
 //! Cloud auth (device-flow login/logout + token storage) and kiralm-web
-//! catalog fetch/merge (SPEC.md's "Cloud integration" section). Lives in
-//! one module because the spec puts all `credentials.json`/
-//! `cloud_catalog.json` I/O together:
+//! catalog fetch/merge. Lives in one module because both share the
+//! same `credentials.json`/`cloud_catalog.json` I/O:
 //!
 //! - Token storage (`CloudCredentials`, `ensure_token`). Every
 //!   cloud-model code path reads a token through here, never touching
@@ -63,7 +62,7 @@ impl CloudCredentials {
 }
 
 /// The single call every cloud-model code path uses instead of touching
-/// `credentials.json` directly (§"Token storage").
+/// `credentials.json` directly.
 pub fn ensure_token() -> anyhow::Result<String> {
     let Some(creds) = CloudCredentials::load()? else {
         anyhow::bail!("not logged in. run 'kiralm login'");
@@ -92,7 +91,7 @@ struct DeviceId {
 /// Read-or-create the per-machine `daemon_instance_id`, persisted to
 /// `~/.kiralm/device_id.json`, stable across logins so the backend
 /// upserts one `devices` row per machine instead of creating a new one
-/// each time (§"Device identity").
+/// each time.
 pub fn ensure_daemon_instance_id() -> anyhow::Result<String> {
     if let Ok(raw) = std::fs::read_to_string(device_id_path()) {
         if let Ok(existing) = serde_json::from_str::<DeviceId>(&raw) {
@@ -114,7 +113,7 @@ pub fn ensure_daemon_instance_id() -> anyhow::Result<String> {
 }
 
 /// Self-description sent as `label` on `device/code` and shown by
-/// `kiralm device`. Recomputed each call, never cached (§"Device identity").
+/// `kiralm device`. Recomputed each call, never cached.
 fn device_label() -> String {
     use sysinfo::System;
     format!(
@@ -165,8 +164,8 @@ pub struct DeviceCodeResponse {
 
 /// Progress event for the device-flow poll, broadcast over
 /// `GET /api/cloud/login/progress`. Mirrors `pull::PullProgress`'s
-/// shape/lifecycle (§"Cloud integration"): one broadcast channel per
-/// in-flight login, subscribers just fan out.
+/// shape/lifecycle: one broadcast channel per in-flight login,
+/// subscribers just fan out.
 #[derive(Debug, Clone, Serialize)]
 pub struct LoginProgress {
     /// "pending" | "success" | "expired" | "error"
@@ -405,7 +404,7 @@ fn open_browser(url: &str) {
 // Catalog sync
 // ---------------------------------------------------------------------
 
-/// `GET /api/models`'s per-row shape, verbatim (§"Catalog sync").
+/// `GET /api/models`'s per-row shape, verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudModel {
     pub id: String,
@@ -464,7 +463,7 @@ pub fn cache_age_secs() -> Option<i64> {
 
 /// Tracks whether the last fetch attempt failed, so a dead backend logs
 /// one `warn!` on the transition into an outage and one more on
-/// recovery, never spamming on every retry (§"Cache").
+/// recovery, never spamming on every retry.
 static LAST_FETCH_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Guards against a thundering herd of concurrent fetches when several
@@ -476,8 +475,8 @@ static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 /// Fetches `GET {api_base_url}/api/models`, caches it to disk, and (only
 /// when a valid token is present) merges it into `registry`. Never
-/// blocks or breaks anything on a network failure (§"Catalog sync",
-/// §"Merge into the registry"). Meant to be run inside `tokio::spawn`.
+/// blocks or breaks anything on a network failure. Meant to be run
+/// inside `tokio::spawn`.
 pub async fn sync_cloud_models(api_base_url: &str, registry: &crate::registry::ModelRegistry) {
     if SYNC_IN_FLIGHT.swap(true, Ordering::Relaxed) {
         return;
@@ -552,7 +551,7 @@ mod tests {
 
     /// Guards the `ref` rename against schema drift. kiralm-web's
     /// GET /api/models shape is fixed and this daemon must deserialize
-    /// it byte-for-byte (SPEC.md's "Catalog sync").
+    /// it byte-for-byte.
     #[test]
     fn cloud_model_deserializes_get_models_shape() {
         let raw = r#"{"id":"llama-3.1-70b","name":"Llama 3.1 70B",

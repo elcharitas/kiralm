@@ -1,4 +1,4 @@
-//! Anthropic-compatible `POST /v1/messages` (SPEC.md §2.2). Real
+//! Anthropic-compatible `POST /v1/messages`. Real
 //! translation to/from the OpenAI chat-completion shape (`api/openai.rs`)
 //! that a `llama-server` child speaks, not a byte passthrough. Request and
 //! response schemas differ entirely, and streaming needs a stateful
@@ -18,7 +18,7 @@ use serde_json::json;
 
 use super::openai::{
     ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
-    ChatContent, ChatContentPart, ChatMessage as OpenAiMessage, ImageUrl,
+    ChatContent, ChatContentPart, ChatMessage as OpenAiMessage, ImageUrl, ToolCall, ToolCallFunction,
 };
 use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
 use crate::cloud;
@@ -70,8 +70,46 @@ pub enum InputContent {
 pub enum InputBlock {
     Text { text: String },
     Image { source: ImageSource },
-    ToolUse {},
-    ToolResult {},
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        #[serde(default)]
+        content: ToolResultContent,
+    },
+}
+
+/// Anthropic's `tool_result.content` is either a bare string or a block
+/// array; either way it flattens to plain text for the OpenAI `role:
+/// "tool"` message the child expects.
+#[derive(Debug, Deserialize, Default)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    #[default]
+    Empty,
+    Text(String),
+    Blocks(Vec<InputBlock>),
+}
+
+impl ToolResultContent {
+    fn flatten(&self) -> String {
+        match self {
+            ToolResultContent::Empty => String::new(),
+            ToolResultContent::Text(s) => s.clone(),
+            ToolResultContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    InputBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,7 +154,7 @@ pub struct ResponseUsage {
 }
 
 // ---------------------------------------------------------------------
-// Errors (§2.4: Anthropic shape, chosen strictly by route)
+// Errors (Anthropic shape, chosen strictly by route)
 // ---------------------------------------------------------------------
 
 pub(crate) fn anthropic_error(status: StatusCode, kind: &'static str, message: impl Into<String>) -> Response {
@@ -152,27 +190,17 @@ fn gateway_error_response(e: GatewayError) -> Response {
 // Request -> OpenAI translation
 // ---------------------------------------------------------------------
 
-/// Converts one Anthropic content value to the OpenAI shape. Returns the
-/// unsupported block's type name on rejection (§2.2: tool_use/tool_result
-/// always 400; image blocks 400 unless the model is vision_capable).
-fn convert_content(content: &InputContent, vision_capable: bool) -> Result<ChatContent, &'static str> {
-    let blocks = match content {
-        InputContent::Text(s) => return Ok(ChatContent::Text(s.clone())),
-        InputContent::Blocks(b) => b,
-    };
-
+/// Converts a run of plain (text/image) blocks to the OpenAI content
+/// shape. Only ever called on sub-slices that `convert_message` has
+/// already filtered to exclude tool_use/tool_result. Image blocks 400
+/// unless the model is vision_capable.
+fn convert_plain_content(blocks: &[&InputBlock], vision_capable: bool) -> Result<ChatContent, &'static str> {
     let has_image = blocks.iter().any(|b| matches!(b, InputBlock::Image { .. }));
-    for b in blocks {
-        match b {
-            InputBlock::ToolUse {} => return Err("tool_use"),
-            InputBlock::ToolResult {} => return Err("tool_result"),
-            InputBlock::Image { .. } if !vision_capable => return Err("image"),
-            _ => {}
-        }
+    if has_image && !vision_capable {
+        return Err("image");
     }
 
     if !has_image {
-        // Pure text blocks -> flattened text (§2.2).
         let text = blocks
             .iter()
             .filter_map(|b| match b {
@@ -193,10 +221,95 @@ fn convert_content(content: &InputContent, vision_capable: bool) -> Result<ChatC
                     url: format!("data:{};base64,{}", source.media_type, source.data),
                 },
             },
-            InputBlock::ToolUse {} | InputBlock::ToolResult {} => unreachable!("rejected above"),
+            InputBlock::ToolUse { .. } | InputBlock::ToolResult { .. } => {
+                unreachable!("convert_message filters these out before calling us")
+            }
         })
         .collect();
     Ok(ChatContent::Parts(parts))
+}
+
+fn flush_plain(
+    buf: &mut Vec<&InputBlock>,
+    out: &mut Vec<OpenAiMessage>,
+    role: &str,
+    vision_capable: bool,
+) -> Result<(), &'static str> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    let content = convert_plain_content(buf, vision_capable)?;
+    out.push(OpenAiMessage {
+        role: role.to_string(),
+        content: Some(content),
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    buf.clear();
+    Ok(())
+}
+
+/// Converts one Anthropic message into zero or more OpenAI messages
+/// (replacing the old flat 400 for tool_use/tool_result): a run of
+/// text/image blocks becomes one ordinary message, a `tool_use` block
+/// becomes (part of) an assistant `tool_calls` message, and a
+/// `tool_result` block becomes its own `role: "tool"` message -- the
+/// shape the child (and this daemon's own tool-calling loop) actually
+/// understands. Order is preserved by flushing the buffered plain run
+/// whenever a tool block is hit.
+fn convert_message(m: &InputMessage, vision_capable: bool) -> Result<Vec<OpenAiMessage>, &'static str> {
+    let blocks = match &m.content {
+        InputContent::Text(s) => return Ok(vec![OpenAiMessage::text(m.role.clone(), s.clone())]),
+        InputContent::Blocks(b) => b,
+    };
+
+    let mut out = Vec::new();
+    let mut buf: Vec<&InputBlock> = Vec::new();
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+    for b in blocks {
+        match b {
+            InputBlock::Text { .. } | InputBlock::Image { .. } => buf.push(b),
+            InputBlock::ToolUse { id, name, input } => {
+                flush_plain(&mut buf, &mut out, &m.role, vision_capable)?;
+                tool_calls.push(ToolCall {
+                    id: id.clone(),
+                    kind: "function".to_string(),
+                    function: ToolCallFunction {
+                        name: name.clone(),
+                        arguments: input.to_string(),
+                    },
+                });
+            }
+            InputBlock::ToolResult { tool_use_id, content } => {
+                flush_plain(&mut buf, &mut out, &m.role, vision_capable)?;
+                if !tool_calls.is_empty() {
+                    out.push(OpenAiMessage {
+                        role: "assistant".to_string(),
+                        content: None,
+                        tool_calls: Some(std::mem::take(&mut tool_calls)),
+                        tool_call_id: None,
+                    });
+                }
+                out.push(OpenAiMessage {
+                    role: "tool".to_string(),
+                    content: Some(ChatContent::Text(content.flatten())),
+                    tool_calls: None,
+                    tool_call_id: Some(tool_use_id.clone()),
+                });
+            }
+        }
+    }
+    flush_plain(&mut buf, &mut out, &m.role, vision_capable)?;
+    if !tool_calls.is_empty() {
+        out.push(OpenAiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        });
+    }
+    Ok(out)
 }
 
 fn build_openai_request(
@@ -207,23 +320,17 @@ fn build_openai_request(
 ) -> Result<ChatCompletionRequest, Response> {
     let mut messages = Vec::with_capacity(req.messages.len() + 1);
     if let Some(system) = &req.system {
-        messages.push(OpenAiMessage {
-            role: "system".to_string(),
-            content: ChatContent::Text(system.clone()),
-        });
+        messages.push(OpenAiMessage::text("system", system.clone()));
     }
     for m in &req.messages {
-        let content = convert_content(&m.content, vision_capable).map_err(|block_type| {
+        let converted = convert_message(m, vision_capable).map_err(|block_type| {
             anthropic_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!("content block type '{block_type}' is not supported"),
             )
         })?;
-        messages.push(OpenAiMessage {
-            role: m.role.clone(),
-            content,
-        });
+        messages.extend(converted);
     }
 
     Ok(ChatCompletionRequest {
@@ -235,11 +342,13 @@ fn build_openai_request(
         top_k: req.top_k,
         stop: req.stop_sequences.clone(),
         stream,
+        tools: None,
+        chat_template_kwargs: None,
     })
 }
 
 // ---------------------------------------------------------------------
-// §2.3 stop_reason mapping
+// stop_reason mapping
 // ---------------------------------------------------------------------
 
 fn map_stop_reason(
@@ -295,8 +404,7 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
     };
 
     let http = reqwest::Client::new();
-    // Same routing branch as `/v1/chat/completions` (§"/v1/chat/
-    // completions routing for cloud-sourced models"). The translator
+    // Same routing branch as `/v1/chat/completions`. The translator
     // below doesn't know or care whether the child is local or cloud,
     // only that `ensure_loaded` handed it a route to call.
     let (url, bearer, openai_req) = match route {
@@ -446,11 +554,11 @@ async fn stream_messages(
     Sse::new(stream).into_response()
 }
 
-/// Stateful SSE translator (§2.2): message_start -> content_block_start ->
+/// Stateful SSE translator: message_start -> content_block_start ->
 /// N content_block_delta -> content_block_stop -> message_delta ->
 /// message_stop. A read failure partway through (child crash/OOM) emits an
 /// Anthropic `event: error` frame instead of aborting silently, since the
-/// stream has already been committed to the client by then (§2.2).
+/// stream has already been committed to the client by then.
 fn translate_stream(
     resp: reqwest::Response,
     msg_id: String,
@@ -468,7 +576,7 @@ fn translate_stream(
                 "model": model,
                 "stop_reason": null,
                 "stop_sequence": null,
-                // ponytail: llama-server doesn't expose the prompt token
+                // llama-server doesn't expose the prompt token
                 // count before streaming starts; real input_tokens would
                 // need buffering the prompt-processing phase separately.
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
@@ -521,7 +629,7 @@ fn translate_stream(
                         if let ChatChunkDelta { content: Some(text) } = choice.delta {
                             if !text.is_empty() {
                                 completion_text.push_str(&text);
-                                output_tokens += 1; // ponytail: chunk count as a token-count proxy
+                                output_tokens += 1; // chunk count as a token-count proxy
                                 yield Ok(sse_json("content_block_delta", json!({
                                     "type": "content_block_delta",
                                     "index": 0,
@@ -615,6 +723,8 @@ mod tests {
             Config::default(),
             Arc::new(ModelRegistry::new()),
             State::default(),
+            crate::settings::Settings::default(),
+            crate::chats::Chats::default(),
         ))
     }
 
@@ -645,28 +755,62 @@ mod tests {
     }
 
     #[test]
-    fn convert_content_rejects_tool_use() {
-        let content = InputContent::Blocks(vec![InputBlock::ToolUse {}]);
-        assert_eq!(convert_content(&content, false), Err("tool_use"));
+    fn convert_message_translates_tool_use_instead_of_rejecting() {
+        let msg = InputMessage {
+            role: "assistant".into(),
+            content: InputContent::Blocks(vec![InputBlock::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "a.txt"}),
+            }]),
+        };
+        let out = convert_message(&msg, false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "assistant");
+        let calls = out[0].tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].function.name, "read_file");
     }
 
     #[test]
-    fn convert_content_rejects_image_without_vision() {
-        let content = InputContent::Blocks(vec![InputBlock::Image {
+    fn convert_message_translates_tool_result_to_tool_role() {
+        let msg = InputMessage {
+            role: "user".into(),
+            content: InputContent::Blocks(vec![InputBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: ToolResultContent::Text("file contents".into()),
+            }]),
+        };
+        let out = convert_message(&msg, false).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "tool");
+        assert_eq!(out[0].tool_call_id.as_deref(), Some("call_1"));
+        match &out[0].content {
+            Some(ChatContent::Text(s)) => assert_eq!(s, "file contents"),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[test]
+    fn convert_plain_content_rejects_image_without_vision() {
+        let block = InputBlock::Image {
             source: ImageSource {
                 kind: "base64".into(),
                 media_type: "image/png".into(),
                 data: "AAAA".into(),
             },
-        }]);
-        assert_eq!(convert_content(&content, false), Err("image"));
+        };
+        assert_eq!(convert_plain_content(&[&block], false), Err("image"));
     }
 
     #[test]
-    fn convert_content_flattens_plain_text() {
-        let content = InputContent::Text("hi there".into());
-        match convert_content(&content, false).unwrap() {
-            ChatContent::Text(s) => assert_eq!(s, "hi there"),
+    fn convert_message_flattens_plain_text() {
+        let msg = InputMessage {
+            role: "user".into(),
+            content: InputContent::Text("hi there".into()),
+        };
+        let out = convert_message(&msg, false).unwrap();
+        match &out[0].content {
+            Some(ChatContent::Text(s)) => assert_eq!(s, "hi there"),
             _ => panic!("expected text"),
         }
     }
@@ -698,15 +842,42 @@ mod tests {
         assert_eq!(v["error"]["type"], "not_found_error");
     }
 
+    /// A tool_use/tool_result history (an Anthropic-speaking client
+    /// replaying its own prior turn) no longer 400s: it translates and
+    /// forwards to the child instead.
     #[tokio::test]
-    async fn tool_use_block_is_400_invalid_request_error() {
+    async fn tool_use_history_round_trips_instead_of_400ing() {
+        async fn fake_chat_completions(
+            Json(_req): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            Json(json!({
+                "id": "chatcmpl-1",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "done" },
+                    "finish_reason": "stop",
+                }],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 2 },
+            }))
+        }
+        let upstream = Router::new().route("/v1/chat/completions", post(fake_chat_completions));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
         let state = test_state();
         register_test_model(&state, "org/repo:Q4", "alias", false);
+        mark_loaded(&state, "org/repo:Q4", port);
         let app = router(state);
+
         let body = json!({
             "model": "alias",
             "max_tokens": 16,
-            "messages": [{"role": "user", "content": [{"type": "tool_use", "id": "1", "name": "x", "input": {}}]}],
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "1", "name": "read_file", "input": {"path": "a.txt"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "file body"}]},
+            ],
         });
         let resp = app
             .oneshot(
@@ -719,11 +890,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"]["type"], "invalid_request_error");
-        assert!(v["error"]["message"].as_str().unwrap().contains("tool_use"));
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     /// Full round trip: a fake upstream axum server plays the role of a

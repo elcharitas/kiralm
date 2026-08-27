@@ -1,4 +1,4 @@
-//! Subcommand handlers (§7). Every subcommand other than `serve` is a
+//! Subcommand handlers. Every subcommand other than `serve` is a
 //! thin HTTP client over `~/.kiralm/kiralm.sock`, auto-spawning the
 //! daemon if the socket isn't live.
 
@@ -99,7 +99,7 @@ async fn stream_sse(
 
 /// Spawns `kiralm serve` detached (setsid, own session, so it survives
 /// the CLI exiting), redirected to `~/.kiralm/kiralm.log`, then polls
-/// the socket for readiness (§7 closing paragraph).
+/// the socket for readiness.
 async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
     if tokio::net::UnixStream::connect(&config.unix_socket).await.is_ok() {
         return Ok(());
@@ -148,7 +148,7 @@ async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
 }
 
 /// Percent-encodes a single path segment. Canonical ids contain `/` and
-/// `:` (§6), which must not be read as extra path segments/scheme by the
+/// `:`, which must not be read as extra path segments/scheme by the
 /// router or by hyperlocal's `Uri`.
 fn encode_path_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -238,10 +238,9 @@ pub async fn list(config: &Config) -> anyhow::Result<()> {
     );
     for m in body["models"].as_array().cloned().unwrap_or_default() {
         let is_cloud = m["source"].as_str() == Some("cloud");
-        // Cloud rows have no RAM verdict and no local hot/cold state
-        // (SPEC.md's Cloud integration §"GET /v1/models and kiralm
-        // list"). Print "-" rather than routing through a value that
-        // was never computed for them.
+        // Cloud rows have no RAM verdict and no local hot/cold state.
+        // Print "-" rather than routing through a value that was never
+        // computed for them.
         let verdict = if is_cloud { "-".to_string() } else { m["verdict"].as_str().unwrap_or("").to_string() };
         let hot = if is_cloud { "-".to_string() } else { m["hot"].as_bool().unwrap_or(false).to_string() };
         println!(

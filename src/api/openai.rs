@@ -1,17 +1,20 @@
-//! `POST /v1/chat/completions`, `GET /v1/models` (§2.1).
+//! `POST /v1/chat/completions`, `GET /v1/models`.
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde_json::json;
 
-use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
+use super::agent;
+use super::{ensure_loaded, resolve_model, GatewayError, GenerationState, SharedState};
 use crate::cloud;
 use crate::registry::{ModelRoute, ModelSource};
 use crate::state::ModelManifest;
+use crate::tools::Permission;
 
 pub fn routes() -> Router<SharedState> {
     Router::new()
@@ -74,14 +77,24 @@ async fn list_models(State(app): State<SharedState>) -> Json<serde_json::Value> 
     Json(json!({"object": "list", "data": data}))
 }
 
-/// Thin reverse proxy (§2.1): reads only the top-level `model` field,
+/// Thin reverse proxy: reads only the top-level `model` field,
 /// resolves it, ensures a child is loaded, forwards the body
 /// byte-for-byte. Non-streaming responses get `model` normalized back to
 /// the client's requested name; streaming is a pure byte-copy.
 async fn chat_completions(
     State(app): State<SharedState>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
+    // Set by the KiraLM UI only (ui/src/api.ts): when present, generation
+    // is tracked server-side under this id so it survives the UI
+    // navigating away (see start_tracked_stream below). Absent for
+    // plain OpenAI-API clients, which get today's exact byte passthrough.
+    let session_id = headers
+        .get("x-kiralm-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     let Some(requested_model) = body.get("model").and_then(|v| v.as_str()).map(str::to_string)
     else {
         return openai_err(
@@ -113,8 +126,7 @@ async fn chat_completions(
     // Cloud: forward to kiralm-web instead, with a bearer token and the
     // outgoing `model` swapped for the cloud model's stored `ref` (the
     // client's requested alias/id is not what kiralm-web expects),
-    // same byte-passthrough/streaming logic otherwise (§"/v1/chat/
-    // completions routing for cloud-sourced models").
+    // same byte-passthrough/streaming logic otherwise.
     let (url, bearer, body) = match route {
         ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, body),
         ModelRoute::Cloud => {
@@ -138,6 +150,39 @@ async fn chat_completions(
             )
         }
     };
+
+    // The tool-calling loop only ever runs for the KiraLM UI itself: it
+    // needs a session (to track/attach the generation record) and a
+    // project (the sandbox root), both sent only by ui/src/api.ts. A
+    // plain OpenAI-API client without those headers gets exactly
+    // today's byte-for-byte passthrough, untouched.
+    let project_id = headers
+        .get("x-kiralm-project-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if let (Some(session_id), Some(project_id)) = (session_id.clone(), project_id) {
+        let project = app.state.read().projects.get(&project_id).cloned();
+        if let Some(project) = project {
+            let permission = headers
+                .get("x-kiralm-permission-mode")
+                .and_then(|v| v.to_str().ok())
+                .map(Permission::parse)
+                .unwrap_or(Permission::ReadOnly);
+            return run_tool_loop(
+                &app,
+                session_id,
+                requested_model,
+                canonical,
+                std::path::PathBuf::from(&project.path),
+                permission,
+                is_stream,
+                url,
+                bearer,
+                body,
+            )
+            .await;
+        }
+    }
 
     let client = reqwest::Client::new();
     let mut req = client.post(&url).json(&body);
@@ -169,7 +214,11 @@ async fn chat_completions(
     let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::OK);
 
     if is_stream {
-        // Pure byte-copy, no re-parsing (§2.1).
+        if let Some(session_id) = session_id {
+            return start_tracked_stream(&app, session_id, canonical, upstream, status);
+        }
+        // No session id: an external OpenAI-API client, not the KiraLM
+        // UI. Exactly today's behavior, pure byte-copy, no re-parsing.
         let stream = upstream.bytes_stream();
         Response::builder()
             .status(status)
@@ -196,9 +245,252 @@ async fn chat_completions(
     }
 }
 
+/// Runs the real tool-calling loop (`agent::run`) for one turn and shapes
+/// its outcome back into whatever the client asked for -- SSE or plain
+/// JSON, same two shapes `chat_completions` already returns for the
+/// passthrough path. Registers/updates the same `app.generations` record
+/// as `start_tracked_stream`, so a session's "Worked for Xm Ys" steps and
+/// running state are visible to a reconnecting/other tab the same way.
+///
+/// The whole loop runs before anything is written to the
+/// response (see agent.rs's module note), so `Stop` can't abort a turn
+/// mid-tool-call today -- it only flips the record to not-running once
+/// this call finally returns.
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_loop(
+    app: &SharedState,
+    session_id: String,
+    requested_model: String,
+    canonical: String,
+    project_root: std::path::PathBuf,
+    permission: Permission,
+    is_stream: bool,
+    url: String,
+    bearer: Option<String>,
+    raw_body: serde_json::Value,
+) -> Response {
+    let (sg, _tap) = app.start_generation(&session_id, &canonical);
+
+    let max_tokens = raw_body.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+    let temperature = raw_body.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let top_p = raw_body.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let top_k = raw_body.get("top_k").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let messages = raw_body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
+            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            ChatMessage::text(role, content)
+        })
+        .collect();
+
+    let req = ChatCompletionRequest {
+        model: canonical,
+        messages,
+        max_tokens,
+        temperature,
+        top_p,
+        top_k,
+        stop: None,
+        stream: false,
+        tools: None,
+        chat_template_kwargs: None,
+    };
+
+    let enable_thinking = raw_body
+        .get("chat_template_kwargs")
+        .and_then(|v| v.get("enable_thinking"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let http = reqwest::Client::new();
+    let outcome = agent::run(&http, &url, bearer.as_deref(), req, &project_root, permission, enable_thinking).await;
+
+    let (text, steps, gateway_err) = match outcome {
+        Ok((resp, steps)) => {
+            let text = resp
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content)
+                .unwrap_or_default();
+            (text, steps, None)
+        }
+        Err(super::agent::AgentError::AuthRequired(msg)) => {
+            (String::new(), Vec::new(), Some(GatewayError::AuthRequired(msg)))
+        }
+        Err(super::agent::AgentError::Other(msg)) => (String::new(), Vec::new(), Some(GatewayError::LoadFailed(msg))),
+    };
+
+    {
+        let mut st = sg.state.write();
+        st.running = false;
+        st.text = text.clone();
+        st.steps = steps.clone();
+        st.error = gateway_err.as_ref().map(|_| "tool-calling loop failed".to_string());
+    }
+    *sg.tap.lock() = None;
+
+    if let Some(e) = gateway_err {
+        return gateway_error_response(e);
+    }
+
+    if is_stream {
+        synthetic_stream_response(text, steps)
+    } else {
+        Json(json!({
+            "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+            "object": "chat.completion",
+            "model": requested_model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": text },
+                "finish_reason": "stop",
+            }],
+            "kiralm_tool_steps": steps,
+        }))
+        .into_response()
+    }
+}
+
+/// Fakes an SSE stream out of the tool loop's already-final text
+/// (`run_tool_loop` runs synchronously, so nothing streams token-by-
+/// token from the model itself here). Chunks by whitespace so the UI
+/// still gets a typing effect instead of one giant paste, and appends
+/// one extra data frame the real client (ui/src/api.ts) knows to read
+/// for the real tool-call step log, ignored by any standard OpenAI SSE
+/// consumer since it carries no `choices`.
+fn synthetic_stream_response(text: String, steps: Vec<crate::tools::ToolStep>) -> Response {
+    let mut frames = Vec::new();
+    for word in split_keep_whitespace(&text) {
+        frames.push(
+            json!({"choices": [{"delta": {"content": word}, "finish_reason": null}]}).to_string(),
+        );
+    }
+    frames.push(json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}).to_string());
+    frames.push(json!({"kiralm_tool_steps": steps}).to_string());
+
+    let body = frames
+        .into_iter()
+        .map(|f| format!("data: {f}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+        .collect::<String>();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Splits on word boundaries, keeping the whitespace attached to the
+/// following word, so re-joining every chunk reproduces `text` exactly.
+fn split_keep_whitespace(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if ch == ' ' || ch == '\n' {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Decouples generation from this one HTTP response (root fix for "nav
+/// away mid-stream stops generation"): a background task, not the
+/// response future, owns draining `upstream` to completion, appending
+/// each token to the session's buffer in `app.generations` as it goes.
+/// The response returned here just taps that task's broadcast for as
+/// long as it's attached; dropping the response (client navigates away,
+/// tab closes) only drops this tap, never the background task.
+fn start_tracked_stream(
+    app: &SharedState,
+    session_id: String,
+    model: String,
+    upstream: reqwest::Response,
+    status: StatusCode,
+) -> Response {
+    use tokio::sync::broadcast;
+
+    let (sg, mut rx) = app.start_generation(&session_id, &model);
+    let sg_task = sg.clone();
+
+    let handle = tokio::spawn(async move {
+        let mut byte_stream = upstream.bytes_stream();
+        let mut linebuf = String::new();
+        loop {
+            match byte_stream.next().await {
+                Some(Ok(chunk)) => {
+                    if let Some(tx) = sg_task.tap.lock().as_ref() {
+                        let _ = tx.send(chunk.clone()); // no live viewer: fine, buffer below still updates
+                    }
+                    linebuf.push_str(&String::from_utf8_lossy(&chunk));
+                    while let Some(nl) = linebuf.find('\n') {
+                        let line = linebuf[..nl].trim_end().to_string();
+                        linebuf.drain(..=nl);
+                        append_delta(&sg_task.state, &line);
+                    }
+                }
+                Some(Err(e)) => {
+                    let mut st = sg_task.state.write();
+                    st.running = false;
+                    st.error = Some(e.to_string());
+                    *sg_task.tap.lock() = None; // closes the tap for any still-attached response
+                    return;
+                }
+                None => break,
+            }
+        }
+        sg_task.state.write().running = false;
+        *sg_task.tap.lock() = None;
+    });
+    *sg.task.lock() = Some(handle);
+
+    let out = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(bytes) => yield Ok::<_, std::convert::Infallible>(bytes),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Response::builder()
+        .status(status)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(Body::from_stream(out))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Parses one SSE `data: ...` line from the child's chat-completion
+/// stream and appends its delta content to the session buffer, mirroring
+/// what ui/src/api.ts's `streamChat` already does client-side.
+fn append_delta(state: &parking_lot::RwLock<GenerationState>, line: &str) {
+    let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+        return;
+    };
+    if data.is_empty() || data == "[DONE]" {
+        return;
+    }
+    if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
+        if let Some(delta) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
+            state.write().text.push_str(delta);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Typed OpenAI chat-completion wire shapes. The proxy above forwards raw
-// JSON, but `anthropic.rs`'s translator (§2.2) needs typed request/
+// JSON, but `anthropic.rs`'s translator needs typed request/
 // response/SSE-chunk shapes to build and parse against, since it's a
 // real translation, not a byte passthrough.
 // ---------------------------------------------------------------------
@@ -227,7 +519,45 @@ pub struct ImageUrl {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: ChatContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ChatContent>,
+    /// Set on an assistant message that requested tool(s); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// Set on a `role: "tool"` message: which call this is the result of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn text(role: impl Into<String>, text: impl Into<String>) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: Some(ChatContent::Text(text.into())),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+}
+
+/// One model-requested tool invocation, OpenAI wire shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type", default = "default_tool_type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+fn default_tool_type() -> String {
+    "function".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    /// A JSON-encoded string per the OpenAI spec, not a nested object.
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,6 +574,14 @@ pub struct ChatCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
+    /// llama-server-specific: `{"enable_thinking": false}` for Qwen3-style
+    /// reasoning models, so the tool-call loop's turns don't burn the
+    /// whole `max_tokens` budget on hidden reasoning before ever
+    /// emitting the call. Ignored by servers that don't recognize it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,6 +601,8 @@ pub struct ChatChoice {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatChoiceMessage {
     pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,4 +626,347 @@ pub struct ChatChunkChoice {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChatChunkDelta {
     pub content: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::registry::{ModelRegistry, ModelState};
+    use crate::state::{ExpertCount, ModelManifest, State};
+    use axum::http::Request;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn register_test_model(app: &SharedState, canonical_id: &str, alias: &str) {
+        let gguf_path = std::env::temp_dir().join(format!(
+            "kiralm-test-{}-{}.gguf",
+            canonical_id.replace(['/', ':'], "_"),
+            uuid::Uuid::new_v4()
+        ));
+        let manifest = ModelManifest {
+            canonical_id: canonical_id.to_string(),
+            filename: gguf_path.file_name().unwrap().to_string_lossy().to_string(),
+            sha256: "deadbeef".to_string(),
+            size_bytes: 1,
+            architecture: "test".to_string(),
+            is_moe: false,
+            expert_count: None::<ExpertCount>,
+            context_length_trained: 4096,
+            vision_capable: false,
+            source_ref: canonical_id.to_string(),
+            pulled_at: chrono::Utc::now(),
+        };
+        manifest.write(&gguf_path).expect("write test manifest");
+
+        let mut model = ModelState::from_manifest(&manifest, false);
+        model.gguf_path = gguf_path;
+        app.registry.insert(model);
+        app.state.write().aliases.insert(alias.to_string(), canonical_id.to_string());
+    }
+
+    fn mark_loaded(app: &SharedState, canonical_id: &str, port: u16) {
+        let mut model = app.registry.get_clone(canonical_id).unwrap();
+        model.status = crate::registry::ModelStatus::Loaded;
+        model.port = Some(port);
+        app.registry.insert(model);
+    }
+
+    fn test_state() -> SharedState {
+        Arc::new(super::super::AppState::new(
+            Config::default(),
+            Arc::new(ModelRegistry::new()),
+            State::default(),
+            crate::settings::Settings::default(),
+            crate::chats::Chats::default(),
+        ))
+    }
+
+    fn router(state: SharedState) -> Router {
+        Router::new().route("/v1/chat/completions", post(chat_completions)).with_state(state)
+    }
+
+    #[test]
+    fn append_delta_accumulates_and_skips_control_lines() {
+        let state = parking_lot::RwLock::new(GenerationState::default());
+        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}");
+        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}");
+        append_delta(&state, "data: [DONE]");
+        append_delta(&state, ""); // keep-alive blank line
+        assert_eq!(state.read().text, "hi!");
+    }
+
+    /// The whole point of this feature: a client that disconnects mid-
+    /// stream (drops the response without reading its body, exactly what
+    /// navigating away in the UI does) must not stop generation --
+    /// the background task keeps draining the upstream and the session's
+    /// buffered text is fully readable via `generation_snapshot` after.
+    #[tokio::test]
+    async fn generation_survives_response_being_dropped() {
+        async fn fake_stream() -> Response {
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n\
+                        data: [DONE]\n\n";
+            (StatusCode::OK, [("content-type", "text/event-stream")], body).into_response()
+        }
+        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let app_router = router(state.clone());
+
+        let body = json!({
+            "model": "alias",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let resp = app_router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-kiralm-session-id", "sess-1")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        drop(resp); // simulate navigating away before the body is ever read
+
+        let mut snap = state.generation_snapshot("sess-1");
+        for _ in 0..50 {
+            if !snap.running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            snap = state.generation_snapshot("sess-1");
+        }
+        assert!(!snap.running, "background task should finish even though the response was dropped");
+        assert_eq!(snap.text, "hi!");
+    }
+
+    /// The "Stop" button must still actually stop generation (not just
+    /// detach the viewer), same as dropping the connection always did.
+    #[tokio::test]
+    async fn stop_generation_aborts_the_background_task() {
+        async fn fake_stream_forever() -> Response {
+            let body = async_stream::stream! {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n",
+                    ));
+                }
+            };
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                Body::from_stream(body),
+            )
+                .into_response()
+        }
+        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream_forever));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let app_router = router(state.clone());
+
+        let body = json!({"model": "alias", "stream": true, "messages": [{"role": "user", "content": "hi"}]});
+        let resp = app_router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-kiralm-session-id", "sess-2")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(resp);
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(state.generation_snapshot("sess-2").running);
+        assert!(state.stop_generation("sess-2"));
+
+        let accumulated_at_stop = state.generation_snapshot("sess-2").text.len();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let snap = state.generation_snapshot("sess-2");
+        assert!(!snap.running);
+        assert_eq!(snap.text.len(), accumulated_at_stop, "no more tokens should land after stop");
+    }
+
+    // -------------------------------------------------------------
+    // Tool-calling loop: a fake upstream plays
+    // the model, first returning a `write_file` tool call, then (once
+    // fed the real tool result) a plain-text finish -- exercising the
+    // real `agent::run` loop, real sandboxing, and real permission gate
+    // through the actual router, not a unit-level shortcut.
+    // -------------------------------------------------------------
+
+    #[derive(Clone)]
+    struct CallCount(Arc<std::sync::atomic::AtomicUsize>);
+
+    async fn fake_tool_upstream(
+        axum::extract::State(count): axum::extract::State<CallCount>,
+        Json(_req): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let n = count.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            Json(json!({
+                "id": "chatcmpl-1",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": "{\"path\":\"out.txt\",\"content\":\"hello from model\"}",
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 5 },
+            }))
+        } else {
+            Json(json!({
+                "id": "chatcmpl-2",
+                "choices": [{
+                    "message": { "role": "assistant", "content": "wrote the file" },
+                    "finish_reason": "stop",
+                }],
+                "usage": { "prompt_tokens": 5, "completion_tokens": 2 },
+            }))
+        }
+    }
+
+    async fn spawn_fake_tool_upstream() -> u16 {
+        let upstream = Router::new()
+            .route("/v1/chat/completions", post(fake_tool_upstream))
+            .with_state(CallCount(Arc::new(std::sync::atomic::AtomicUsize::new(0))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        port
+    }
+
+    fn register_test_project(app: &SharedState) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("kiralm-tool-loop-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let now = chrono::Utc::now();
+        app.state.write().projects.insert(
+            "proj-1".to_string(),
+            crate::state::Project {
+                id: "proj-1".to_string(),
+                name: "test".to_string(),
+                path: root.to_string_lossy().to_string(),
+                created_at: now,
+                last_active_at: now,
+            },
+        );
+        root
+    }
+
+    #[tokio::test]
+    async fn tool_loop_full_access_writes_a_real_file() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let root = register_test_project(&state);
+        let app_router = router(state.clone());
+
+        let body = json!({
+            "model": "alias",
+            "stream": false,
+            "messages": [{"role": "user", "content": "write hello to out.txt"}],
+        });
+        let resp = app_router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-kiralm-session-id", "sess-tool-1")
+                    .header("x-kiralm-project-id", "proj-1")
+                    .header("x-kiralm-permission-mode", "full-access")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"][0]["message"]["content"], "wrote the file");
+        assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
+        assert_eq!(v["kiralm_tool_steps"][0]["ok"], true);
+
+        // The real, load-bearing assertion: the tool actually ran.
+        let written = std::fs::read_to_string(root.join("out.txt")).unwrap();
+        assert_eq!(written, "hello from model");
+
+        // The right panel's real diff data: a brand-new file has no
+        // `before`, and `after` is exactly what got written to disk.
+        let edit = &v["kiralm_tool_steps"][0]["file_edit"];
+        assert_eq!(edit["path"], "out.txt");
+        assert!(edit["before"].is_null());
+        assert_eq!(edit["after"], "hello from model");
+    }
+
+    #[tokio::test]
+    async fn tool_loop_read_only_rejects_write_and_touches_no_file() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let root = register_test_project(&state);
+        let app_router = router(state.clone());
+
+        let body = json!({
+            "model": "alias",
+            "stream": false,
+            "messages": [{"role": "user", "content": "write hello to out.txt"}],
+        });
+        let resp = app_router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header("x-kiralm-session-id", "sess-tool-2")
+                    .header("x-kiralm-project-id", "proj-1")
+                    .header("x-kiralm-permission-mode", "read-only")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
+        assert_eq!(v["kiralm_tool_steps"][0]["ok"], false);
+        assert!(!root.join("out.txt").exists(), "read-only session must not write to disk");
+    }
 }

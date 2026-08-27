@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type StatusResponse } from "../api";
 
 // Polls GET /api/status every 2s, paused while the tab is hidden
-// (Page Visibility API), per SPEC §9 sync rules. Exposes a manual
-// `refresh` for immediate feedback after a mutating action.
+// (Page Visibility API). Exposes a manual `refresh` for immediate
+// feedback after a mutating action.
 export function useStatus() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);

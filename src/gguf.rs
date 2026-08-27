@@ -1,11 +1,10 @@
 //! Minimal GGUF header/metadata reader, just enough to pull the fields
-//! `pull.rs` needs for the manifest sidecar (§3): architecture, MoE
-//! expert counts, trained context length. Stops before tensor data, never
+//! `pull.rs` needs for the manifest sidecar: architecture, MoE expert
+//! counts, trained context length. Stops before tensor data, never
 //! reads the (multi-GB) weights themselves.
 //!
-//! Not in SPEC.md's module list; added because `pull.rs`'s "parsed from
-//! GGUF metadata" step needs a real reader somewhere and no other
-//! component owns this.
+//! Added because `pull.rs`'s "parsed from GGUF metadata" step needs a
+//! real reader somewhere and no other component owns this.
 
 use std::collections::HashMap;
 use std::fs::File;

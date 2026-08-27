@@ -1,14 +1,14 @@
 //! `llama-server` spawn/health-check/kill, flag selection, port
-//! allocation, log piping (§4).
+//! allocation, log piping.
 //!
 //! STUB NOTE: this worktree only needed enough of the engine to run the
-//! pull load-verification pass (§8 step 4) and to give `serve` something
-//! real to construct. The full automatic-flag matrix (§4.3, MoE expert
-//! offload, KV cache quant tiering, context-size-vs-remaining-RAM sizing,
-//! `-md` draft pairing) and the steady-state health/RSS watcher (§4.4
-//! "while loaded") belong to whichever agent owns residency's runtime
-//! loop; only the always-on flags and the one-shot health+completion
-//! check used at pull time are implemented here.
+//! pull load-verification pass and to give `serve` something real to
+//! construct. The full automatic-flag matrix (MoE expert offload, KV
+//! cache quant tiering, context-size-vs-remaining-RAM sizing, `-md`
+//! draft pairing) and the steady-state health/RSS watcher (while
+//! loaded) belong to whichever agent owns residency's runtime loop;
+//! only the always-on flags and the one-shot health+completion check
+//! used at pull time are implemented here.
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,8 @@ use tokio::time::Instant;
 
 use crate::config::kiralm_home;
 
-/// `llama-server --version`'s output, used to key the verdict cache
-/// (§3/§5.2) so an engine upgrade invalidates stale `unsupported` tags.
+/// `llama-server --version`'s output, used to key the verdict cache so
+/// an engine upgrade invalidates stale `unsupported` tags.
 pub fn detect_version(llama_bin: &str) -> String {
     std::process::Command::new(llama_bin)
         .arg("--version")
@@ -41,7 +41,7 @@ pub fn log_path_for(canonical_id: &str) -> PathBuf {
 }
 
 /// Finds a free port in `range` (inclusive), bind-retrying past ports
-/// already bound by a stale child or unrelated local service (§4.1).
+/// already bound by a stale child or unrelated local service.
 pub fn allocate_port(range: (u16, u16)) -> anyhow::Result<u16> {
     for port in range.0..=range.1 {
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
@@ -55,7 +55,7 @@ pub fn allocate_port(range: (u16, u16)) -> anyhow::Result<u16> {
     )
 }
 
-/// Always-on flags per §4.3. The RAM/MoE/hot-conditional flags (offload,
+/// Always-on flags. The RAM/MoE/hot-conditional flags (offload,
 /// ctx sizing, ctk/ctv, --mlock, -md) are the fuller residency manager's
 /// job. See module STUB NOTE.
 fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
@@ -73,7 +73,7 @@ fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
 
 /// Spawns `llama-server`, piping stdout/stderr to
 /// `~/.kiralm/logs/<sha1(canonical_id)>.log` (never the daemon's own
-/// stdout, §4.4).
+/// stdout).
 pub async fn spawn(
     llama_bin: &str,
     gguf_path: &Path,
@@ -104,7 +104,7 @@ pub async fn spawn(
     Ok(child)
 }
 
-/// Polls `GET /health` every 200ms up to `timeout` (default 30s, §4.4).
+/// Polls `GET /health` every 200ms up to `timeout` (default 30s).
 pub async fn wait_healthy(port: u16, timeout: Duration) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/health");
@@ -122,8 +122,8 @@ pub async fn wait_healthy(port: u16, timeout: Duration) -> anyhow::Result<()> {
     }
 }
 
-/// Sends one tiny completion to prove the child can actually generate
-/// (§8 step 4), not just answer /health.
+/// Sends one tiny completion to prove the child can actually generate,
+/// not just answer /health.
 pub async fn send_tiny_completion(port: u16) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
@@ -147,7 +147,7 @@ pub async fn send_tiny_completion(port: u16) -> anyhow::Result<()> {
 }
 
 /// Last `n` lines of a log file, used as the captured error text on a
-/// failed load (§4.4).
+/// failed load.
 pub fn tail_log(canonical_id: &str, n: usize) -> String {
     let path = log_path_for(canonical_id);
     match std::fs::read_to_string(path) {
@@ -164,8 +164,7 @@ pub fn tail_log(canonical_id: &str, n: usize) -> String {
     }
 }
 
-/// Graceful shutdown: SIGTERM, wait up to 5s, SIGKILL if still alive
-/// (§4.4).
+/// Graceful shutdown: SIGTERM, wait up to 5s, SIGKILL if still alive.
 pub async fn shutdown(mut child: Child) {
     if let Some(pid) = child.id() {
         send_sigterm(pid);
@@ -201,12 +200,12 @@ fn send_sigterm(pid: u32) {
 
 #[cfg(not(unix))]
 fn send_sigterm(_pid: u32) {
-    // ponytail: no SIGTERM equivalent wired for non-unix; shutdown()'s
-    // 5s-timeout SIGKILL fallback still applies. macOS-first per SPEC §10.
+    // No SIGTERM equivalent wired for non-unix; shutdown()'s
+    // 5s-timeout SIGKILL fallback still applies. macOS-first.
 }
 
-/// Runs the full one-shot load-verification pass used by `pull` (§8 step
-/// 4): spawn, wait healthy, send a tiny completion, always shut down.
+/// Runs the full one-shot load-verification pass used by `pull`:
+/// spawn, wait healthy, send a tiny completion, always shut down.
 /// Returns `Err` with the captured log tail on any failure.
 pub async fn verify_load(
     llama_bin: &str,

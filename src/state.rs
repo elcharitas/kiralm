@@ -1,5 +1,5 @@
 //! `~/.kiralm/state.json` (daemon-owned, atomic rewrite) and the
-//! `<file>.gguf.json` manifest sidecars (§3).
+//! `<file>.gguf.json` manifest sidecars.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ impl ModelManifest {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    /// Manifest sidecars are immutable once written (§3). Write is only
+    /// Manifest sidecars are immutable once written. Write is only
     /// ever called once, at pull time.
     pub fn write(&self, gguf_path: &Path) -> anyhow::Result<()> {
         let path = Self::sidecar_path_for(gguf_path);
@@ -91,7 +91,7 @@ pub struct ModelEntry {
     pub verdict_cache: Option<VerdictCache>,
 }
 
-/// Daemon-owned tunnel runtime state (§"Tunnel client (daemon)"). The
+/// Daemon-owned tunnel runtime state. The
 /// raw Cloudflare token lives separately in `tunnel_token.json` (a
 /// secret, not status); this is just enough to report `kiralm tunnel
 /// status` and know whether to re-spawn `cloudflared` on daemon restart.
@@ -102,12 +102,29 @@ pub struct TunnelState {
     pub cf_tunnel_id: String,
 }
 
+/// A registered workspace/repo root sessions can be scoped to. No
+/// implicit fallback project -- a session always names a real one the
+/// user explicitly registered.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Bumped by the UI whenever a session under this project is
+    /// touched, so this stays the true "most recently used" signal
+    /// rather than just project-creation time.
+    pub last_active_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
     pub models: HashMap<String, ModelEntry>,
     pub aliases: HashMap<String, String>,
     #[serde(default)]
     pub tunnel: Option<TunnelState>,
+    #[serde(default)]
+    pub projects: HashMap<String, Project>,
 }
 
 impl State {

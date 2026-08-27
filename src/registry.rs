@@ -1,5 +1,5 @@
 //! In-memory `ModelRegistry`, `ModelState`, name resolution, verdict
-//! computation (§4.2, §5.2, §6).
+//! computation.
 //!
 //! STUB NOTE: the full `ModelRegistry` (RwLock<HashMap>, load/unload
 //! transitions, RSS tracking) is only lightly used by this worktree's
@@ -22,8 +22,7 @@ pub enum ModelStatus {
     Failed(String),
 }
 
-/// Where a `ModelState` came from (Cloud integration §"ModelRegistry
-/// design for cloud models"). One registry, one resolve path, both
+/// Where a `ModelState` came from. One registry, one resolve path, both
 /// kinds flow through the same `/v1/models`/`kiralm list` loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
@@ -45,7 +44,7 @@ pub enum VerdictTier {
     FitsFast,
     UsableDegraded,
     NotRecommended,
-    /// Permanent, independent of RAM (§5.2). Set only after a real
+    /// Permanent, independent of RAM. Set only after a real
     /// spawn+load attempt fails with a genuine llama.cpp load error.
     UnsupportedArchitecture,
 }
@@ -62,7 +61,7 @@ impl VerdictTier {
 }
 
 // tok_per_sec_multiplier isn't read yet in this worktree; it's the UI
-// detail-drawer's field (§9 "verdict detail") to surface.
+// detail-drawer's field to surface.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Verdict {
@@ -72,9 +71,9 @@ pub struct Verdict {
     pub tok_per_sec_multiplier: Option<f64>,
 }
 
-/// Live ratio-based verdict per §5.2. Does NOT handle
+/// Live ratio-based verdict. Does NOT handle
 /// `UNSUPPORTED_ARCHITECTURE`, which is cached separately in state.json and
-/// overrides this until a force-retry clears it (§5.2/§5.3).
+/// overrides this until a force-retry clears it.
 pub fn compute_ratio_verdict(is_moe: bool, model_size_bytes: u64, budget_bytes: u64) -> Verdict {
     let ratio = budget_bytes as f64 / model_size_bytes.max(1) as f64;
 
@@ -117,10 +116,10 @@ pub fn compute_ratio_verdict(is_moe: bool, model_size_bytes: u64, budget_bytes: 
     }
 }
 
-// architecture/is_moe/expert_count/mlocked round-trip §4.2's shape but
-// this worktree only reads size_bytes/status/hot/verdict/gguf_path so
-// far; the engine flag-selection matrix (engine.rs's STUB NOTE) is what
-// consumes the rest.
+// architecture/is_moe/expert_count/mlocked round-trip the manifest's
+// shape but this worktree only reads size_bytes/status/hot/verdict/
+// gguf_path so far; the engine flag-selection matrix (engine.rs's
+// STUB NOTE) is what consumes the rest.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ModelState {
@@ -129,6 +128,9 @@ pub struct ModelState {
     pub architecture: String,
     pub is_moe: bool,
     pub expert_count: Option<(u32, u32)>, // (active, total)
+    /// From the GGUF's trained context window (manifest sidecar).
+    /// `None` for cloud entries, whose catalog doesn't carry it.
+    pub context_length: Option<u64>,
     pub size_bytes: u64,
     pub hot: bool,
     pub status: ModelStatus,
@@ -136,16 +138,16 @@ pub struct ModelState {
     pub port: Option<u16>,
     pub mlocked: bool,
     pub last_used: Instant,
-    /// `None` for `Cloud` entries: no RAM check ever ran (§5.2 doesn't
-    /// apply, since there's no local file to weigh against headroom).
+    /// `None` for `Cloud` entries: no RAM check ever ran (there's no
+    /// local file to weigh against headroom).
     pub verdict: Option<Verdict>,
     pub source: ModelSource,
     /// The catalog slug kiralm-web expects in the outgoing `model` field
     /// when forwarding a chat completion (`CloudModel.id`, e.g.
-    /// `llama-3.1-70b`; kiralm-web/SPEC.md's `/api/v1/chat/completions`
+    /// `llama-3.1-70b`; kiralm-web's `/api/v1/chat/completions`
     /// requires the catalog slug, not the internal `ref`). Distinct
-    /// from `canonical_id`, which is this daemon's own namespaced id
-    /// (§6/Id namespacing). `None` for `Local` entries.
+    /// from `canonical_id`, which is this daemon's own namespaced id.
+    /// `None` for `Local` entries.
     pub cloud_model_id: Option<String>,
 }
 
@@ -160,6 +162,7 @@ impl ModelState {
                 .expert_count
                 .as_ref()
                 .map(|e| (e.active, e.total)),
+            context_length: Some(m.context_length_trained),
             size_bytes: m.size_bytes,
             hot,
             status: ModelStatus::Unloaded,
@@ -177,14 +180,13 @@ impl ModelState {
         }
     }
 
-    /// Converts one raw kiralm-web catalog record into a registry entry
-    /// (Cloud integration §"Catalog sync"/"Merge into the registry").
+    /// Converts one raw kiralm-web catalog record into a registry entry.
     /// Returns `None` for a `kind` this daemon doesn't route chat
     /// completions through yet. Currently `local_pull` rows, which are
     /// curated `kiralm pull` suggestions, not network-invocable models
     /// (kiralm-web's own `/api/v1/models` excludes them too).
     pub fn from_cloud_entry(m: &CloudModel) -> Option<ModelState> {
-        // Id namespacing (§"Id namespacing"): Workers-AI-hosted models
+        // Id namespacing: Workers-AI-hosted models
         // keep kiralm-web's own `@cf/...` ref under a `workers-ai/`
         // prefix; anything else recognized as cloud-routable falls back
         // to `cloud/<catalog-id>` so future kinds don't collide.
@@ -199,6 +201,7 @@ impl ModelState {
             architecture: String::new(),
             is_moe: false,
             expert_count: None,
+            context_length: None,
             size_bytes: m.size_bytes.unwrap_or(0),
             hot: false,
             status: ModelStatus::Loaded,
@@ -213,7 +216,7 @@ impl ModelState {
     }
 }
 
-/// Model count is small (tens); one lock, no database (§4.2).
+/// Model count is small (tens); one lock, no database.
 #[derive(Default)]
 pub struct ModelRegistry {
     inner: RwLock<HashMap<String, ModelState>>,
@@ -241,9 +244,8 @@ impl ModelRegistry {
     }
 
     /// Wholesale replace of every `Cloud`-sourced entry with a fresh
-    /// batch from the latest catalog sync (Cloud integration §"Merge
-    /// into the registry"). Local entries are untouched. A single write
-    /// lock so readers never see a half-swapped set.
+    /// batch from the latest catalog sync. Local entries are untouched.
+    /// A single write lock so readers never see a half-swapped set.
     pub fn replace_cloud_entries(&self, entries: Vec<ModelState>) {
         let mut inner = self.inner.write();
         inner.retain(|_, m| m.source != ModelSource::Cloud);
@@ -252,7 +254,7 @@ impl ModelRegistry {
         }
     }
 
-    /// Resolution order (§6): alias exact match -> canonical id; else
+    /// Resolution order: alias exact match -> canonical id; else
     /// canonical id exact match; else `None` (caller returns 404).
     pub fn resolve(&self, name: &str, aliases: &HashMap<String, String>) -> Option<String> {
         if let Some(canonical) = aliases.get(name) {

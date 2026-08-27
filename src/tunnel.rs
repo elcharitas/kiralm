@@ -1,16 +1,14 @@
 //! `cloudflared` detection, spawn/health-check/shutdown, and backend
-//! provisioning (SPEC.md "Remote tunnel (Cloudflare Tunnel) integration"
-//! §"Tunnel client (daemon)"). Mirrors `engine.rs`'s shape one-for-one
-//! rather than reinventing process supervision, since shutdown reuses
+//! provisioning. Mirrors `engine.rs`'s shape one-for-one rather than
+//! reinventing process supervision, since shutdown reuses
 //! `engine::shutdown` verbatim.
 //!
 //! STUB NOTE: `provision()` below calls kiralm-web's real
-//! `POST /api/account/tunnel` shape (kiralm-web SPEC.md §12), but no live
-//! Cloudflare account was available to exercise it end to end in this
-//! build, using the same disclosure standard already used for the BYOK provider
-//! lanes. `detect()`/`spawn()`/`check_connectivity()`/shutdown are all
-//! real and exercised against whatever `cloudflared` (if any) is on this
-//! machine.
+//! `POST /api/account/tunnel` shape, but no live Cloudflare account was
+//! available to exercise it end to end in this build, using the same
+//! disclosure standard already used for the BYOK provider lanes.
+//! `detect()`/`spawn()`/`check_connectivity()`/shutdown are all real and
+//! exercised against whatever `cloudflared` (if any) is on this machine.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -21,8 +19,8 @@ use tokio::process::{Child, Command};
 
 use crate::config::{kiralm_home, Config};
 
-/// `cloudflared --version` presence check (§"Binary"). Fails fast with
-/// an install hint instead of letting `spawn()`'s raw `ENOENT` leak out.
+/// `cloudflared --version` presence check. Fails fast with an install
+/// hint instead of letting `spawn()`'s raw `ENOENT` leak out.
 pub fn detect(cloudflared_bin: &str) -> anyhow::Result<()> {
     std::process::Command::new(cloudflared_bin)
         .arg("--version")
@@ -43,7 +41,7 @@ fn log_path() -> PathBuf {
 /// Spawns `cloudflared tunnel run --token <token>`, Cloudflare's real
 /// remotely-managed-tunnel invocation. `token` is the opaque base64
 /// credentials blob kiralm-web's provisioning endpoint returns; this
-/// daemon never parses it, only passes it through (§"Process supervision").
+/// daemon never parses it, only passes it through.
 pub async fn spawn(cloudflared_bin: &str, token: &str) -> anyhow::Result<Child> {
     let path = log_path();
     if let Some(parent) = path.parent() {
@@ -62,7 +60,7 @@ pub async fn spawn(cloudflared_bin: &str, token: &str) -> anyhow::Result<Child> 
 }
 
 /// Process-alive-only health signal for the supervisor loop, matching
-/// `engine.rs`'s own tiered approach (§"Health check").
+/// `engine.rs`'s own tiered approach.
 pub fn is_alive(child: &mut Child) -> bool {
     matches!(child.try_wait(), Ok(None))
 }
@@ -70,8 +68,8 @@ pub fn is_alive(child: &mut Child) -> bool {
 /// Best-effort `GET http://127.0.0.1:20241/ready` (cloudflared's default
 /// metrics port) with a 1s timeout, used by `kiralm tunnel status` on top
 /// of `is_alive`. Falls back to "unconfirmed" rather than blocking if
-/// that port doesn't answer. This exact port number is unverified against
-/// a real `cloudflared` install in this build (§"Health check").
+/// that port doesn't answer. This exact port number is unverified
+/// against a real `cloudflared` install in this build.
 pub async fn check_connectivity() -> bool {
     let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(1)).build() else {
         return false;
@@ -88,8 +86,7 @@ pub async fn check_connectivity() -> bool {
 // Backend provisioning
 // ---------------------------------------------------------------------
 
-/// `POST {api_base_url}/api/account/tunnel`'s 201 shape, verbatim
-/// (kiralm-web SPEC.md §12).
+/// `POST {api_base_url}/api/account/tunnel`'s 201 shape, verbatim.
 #[derive(Debug, Deserialize)]
 pub struct Provisioned {
     #[allow(dead_code)] // not read yet; kept for parity with the wire shape
@@ -101,8 +98,8 @@ pub struct Provisioned {
 
 /// Calls kiralm-web to provision a real Cloudflare Tunnel for this
 /// device, bearer-authed with the same cloud login token cloud-model
-/// routing already uses (§"Tunnel provisioning"). Unverified against a
-/// live backend/Cloudflare account. See module STUB NOTE.
+/// routing already uses. Unverified against a live backend/Cloudflare
+/// account. See module STUB NOTE.
 pub async fn provision(config: &Config) -> anyhow::Result<Provisioned> {
     let token = crate::cloud::ensure_token()?;
     let client = reqwest::Client::builder()
@@ -130,9 +127,9 @@ fn tunnel_token_path() -> PathBuf {
 
 /// The raw Cloudflare tunnel token `provision()` returns, persisted 0600
 /// (same pattern as `CloudCredentials`) so a daemon restart can re-spawn
-/// `cloudflared` without a new Cloudflare API round trip (§"Daemon-restart
-/// behavior"). Distinct from `tunnel_auth::TunnelCredentials`, which is
-/// the *local* bearer token gating the tunnel listener, not this.
+/// `cloudflared` without a new Cloudflare API round trip. Distinct from
+/// `tunnel_auth::TunnelCredentials`, which is the *local* bearer token
+/// gating the tunnel listener, not this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelToken {
     pub token: String,
@@ -172,8 +169,8 @@ mod tests {
         assert!(err.to_string().contains("cloudflared not found"));
     }
 
-    /// Guards the provisioning response shape against kiralm-web SPEC.md
-    /// §12 drift. This daemon must deserialize it byte-for-byte.
+    /// Guards the provisioning response shape against kiralm-web drift.
+    /// This daemon must deserialize it byte-for-byte.
     #[test]
     fn provisioned_deserializes_post_account_tunnel_shape() {
         let raw = r#"{"tunnel_id":"t1","cf_tunnel_id":"cf-uuid","hostname":"x-abcd1234.tunnels.kiralm.dev","tunnel_status":"pending","token":"base64blob"}"#;

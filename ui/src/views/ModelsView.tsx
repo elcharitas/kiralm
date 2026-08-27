@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
+import { Trash2 } from "lucide-react";
 import {
   api,
   type CloudLoginStart,
@@ -6,14 +7,15 @@ import {
   type ModelStatus,
   type StatusResponse,
 } from "../api";
-import { VerdictBadge } from "../components/VerdictBadge";
 import { HotToggle } from "../components/HotToggle";
 import { ProgressBar } from "../components/ProgressBar";
-import { formatBytes } from "../format";
+import { useDialogs } from "../components/Dialogs";
+import { formatBytes, groupBySection, modelName } from "../format";
+import { useSettings } from "../settings";
 import { usePullProgress } from "../hooks/usePullProgress";
 import { ModelDetailDrawer } from "./ModelDetailDrawer";
 
-// ponytail: plain hardcoded list, not a live catalog; edit this array to add/update entries.
+// Plain hardcoded list, not a live catalog; edit this array to add/update entries.
 const CATALOG: { name: string; ref: string; size: string; description: string }[] = [
   {
     name: "Qwen3 0.6B",
@@ -72,6 +74,8 @@ export function ModelsView({
   status: StatusResponse | null;
   refresh: () => void;
 }) {
+  const { settings } = useSettings();
+  const { confirm, toast } = useDialogs();
   const [pullRef, setPullRef] = useState("");
   const [pulling, setPulling] = useState<{ id: string; error: string | null } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -101,24 +105,31 @@ export function ModelsView({
       refresh();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (!force && !m.hot && confirm(`${message}\n\nForce load anyway?`)) {
+      const shouldForce = !force && !m.hot && (await confirm({ title: "Load anyway?", message, confirmLabel: "Force load" }));
+      if (shouldForce) {
         await toggleHot(m, true);
         return;
       }
-      alert(message);
+      toast(message, "error");
     } finally {
       setBusy(null);
     }
   };
 
   const remove = async (m: ModelStatus) => {
-    if (!confirm(`Delete ${m.id}? This removes the GGUF file from disk.`)) return;
+    const ok = await confirm({
+      title: "Delete model",
+      message: `Delete ${modelName(m.id)}? This removes the GGUF file from disk.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     setBusy(m.id);
     try {
       await api.remove(m.id);
       refresh();
     } catch (err) {
-      alert(err instanceof Error ? err.message : String(err));
+      toast(err instanceof Error ? err.message : String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -129,7 +140,6 @@ export function ModelsView({
   return (
     <div className="view">
       <div className="view-header">
-        <h1>Models</h1>
         <form className="pull-form" onSubmit={submitPull}>
           <input
             className="pull-input mono"
@@ -150,7 +160,7 @@ export function ModelsView({
         <PullingRow
           id={pulling.id}
           onDone={async () => {
-            if (localStorage.getItem("kiralm.defaultHotOnPull") === "true") {
+            if (settings.default_hot_on_pull) {
               await api.setHot(pulling.id, true).catch(() => {});
             }
             refresh();
@@ -158,109 +168,75 @@ export function ModelsView({
         />
       )}
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th>Quant</th>
-            <th>Size</th>
-            <th>RAM verdict</th>
-            <th>Resident</th>
-            <th></th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((m) => (
-            <tr key={m.id} className="table-row-clickable" onClick={() => setSelected(m.id)}>
-              <td>
-                <div className="model-name">{m.id}</div>
-                {m.aliases.length > 0 && (
-                  <div className="model-aliases mono">{m.aliases.join(", ")}</div>
-                )}
-              </td>
-              <td className="mono">{m.quant}</td>
-              <td className="mono">{formatBytes(m.size_bytes)}</td>
-              <td>
-                {m.source === "cloud" ? (
-                  <span className="badge badge-cloud">Cloud</span>
-                ) : (
-                  <VerdictBadge tier={m.verdict_tier!} title={m.verdict_reason ?? undefined} />
-                )}
-              </td>
-              <td>
-                {m.source === "cloud" ? (
-                  <span className="dim">-</span>
-                ) : m.loaded ? (
-                  <span className="dot-status">
-                    <span className="dot dot-good" />
-                    {formatBytes(m.rss_bytes)}
-                  </span>
-                ) : (
-                  <span className="dot-status dim">
-                    <span className="dot" />
-                    unloaded
-                  </span>
-                )}
-              </td>
-              <td>
-                {m.source === "local" && (
-                  <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
-                )}
-              </td>
-              <td>
-                {m.source === "local" && (
-                  <button
-                    type="button"
-                    className="btn btn-ghost btn-danger"
-                    disabled={busy === m.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      remove(m);
-                    }}
-                  >
-                    Delete
+      <ul className="model-list">
+        {groupBySection(models, (m) => m.id).map((g) => (
+          <Fragment key={g.section}>
+            <li className="model-section-header">{g.section}</li>
+            {g.items.map((m) => (
+              <li key={m.id} className="model-row model-row-clickable" onClick={() => setSelected(m.id)}>
+                <span
+                  className={m.source === "cloud" ? "model-row-dot" : m.loaded ? "model-row-dot model-row-dot-on" : "model-row-dot"}
+                  title={m.source === "cloud" ? "Cloud" : m.loaded ? `Resident: ${formatBytes(m.rss_bytes)}` : "Not loaded"}
+                />
+                <span className="model-row-main">
+                  <span className="model-row-name">{modelName(m.id)}</span>
+                  <span className="model-row-size mono">{formatBytes(m.size_bytes)}</span>
+                </span>
+                <span className="model-row-actions">
+                  {m.source === "local" && (
+                    <>
+                      <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
+                      <button
+                        type="button"
+                        className="model-row-delete-btn"
+                        title="Delete"
+                        disabled={busy === m.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          remove(m);
+                        }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </>
+                  )}
+                </span>
+              </li>
+            ))}
+          </Fragment>
+        ))}
+        {models.length === 0 && <li className="model-list-empty">No models downloaded yet. Pull one below.</li>}
+        {groupBySection(
+          CATALOG.filter((c) => !models.some((m) => m.id === c.ref || m.aliases.includes(c.ref))),
+          (c) => c.ref,
+        ).map((g) => (
+          <Fragment key={g.section}>
+            <li className="model-section-header">{g.section}</li>
+            {g.items.map((c) => (
+              <li key={c.ref} className="model-row" title={c.description}>
+                <span className="model-row-dot" />
+                <span className="model-row-main">
+                  <span className="model-row-name">{c.name}</span>
+                  <span className="model-row-size mono">{c.size}</span>
+                </span>
+                <span className="model-row-actions">
+                  <button type="button" className="btn btn-ghost" onClick={() => pull(c.ref)}>
+                    Pull
                   </button>
-                )}
-              </td>
-            </tr>
-          ))}
-          {models.length === 0 && (
-            <tr>
-              <td colSpan={7} className="table-empty">
-                No models downloaded yet. Pull one below.
-              </td>
-            </tr>
-          )}
-          {CATALOG.filter(
-            (c) => !models.some((m) => m.id === c.ref || m.aliases.includes(c.ref))
-          ).map((c) => (
-            <tr key={c.ref} className="table-row-catalog">
-              <td>
-                <div className="model-name">{c.name}</div>
-                <div className="model-aliases mono">{c.ref}</div>
-              </td>
-              <td className="mono">{c.ref.split(":").pop()}</td>
-              <td className="mono">{c.size}</td>
-              <td className="dim">{c.description}</td>
-              <td className="dim">not downloaded</td>
-              <td colSpan={2}>
-                <button type="button" className="btn btn-ghost" onClick={() => pull(c.ref)}>
-                  Pull
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                </span>
+              </li>
+            ))}
+          </Fragment>
+        ))}
+      </ul>
 
       {selected && <ModelDetailDrawer id={selected} onClose={() => setSelected(null)} />}
     </div>
   );
 }
 
-// Login affordance for cloud models (kept to this view, per SPEC's
-// single-dense-table rule, no separate cloud section elsewhere).
+// Login affordance for cloud models (kept to this view's single dense
+// table, no separate cloud section elsewhere).
 function CloudLoginPanel({ onChange }: { onChange: () => void }) {
   const [status, setStatus] = useState<CloudStatus | null>(null);
   const [start, setStart] = useState<CloudLoginStart | null>(null);
