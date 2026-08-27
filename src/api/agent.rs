@@ -36,9 +36,10 @@ pub async fn run(
     permission: Permission,
     enable_thinking: bool,
     mcp: &McpRegistry,
+    dsh_bin: &str,
 ) -> Result<(ChatCompletionResponse, Vec<ToolStep>), AgentError> {
     req.stream = false;
-    req.tools = Some(tools::tool_defs(permission, mcp));
+    req.tools = Some(tools::tool_defs(permission, mcp, dsh_bin));
     // Off by default: Qwen3-style reasoning models otherwise burn the
     // whole max_tokens budget on hidden <think> content before ever
     // emitting a call. The composer's "Thinking" toggle controls this.
@@ -89,7 +90,7 @@ pub async fn run(
         });
         for call in &calls {
             let (content, step) =
-                tools::execute(&call.function.name, &call.function.arguments, project_root, permission, mcp).await;
+                tools::execute(&call.function.name, &call.function.arguments, project_root, permission, mcp, dsh_bin).await;
             steps.push(step);
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),

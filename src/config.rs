@@ -70,6 +70,12 @@ fn default_tunnel_listen() -> String {
     "127.0.0.1:11536".to_string()
 }
 
+fn default_dsh_bin() -> String {
+    // Bare command, not a homebrew-style absolute path: dsh is
+    // installed via npm/pnpm global, which already puts it on PATH.
+    "dsh".to_string()
+}
+
 /// `[cloud]` table. Same all-`Option` + one-default-fn-per-field
 /// pattern as the rest of this file. Never mirrored into state.json
 /// (hand-edited static config).
@@ -130,6 +136,24 @@ impl Default for TunnelConfig {
     }
 }
 
+/// `[dsh]` table. Same all-`Option` + default-fn pattern as the rest of
+/// this file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RawDshConfig {
+    bin: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DshConfig {
+    pub bin: String,
+}
+
+impl Default for DshConfig {
+    fn default() -> Self {
+        DshConfig { bin: default_dsh_bin() }
+    }
+}
+
 /// On-disk config shape. Every field optional so a hand-edited partial
 /// file still parses; defaults fill the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -144,6 +168,8 @@ struct RawConfig {
     cloud: RawCloudConfig,
     #[serde(default)]
     tunnel: RawTunnelConfig,
+    #[serde(default)]
+    dsh: RawDshConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +183,7 @@ pub struct Config {
     pub llama_server_port_range: (u16, u16),
     pub cloud: CloudConfig,
     pub tunnel: TunnelConfig,
+    pub dsh: DshConfig,
 }
 
 impl Default for Config {
@@ -170,6 +197,7 @@ impl Default for Config {
             llama_server_port_range: default_port_range(),
             cloud: CloudConfig::default(),
             tunnel: TunnelConfig::default(),
+            dsh: DshConfig::default(),
         }
     }
 }
@@ -225,6 +253,9 @@ impl Config {
             tunnel: TunnelConfig {
                 cloudflared_bin: raw.tunnel.cloudflared_bin.unwrap_or(defaults.tunnel.cloudflared_bin),
                 listen: raw.tunnel.listen.unwrap_or(defaults.tunnel.listen),
+            },
+            dsh: DshConfig {
+                bin: raw.dsh.bin.unwrap_or(defaults.dsh.bin),
             },
         })
     }

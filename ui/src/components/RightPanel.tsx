@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Bot,
   Braces,
   ChevronRight,
   Columns2,
@@ -22,6 +23,7 @@ import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
+import { DshPanel } from "./DshPanel";
 import { MarketplacePanel } from "./MarketplacePanel";
 import { McpPanel } from "./McpPanel";
 import { Select } from "./Select";
@@ -98,7 +100,7 @@ export function RightPanel({
 
   const [tab, setTab] = useState<string>("diff");
   const activeTab =
-    tab === "skills" || tab === "mcp" || tab === "marketplace" || files.some((f) => f.filename === tab)
+    tab === "skills" || tab === "mcp" || tab === "marketplace" || tab === "dsh" || files.some((f) => f.filename === tab)
       ? tab
       : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -177,6 +179,17 @@ export function RightPanel({
         >
           <Store size={14} /> Marketplace
         </button>
+        <button
+          type="button"
+          className={
+            activeTab === "dsh"
+              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
+              : "right-panel-tab right-panel-tab-diff"
+          }
+          onClick={() => setTab("dsh")}
+        >
+          <Bot size={14} /> dsh
+        </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
@@ -195,7 +208,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "marketplace" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "marketplace" && activeTab !== "dsh" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -219,6 +232,8 @@ export function RightPanel({
           <McpPanel />
         ) : activeTab === "marketplace" ? (
           <MarketplacePanel />
+        ) : activeTab === "dsh" ? (
+          <DshPanel />
         ) : files.length === 0 ? (
           <p className="settings-hint">No changed files in this turn.</p>
         ) : activeTab === "diff" ? (

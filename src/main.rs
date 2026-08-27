@@ -7,6 +7,7 @@ mod chats;
 mod cli;
 mod cloud;
 mod config;
+mod dsh;
 mod engine;
 mod gguf;
 mod git;

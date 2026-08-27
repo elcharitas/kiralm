@@ -106,7 +106,10 @@ fn load_skill_def() -> serde_json::Value {
 /// Connected MCP servers' tools (`mcp__<server>__<tool>`) are always
 /// appended too -- they're whatever access the user configured that
 /// server with, not gated by this session's own permission mode.
-pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry) -> Vec<serde_json::Value> {
+/// `run_dsh_profile` only shows up once there's actually a profile to
+/// run and a real `dsh` binary to run it with -- the one adapter where
+/// "not present" is the common, expected case.
+pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin: &str) -> Vec<serde_json::Value> {
     let mut defs = vec![
         json!({
             "type": "function",
@@ -158,6 +161,23 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry) -> Vec<s
                     "type": "object",
                     "properties": { "command": { "type": "string" } },
                     "required": ["command"],
+                }
+            }
+        }));
+    }
+    if !crate::dsh::list_profiles().is_empty() && crate::dsh::detect(dsh_bin).is_ok() {
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "run_dsh_profile",
+                "description": "Run a one-shot DeepSeek Harness (dsh) session against a configured profile. Fresh session per call, prints the final answer.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "profile": { "type": "string" },
+                        "prompt": { "type": "string" },
+                    },
+                    "required": ["profile", "prompt"],
                 }
             }
         }));
@@ -216,6 +236,7 @@ pub async fn execute(
     root: &Path,
     permission: Permission,
     mcp: &crate::mcp::McpRegistry,
+    dsh_bin: &str,
 ) -> (String, ToolStep) {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or(json!({}));
     let mut file_edit = None;
@@ -229,6 +250,7 @@ pub async fn execute(
             result
         }
         "run_command" => run_command(&args, root, permission).await,
+        "run_dsh_profile" => run_dsh_profile(&args, dsh_bin).await,
         other if other.starts_with("mcp__") => match mcp.dispatch(other, args_json).await {
             Some((ok, content, summary)) => (ok, truncate(content), summary),
             None => (
@@ -380,6 +402,22 @@ async fn run_command(args: &serde_json::Value, root: &Path, permission: Permissi
     }
 }
 
+async fn run_dsh_profile(args: &serde_json::Value, dsh_bin: &str) -> (bool, String, String) {
+    let Some(profile) = args.get("profile").and_then(|v| v.as_str()) else {
+        return err("run_dsh_profile requires a 'profile' argument");
+    };
+    let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) else {
+        return err("run_dsh_profile requires a 'prompt' argument");
+    };
+    match crate::dsh::run_profile(dsh_bin, profile, prompt).await {
+        Ok(stdout) => {
+            let summary = format!("ran dsh profile '{profile}'");
+            (true, truncate(stdout), summary)
+        }
+        Err(e) => err(&e),
+    }
+}
+
 fn err(msg: &str) -> (bool, String, String) {
     (false, format!("Error: {msg}"), msg.to_string())
 }
@@ -416,11 +454,11 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_round_trips_for_real() {
         let root = tmp_root();
-        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"hello"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"hello"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(step.ok, "{content}");
         assert!(std::fs::read_to_string(root.join("out.txt")).unwrap() == "hello");
 
-        let (content, step) = execute("read_file", r#"{"path":"out.txt"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("read_file", r#"{"path":"out.txt"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(step.ok);
         assert_eq!(content, "hello");
     }
@@ -430,14 +468,14 @@ mod tests {
         let root = tmp_root();
         std::fs::write(root.join("out.txt"), "old").unwrap();
         let (_content, step) =
-            execute("write_file", r#"{"path":"out.txt","content":"new"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+            execute("write_file", r#"{"path":"out.txt","content":"new"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         let edit = step.file_edit.expect("write_file should attach a FileEdit");
         assert_eq!(edit.before.as_deref(), Some("old"));
         assert_eq!(edit.after, "new");
 
         // A brand-new file has no prior content.
         let (_content, step) =
-            execute("write_file", r#"{"path":"fresh.txt","content":"hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+            execute("write_file", r#"{"path":"fresh.txt","content":"hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         let edit = step.file_edit.expect("write_file should attach a FileEdit");
         assert_eq!(edit.before, None);
         assert_eq!(edit.after, "hi");
@@ -446,7 +484,7 @@ mod tests {
     #[tokio::test]
     async fn write_file_rejected_in_read_only_mode() {
         let root = tmp_root();
-        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"x"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"x"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(!step.ok);
         assert!(content.contains("full-access"));
         assert!(!root.join("out.txt").exists());
@@ -455,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn read_outside_root_is_rejected() {
         let root = tmp_root();
-        let (content, step) = execute("read_file", r#"{"path":"../../../etc/passwd"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("read_file", r#"{"path":"../../../etc/passwd"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(!step.ok);
         assert!(content.contains("escapes"));
     }
@@ -463,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejected_in_read_only_mode() {
         let root = tmp_root();
-        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(!step.ok);
         assert!(content.contains("full-access"));
     }
@@ -471,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_executes_for_real_in_full_access() {
         let root = tmp_root();
-        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         assert!(step.ok);
         assert!(content.contains("hi"));
     }
@@ -479,10 +517,62 @@ mod tests {
     #[tokio::test]
     async fn mcp_prefixed_calls_route_to_the_mcp_registry_not_unknown_tool() {
         let root = tmp_root();
-        let (content, step) = execute("mcp__nope__echo", "{}", &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
+        let (content, step) = execute("mcp__nope__echo", "{}", &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new(), "dsh").await;
         // Dispatched to the registry (real "no such server" error), not
         // this module's own generic "unknown tool" fallback.
         assert!(!step.ok);
         assert!(content.contains("no mcp tool matches"), "{content}");
+    }
+
+    struct TempHome {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev: Option<String>,
+        dir: PathBuf,
+    }
+
+    impl TempHome {
+        fn new() -> TempHome {
+            let guard = crate::config::HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("kiralm-tools-dsh-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let prev = std::env::var("HOME").ok();
+            std::env::set_var("HOME", &dir);
+            TempHome { _guard: guard, prev, dir }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn run_dsh_profile_absent_without_a_profile_even_if_dsh_is_on_path() {
+        let _home = TempHome::new();
+        // "sh" always exists, standing in for a "detected" dsh binary --
+        // still shouldn't show up with zero profiles configured.
+        let defs = tool_defs(Permission::FullAccess, &crate::mcp::McpRegistry::new(), "sh");
+        assert!(!defs.iter().any(|d| d["function"]["name"] == "run_dsh_profile"));
+    }
+
+    #[test]
+    fn run_dsh_profile_absent_with_a_profile_but_no_real_dsh_binary() {
+        let _home = TempHome::new();
+        crate::dsh::create_profile("p1").unwrap();
+        let defs = tool_defs(Permission::FullAccess, &crate::mcp::McpRegistry::new(), "/definitely/not/a/real/dsh");
+        assert!(!defs.iter().any(|d| d["function"]["name"] == "run_dsh_profile"));
+    }
+
+    #[test]
+    fn run_dsh_profile_present_once_a_profile_exists_and_dsh_is_detected() {
+        let _home = TempHome::new();
+        crate::dsh::create_profile("p1").unwrap();
+        let defs = tool_defs(Permission::FullAccess, &crate::mcp::McpRegistry::new(), "sh");
+        assert!(defs.iter().any(|d| d["function"]["name"] == "run_dsh_profile"));
     }
 }

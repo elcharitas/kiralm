@@ -457,6 +457,7 @@ mod tests {
             &std::env::temp_dir(),
             crate::tools::Permission::ReadOnly,
             &crate::mcp::McpRegistry::new(),
+            "dsh",
         )
         .await;
         assert!(step.ok, "{content}");
@@ -475,6 +476,7 @@ mod tests {
             &std::env::temp_dir(),
             crate::tools::Permission::ReadOnly,
             &crate::mcp::McpRegistry::new(),
+            "dsh",
         )
         .await;
         assert!(!step.ok);
