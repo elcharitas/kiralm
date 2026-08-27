@@ -181,12 +181,12 @@ mod tests {
     }
 
     // `TunnelToken` resolves its path off the process-global `HOME` env
-    // var, same caveat `tunnel_auth`'s tests document, so run one at a time.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // var, same caveat `tunnel_auth`'s tests document, so run one at a
+    // time -- against the crate-wide lock, not a module-local one, since
+    // `skills.rs`'s tests swap the same env var.
     #[test]
     fn tunnel_token_round_trips_with_owner_only_perms() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = crate::config::HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("kiralm-tunnel-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("HOME", &dir);

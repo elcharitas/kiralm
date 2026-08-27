@@ -82,6 +82,9 @@ pub fn routes() -> Router<SharedState> {
             "/api/chats/:id",
             axum::routing::patch(update_chat).delete(delete_chat),
         )
+        .route("/api/skills", get(list_skills).post(create_skill))
+        .route("/api/skills/:name", axum::routing::delete(delete_skill))
+        .route("/api/skills/:name/enabled", post(set_skill_enabled))
 }
 
 fn err(status: StatusCode, message: impl Into<String>) -> Response {
@@ -759,6 +762,57 @@ async fn git_status(State(app): State<SharedState>, Path(id): Path<String>) -> R
         Err(e) => return e,
     };
     Json(crate::git::status(&root).await).into_response()
+}
+
+async fn list_skills(State(_app): State<SharedState>) -> Json<serde_json::Value> {
+    Json(json!({"skills": crate::skills::list()}))
+}
+
+#[derive(Deserialize)]
+struct CreateSkillRequest {
+    /// Raw SKILL.md text (paste path). Mutually exclusive with
+    /// `folder_path`; markdown wins if somehow both are sent.
+    markdown: Option<String>,
+    /// A local directory that already contains a SKILL.md (the
+    /// folder-browser path, same `/api/fs/list` flow as workspaces).
+    folder_path: Option<String>,
+}
+
+async fn create_skill(State(_app): State<SharedState>, Json(body): Json<CreateSkillRequest>) -> Response {
+    let markdown = body.markdown.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let folder_path = body.folder_path.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let result = match (markdown, folder_path) {
+        (Some(md), _) => crate::skills::create_from_markdown(md),
+        (None, Some(path)) => crate::skills::create_from_folder(std::path::Path::new(path)),
+        (None, None) => return err(StatusCode::BAD_REQUEST, "either 'markdown' or 'folder_path' is required"),
+    };
+    match result {
+        Ok(skill) => Json(skill).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+struct SkillEnabledRequest {
+    on: bool,
+}
+
+async fn set_skill_enabled(
+    State(_app): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<SkillEnabledRequest>,
+) -> Response {
+    match crate::skills::set_enabled(&name, body.on) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(StatusCode::NOT_FOUND, e),
+    }
+}
+
+async fn delete_skill(State(_app): State<SharedState>, Path(name): Path<String>) -> Response {
+    match crate::skills::delete(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => err(StatusCode::NOT_FOUND, e),
+    }
 }
 
 /// Bumps `last_active_at` to now. Called by the UI whenever a session

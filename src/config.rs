@@ -14,6 +14,12 @@ pub fn default_config_path() -> PathBuf {
     kiralm_home().join("config.toml")
 }
 
+// `HOME` is process-global, so any test that swaps it (tunnel.rs's,
+// skills.rs's) must serialize against every other one, not just its
+// own module's tests -- a single shared lock, not one per module.
+#[cfg(test)]
+pub(crate) static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn default_unix_socket() -> PathBuf {
     kiralm_home().join("kiralm.sock")
 }
