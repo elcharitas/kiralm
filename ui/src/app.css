@@ -2055,6 +2055,34 @@
   padding: 10px;
 }
 
+.mcp-field {
+  width: 100%;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.mcp-pill {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+}
+
+.mcp-pill-ok {
+  color: var(--verdict-good);
+  border-color: currentColor;
+}
+
+.mcp-pill-error {
+  color: var(--verdict-bad);
+  border-color: currentColor;
+}
+
 /* Settings */
 
 .settings-section {

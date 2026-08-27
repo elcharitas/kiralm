@@ -307,7 +307,7 @@ async fn run_tool_loop(
         .unwrap_or(false);
 
     let http = reqwest::Client::new();
-    let outcome = agent::run(&http, &url, bearer.as_deref(), req, &project_root, permission, enable_thinking).await;
+    let outcome = agent::run(&http, &url, bearer.as_deref(), req, &project_root, permission, enable_thinking, &app.mcp).await;
 
     let (text, steps, gateway_err) = match outcome {
         Ok((resp, steps)) => {

@@ -136,6 +136,20 @@ export interface Skill {
   enabled: boolean;
 }
 
+// `~/.kiralm/mcp_servers.json`'s wire shape merged with the live
+// in-memory connection status -- `connected`/`tool_count`/`error`
+// reflect the running child process, not anything persisted.
+export interface McpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  connected: boolean;
+  tool_count: number;
+  error?: string | null;
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -324,6 +338,30 @@ export const api = {
 
   deleteSkill: (name: string) =>
     fetch(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  listMcpServers: () => fetch("/api/mcp/servers").then((r) => asJson<{ servers: McpServer[] }>(r)),
+
+  addMcpServer: (server: { name: string; command: string; args: string[]; env: Record<string, string> }) =>
+    fetch("/api/mcp/servers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(server),
+    }).then((r) => asJson<McpServer>(r)),
+
+  setMcpServerEnabled: (name: string, enabled: boolean) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }).then((r) => asJson<McpServer>(r)),
+
+  deleteMcpServer: (name: string) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  refreshMcpServer: (name: string) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}/refresh`, { method: "POST" }).then((r) =>
+      asJson<McpServer>(r),
+    ),
 };
 
 export interface GenerationState {

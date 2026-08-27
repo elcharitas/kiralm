@@ -11,6 +11,7 @@ import {
   MemoryStick,
   Palette,
   PanelRightClose,
+  Plug,
   Plus,
   Shapes,
   Sparkles,
@@ -20,6 +21,7 @@ import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
+import { McpPanel } from "./McpPanel";
 import { Select } from "./Select";
 import { SkillsPanel } from "./SkillsPanel";
 
@@ -93,7 +95,8 @@ export function RightPanel({
   const files = turnFileDiffsOf(activeTurn?.steps);
 
   const [tab, setTab] = useState<string>("diff");
-  const activeTab = tab === "skills" || files.some((f) => f.filename === tab) ? tab : "diff";
+  const activeTab =
+    tab === "skills" || tab === "mcp" || files.some((f) => f.filename === tab) ? tab : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   // Collapsed = a slim rail with just the reopen control, same pattern
@@ -148,6 +151,17 @@ export function RightPanel({
         >
           <Sparkles size={14} /> Skills
         </button>
+        <button
+          type="button"
+          className={
+            activeTab === "mcp"
+              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
+              : "right-panel-tab right-panel-tab-diff"
+          }
+          onClick={() => setTab("mcp")}
+        >
+          <Plug size={14} /> MCP
+        </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
@@ -166,7 +180,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -186,6 +200,8 @@ export function RightPanel({
       <div className="right-panel-body">
         {activeTab === "skills" ? (
           <SkillsPanel />
+        ) : activeTab === "mcp" ? (
+          <McpPanel />
         ) : files.length === 0 ? (
           <p className="settings-hint">No changed files in this turn.</p>
         ) : activeTab === "diff" ? (

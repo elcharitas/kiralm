@@ -103,7 +103,10 @@ fn load_skill_def() -> serde_json::Value {
 /// `write_file`/`run_command` only in full-access, so a read-only session
 /// never even sees them as an option, on top of the server-side reject
 /// below (defense in depth: a model can name a tool it wasn't offered).
-pub fn tool_defs(permission: Permission) -> Vec<serde_json::Value> {
+/// Connected MCP servers' tools (`mcp__<server>__<tool>`) are always
+/// appended too -- they're whatever access the user configured that
+/// server with, not gated by this session's own permission mode.
+pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry) -> Vec<serde_json::Value> {
     let mut defs = vec![
         json!({
             "type": "function",
@@ -159,6 +162,7 @@ pub fn tool_defs(permission: Permission) -> Vec<serde_json::Value> {
             }
         }));
     }
+    defs.extend(mcp.tool_defs());
     defs
 }
 
@@ -206,7 +210,13 @@ fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
 /// model plus a `ToolStep` for logging/UI, on both success and failure --
 /// a rejected call is a normal tool result (the model gets told why),
 /// not a hard error that aborts the whole turn.
-pub async fn execute(name: &str, args_json: &str, root: &Path, permission: Permission) -> (String, ToolStep) {
+pub async fn execute(
+    name: &str,
+    args_json: &str,
+    root: &Path,
+    permission: Permission,
+    mcp: &crate::mcp::McpRegistry,
+) -> (String, ToolStep) {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or(json!({}));
     let mut file_edit = None;
     let (ok, content, summary) = match name {
@@ -219,6 +229,14 @@ pub async fn execute(name: &str, args_json: &str, root: &Path, permission: Permi
             result
         }
         "run_command" => run_command(&args, root, permission).await,
+        other if other.starts_with("mcp__") => match mcp.dispatch(other, args_json).await {
+            Some((ok, content, summary)) => (ok, truncate(content), summary),
+            None => (
+                false,
+                format!("Error: unknown tool '{other}'"),
+                format!("unknown tool '{other}'"),
+            ),
+        },
         other => (
             false,
             format!("Error: unknown tool '{other}'"),
@@ -398,11 +416,11 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_round_trips_for_real() {
         let root = tmp_root();
-        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"hello"}"#, &root, Permission::FullAccess).await;
+        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"hello"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         assert!(step.ok, "{content}");
         assert!(std::fs::read_to_string(root.join("out.txt")).unwrap() == "hello");
 
-        let (content, step) = execute("read_file", r#"{"path":"out.txt"}"#, &root, Permission::FullAccess).await;
+        let (content, step) = execute("read_file", r#"{"path":"out.txt"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         assert!(step.ok);
         assert_eq!(content, "hello");
     }
@@ -412,14 +430,14 @@ mod tests {
         let root = tmp_root();
         std::fs::write(root.join("out.txt"), "old").unwrap();
         let (_content, step) =
-            execute("write_file", r#"{"path":"out.txt","content":"new"}"#, &root, Permission::FullAccess).await;
+            execute("write_file", r#"{"path":"out.txt","content":"new"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         let edit = step.file_edit.expect("write_file should attach a FileEdit");
         assert_eq!(edit.before.as_deref(), Some("old"));
         assert_eq!(edit.after, "new");
 
         // A brand-new file has no prior content.
         let (_content, step) =
-            execute("write_file", r#"{"path":"fresh.txt","content":"hi"}"#, &root, Permission::FullAccess).await;
+            execute("write_file", r#"{"path":"fresh.txt","content":"hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         let edit = step.file_edit.expect("write_file should attach a FileEdit");
         assert_eq!(edit.before, None);
         assert_eq!(edit.after, "hi");
@@ -428,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn write_file_rejected_in_read_only_mode() {
         let root = tmp_root();
-        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"x"}"#, &root, Permission::ReadOnly).await;
+        let (content, step) = execute("write_file", r#"{"path":"out.txt","content":"x"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
         assert!(!step.ok);
         assert!(content.contains("full-access"));
         assert!(!root.join("out.txt").exists());
@@ -437,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn read_outside_root_is_rejected() {
         let root = tmp_root();
-        let (content, step) = execute("read_file", r#"{"path":"../../../etc/passwd"}"#, &root, Permission::FullAccess).await;
+        let (content, step) = execute("read_file", r#"{"path":"../../../etc/passwd"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         assert!(!step.ok);
         assert!(content.contains("escapes"));
     }
@@ -445,7 +463,7 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejected_in_read_only_mode() {
         let root = tmp_root();
-        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::ReadOnly).await;
+        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
         assert!(!step.ok);
         assert!(content.contains("full-access"));
     }
@@ -453,8 +471,18 @@ mod tests {
     #[tokio::test]
     async fn run_command_executes_for_real_in_full_access() {
         let root = tmp_root();
-        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::FullAccess).await;
+        let (content, step) = execute("run_command", r#"{"command":"echo hi"}"#, &root, Permission::FullAccess, &crate::mcp::McpRegistry::new()).await;
         assert!(step.ok);
         assert!(content.contains("hi"));
+    }
+
+    #[tokio::test]
+    async fn mcp_prefixed_calls_route_to_the_mcp_registry_not_unknown_tool() {
+        let root = tmp_root();
+        let (content, step) = execute("mcp__nope__echo", "{}", &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new()).await;
+        // Dispatched to the registry (real "no such server" error), not
+        // this module's own generic "unknown tool" fallback.
+        assert!(!step.ok);
+        assert!(content.contains("no mcp tool matches"), "{content}");
     }
 }

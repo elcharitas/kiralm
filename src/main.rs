@@ -9,6 +9,7 @@ mod config;
 mod engine;
 mod gguf;
 mod git;
+mod mcp;
 mod pull;
 mod registry;
 mod residency;
@@ -168,6 +169,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     let cloud_config = app_state.config.cloud.clone();
     let registry_for_sync = app_state.registry.clone();
     let app_state_for_tunnel = app_state.clone();
+    let app_state_for_mcp = app_state.clone();
     let router = api::build_router(app_state);
 
     // bind TCP first: if another daemon already owns this port, fail fast
@@ -216,6 +218,14 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     // after listeners are already bound, same ordering
     // catalog-sync-at-boot uses.
     api::tunnel::respawn_if_enabled(&app_state_for_tunnel).await;
+
+    // Detached, like the catalog sync below: a slow or hanging MCP
+    // server (e.g. an `npx` first-install) must never delay `serve`
+    // itself becoming ready to accept requests.
+    tokio::spawn(async move {
+        let configs = mcp::load_configs();
+        app_state_for_mcp.mcp.connect_all_enabled(&configs).await;
+    });
 
     // One non-blocking sync after the listeners are already accepting.
     // Detached, never awaited, so a slow or unreachable backend can

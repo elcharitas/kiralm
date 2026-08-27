@@ -413,6 +413,7 @@ mod tests {
             r#"{"name":"test-skill"}"#,
             &std::env::temp_dir(),
             crate::tools::Permission::ReadOnly,
+            &crate::mcp::McpRegistry::new(),
         )
         .await;
         assert!(step.ok, "{content}");
@@ -430,6 +431,7 @@ mod tests {
             r#"{"name":"test-skill"}"#,
             &std::env::temp_dir(),
             crate::tools::Permission::ReadOnly,
+            &crate::mcp::McpRegistry::new(),
         )
         .await;
         assert!(!step.ok);

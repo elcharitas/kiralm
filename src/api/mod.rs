@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod anthropic;
 pub mod internal;
+pub mod mcp;
 pub mod openai;
 pub mod tunnel;
 
@@ -85,6 +86,10 @@ pub struct AppState {
     // uptime with many sessions -- add a size/age-based sweep if that
     // ever shows up in practice.
     pub generations: RwLock<HashMap<String, Arc<SessionGeneration>>>,
+    /// Live stdio MCP server connections, keyed by name -- in-memory
+    /// only, `mcp_servers.json` is the on-disk record of what *should*
+    /// be connected.
+    pub mcp: crate::mcp::McpRegistry,
 }
 
 impl AppState {
@@ -99,6 +104,7 @@ impl AppState {
             logins: RwLock::new(HashMap::new()),
             tunnel_child: parking_lot::Mutex::new(None),
             generations: RwLock::new(HashMap::new()),
+            mcp: crate::mcp::McpRegistry::new(),
         }
     }
 
@@ -242,6 +248,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(anthropic::routes())
         .merge(internal::routes())
         .merge(tunnel::routes())
+        .merge(mcp::routes())
         .fallback(internal::static_handler)
         .with_state(state)
 }
