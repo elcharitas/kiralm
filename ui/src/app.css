@@ -1981,6 +1981,12 @@
   gap: 8px;
 }
 
+.skills-panel-divider {
+  border-top: 1px solid var(--border-strong);
+  padding-top: 12px;
+  margin-top: 4px;
+}
+
 .skills-add-form {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
 //! `kiralm` binary entry point: arg parse -> dispatch to `cli.rs` or the
 //! `serve` daemon.
 
+mod agent_plugin;
 mod api;
 mod chats;
 mod cli;

@@ -2,6 +2,7 @@
 //! Unix socket and the TCP listener route to the same handlers.
 
 pub mod agent;
+pub mod agent_plugin;
 pub mod anthropic;
 pub mod internal;
 pub mod marketplace;
@@ -251,6 +252,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(tunnel::routes())
         .merge(mcp::routes())
         .merge(marketplace::routes())
+        .merge(agent_plugin::routes())
         .fallback(internal::static_handler)
         .with_state(state)
 }

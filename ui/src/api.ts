@@ -185,6 +185,31 @@ export interface PluginUninstallResult {
   mcp_servers: string[];
 }
 
+// `~/.kiralm/agent_plugins.json`'s wire shape -- one entry per
+// installed Agent Plugins 1.0 plugin (agent-plugins.org), sourced from
+// a local path or a git URL pointing straight at the plugin's root.
+export interface AgentPlugin {
+  name: string;
+  source: string;
+  plugin_ref: { marketplace: string; plugin: string };
+  version?: string | null;
+  description?: string | null;
+  author?: unknown;
+  homepage?: string | null;
+  repository?: string | null;
+  license?: string | null;
+  keywords: string[];
+  extensions?: unknown;
+  installed_at: string;
+}
+
+export interface AgentPluginInstallResult {
+  plugin: AgentPlugin;
+  skills: string[];
+  mcp_servers: string[];
+  warnings: string[];
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -430,6 +455,20 @@ export const api = {
     fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }).then((r) => asJson<PluginUninstallResult>(r)),
+
+  listAgentPlugins: () => fetch("/api/agent-plugins").then((r) => asJson<{ plugins: AgentPlugin[] }>(r)),
+
+  installAgentPlugin: (source: string) =>
+    fetch("/api/agent-plugins", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source }),
+    }).then((r) => asJson<AgentPluginInstallResult>(r)),
+
+  uninstallAgentPlugin: (name: string) =>
+    fetch(`/api/agent-plugins/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+      asJson<PluginUninstallResult>(r),
+    ),
 };
 
 export interface GenerationState {

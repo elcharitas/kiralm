@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { api, type Marketplace, type MarketplacePlugin } from "../api";
+import { api, type AgentPlugin, type Marketplace, type MarketplacePlugin } from "../api";
 import { useDialogs } from "./Dialogs";
 
 // Add-by-url + list marketplaces, drill into one to install/uninstall
 // its plugins. Global, same posture as SkillsPanel/McpPanel -- what
 // each panel writes into (skills.rs/mcp.rs's stores) lives there too.
+// Agent Plugins 1.0 (agent-plugins.org) has no browsable index, so its
+// section below is install-from-path/URL directly, no drill-down.
 export function MarketplacePanel() {
   const [marketplaces, setMarketplaces] = useState<Marketplace[]>([]);
   const [loading, setLoading] = useState(true);
@@ -15,6 +17,52 @@ export function MarketplacePanel() {
   const [plugins, setPlugins] = useState<MarketplacePlugin[]>([]);
   const [pluginsLoading, setPluginsLoading] = useState(false);
   const { toast, confirm } = useDialogs();
+
+  const [agentPlugins, setAgentPlugins] = useState<AgentPlugin[]>([]);
+  const [agentPluginsLoading, setAgentPluginsLoading] = useState(true);
+  const [addingAgentPlugin, setAddingAgentPlugin] = useState(false);
+  const [agentPluginSource, setAgentPluginSource] = useState("");
+
+  const loadAgentPlugins = () =>
+    api.listAgentPlugins().then((d) => setAgentPlugins(d.plugins), () => {});
+
+  useEffect(() => {
+    loadAgentPlugins().finally(() => setAgentPluginsLoading(false));
+  }, []);
+
+  const installAgentPlugin = async () => {
+    if (!agentPluginSource.trim()) return;
+    try {
+      const result = await api.installAgentPlugin(agentPluginSource.trim());
+      setAgentPluginSource("");
+      setAddingAgentPlugin(false);
+      await loadAgentPlugins();
+      const warned = result.warnings.length ? `, ${result.warnings.length} warning(s)` : "";
+      toast(
+        `${result.plugin.name} installed (${result.skills.length} skill(s), ${result.mcp_servers.length} mcp server(s)${warned})`,
+        result.warnings.length ? "info" : "success",
+      );
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  };
+
+  const uninstallAgentPlugin = async (plugin: AgentPlugin) => {
+    const ok = await confirm({
+      title: "Uninstall agent plugin",
+      message: `Remove "${plugin.name}" and everything it installed?`,
+      confirmLabel: "Uninstall",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.uninstallAgentPlugin(plugin.name);
+      await loadAgentPlugins();
+      toast(`${plugin.name} uninstalled`, "info");
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e), "error");
+    }
+  };
 
   const load = () => api.listMarketplaces().then((d) => setMarketplaces(d.marketplaces), () => {});
 
@@ -197,6 +245,64 @@ export function MarketplacePanel() {
               </button>
               <button type="button" className="right-panel-icon-btn" title="Remove" onClick={() => remove(m.slug)}>
                 <Trash2 size={14} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="skills-panel-divider">
+        <span className="settings-hint">Agent Plugins (agent-plugins.org)</span>
+      </div>
+
+      <div className="skills-panel-actions">
+        <button type="button" className="btn" onClick={() => setAddingAgentPlugin((v) => !v)}>
+          <Plus size={14} /> Install from path/URL
+        </button>
+      </div>
+
+      {addingAgentPlugin && (
+        <div className="skills-add-form">
+          <input
+            autoFocus
+            className="mcp-field mono"
+            placeholder="local folder path or git url, pointing at the plugin's own root"
+            value={agentPluginSource}
+            onChange={(e) => setAgentPluginSource(e.target.value)}
+          />
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={() => setAddingAgentPlugin(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-accent"
+              disabled={!agentPluginSource.trim()}
+              onClick={installAgentPlugin}
+            >
+              Install
+            </button>
+          </div>
+        </div>
+      )}
+
+      {agentPluginsLoading ? (
+        <p className="settings-hint">Loading…</p>
+      ) : agentPlugins.length === 0 ? (
+        <p className="settings-hint">No agent plugins installed yet.</p>
+      ) : (
+        <ul className="skills-list">
+          {agentPlugins.map((p) => (
+            <li key={p.name} className="skills-row">
+              <div className="skills-row-main">
+                <span className="mono truncate">
+                  {p.name}
+                  {p.version ? ` (${p.version})` : ""}
+                </span>
+                <span className="settings-hint skills-row-desc truncate">{p.description ?? p.source}</span>
+              </div>
+              <button type="button" className="btn" onClick={() => uninstallAgentPlugin(p)}>
+                Uninstall
               </button>
             </li>
           ))}
