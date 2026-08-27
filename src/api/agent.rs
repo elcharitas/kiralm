@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use super::openai::{ChatCompletionRequest, ChatCompletionResponse, ChatContent, ChatMessage};
+use crate::mcp::McpRegistry;
 use crate::tools::{self, Permission, ToolStep};
 
 const MAX_ITERATIONS: usize = 8;
@@ -34,9 +35,11 @@ pub async fn run(
     project_root: &Path,
     permission: Permission,
     enable_thinking: bool,
+    mcp: &McpRegistry,
+    dsh_bin: &str,
 ) -> Result<(ChatCompletionResponse, Vec<ToolStep>), AgentError> {
     req.stream = false;
-    req.tools = Some(tools::tool_defs(permission));
+    req.tools = Some(tools::tool_defs(permission, mcp, dsh_bin));
     // Off by default: Qwen3-style reasoning models otherwise burn the
     // whole max_tokens budget on hidden <think> content before ever
     // emitting a call. The composer's "Thinking" toggle controls this.
@@ -87,7 +90,7 @@ pub async fn run(
         });
         for call in &calls {
             let (content, step) =
-                tools::execute(&call.function.name, &call.function.arguments, project_root, permission).await;
+                tools::execute(&call.function.name, &call.function.arguments, project_root, permission, mcp, dsh_bin).await;
             steps.push(step);
             req.messages.push(ChatMessage {
                 role: "tool".to_string(),

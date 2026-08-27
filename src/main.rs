@@ -1,18 +1,24 @@
 //! `kiralm` binary entry point: arg parse -> dispatch to `cli.rs` or the
 //! `serve` daemon.
 
+mod agent_plugin;
 mod api;
 mod chats;
 mod cli;
 mod cloud;
 mod config;
+mod dsh;
 mod engine;
 mod gguf;
 mod git;
+mod marketplace;
+mod mcp;
+mod plugin_catalog;
 mod pull;
 mod registry;
 mod residency;
 mod settings;
+mod skills;
 mod state;
 mod tools;
 mod tunnel;
@@ -167,6 +173,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     let cloud_config = app_state.config.cloud.clone();
     let registry_for_sync = app_state.registry.clone();
     let app_state_for_tunnel = app_state.clone();
+    let app_state_for_mcp = app_state.clone();
     let router = api::build_router(app_state);
 
     // bind TCP first: if another daemon already owns this port, fail fast
@@ -216,12 +223,24 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     // catalog-sync-at-boot uses.
     api::tunnel::respawn_if_enabled(&app_state_for_tunnel).await;
 
+    // Detached, like the catalog sync below: a slow or hanging MCP
+    // server (e.g. an `npx` first-install) must never delay `serve`
+    // itself becoming ready to accept requests.
+    tokio::spawn(async move {
+        let configs = mcp::load_configs();
+        app_state_for_mcp.mcp.connect_all_enabled(&configs).await;
+    });
+
     // One non-blocking sync after the listeners are already accepting.
     // Detached, never awaited, so a slow or unreachable backend can
     // never delay `serve` startup.
     if cloud_config.catalog_sync_on_startup {
+        let plugin_api_base_url = cloud_config.api_base_url.clone();
         tokio::spawn(async move {
             cloud::sync_cloud_models(&cloud_config.api_base_url, &registry_for_sync).await;
+        });
+        tokio::spawn(async move {
+            plugin_catalog::sync_cloud_plugins(&plugin_api_base_url).await;
         });
     }
 

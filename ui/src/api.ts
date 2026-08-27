@@ -123,6 +123,110 @@ export interface GitStatus {
   files: GitFileStatus[];
 }
 
+// `~/.kiralm/skills/<name>/SKILL.md`'s wire shape -- global, no
+// per-workspace scoping. `enabled` is KiraLM's own state (skills.json),
+// not part of the SKILL.md format itself.
+export interface Skill {
+  name: string;
+  description: string;
+  allowed_tools?: string[] | null;
+  license?: string | null;
+  metadata?: unknown;
+  body: string;
+  enabled: boolean;
+}
+
+// `~/.kiralm/mcp_servers.json`'s wire shape merged with the live
+// in-memory connection status -- `connected`/`tool_count`/`error`
+// reflect the running child process, not anything persisted.
+export interface McpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  connected: boolean;
+  tool_count: number;
+  error?: string | null;
+}
+
+// A plugin entry as marketplace.json itself lists it -- no
+// installed-state here, that's only known per-marketplace (see
+// MarketplacePlugin below).
+export interface MarketplacePluginRef {
+  name: string;
+  source: string;
+  description?: string | null;
+}
+
+// `.claude-plugin/marketplace.json`'s wire shape, as cloned under
+// `~/.kiralm/marketplaces/<slug>/`.
+export interface Marketplace {
+  slug: string;
+  name: string;
+  owner?: unknown;
+  plugins: MarketplacePluginRef[];
+}
+
+// GET .../plugins's per-plugin view -- `installed` reflects real
+// tagged skills/mcp servers, not marketplace.json alone.
+export interface MarketplacePlugin extends MarketplacePluginRef {
+  installed: boolean;
+}
+
+export interface PluginInstallResult {
+  skills: string[];
+  mcp_servers: string[];
+  warnings: string[];
+}
+
+export interface PluginUninstallResult {
+  skills: string[];
+  mcp_servers: string[];
+}
+
+// `~/.kiralm/agent_plugins.json`'s wire shape -- one entry per
+// installed Agent Plugins 1.0 plugin (agent-plugins.org), sourced from
+// a local path or a git URL pointing straight at the plugin's root.
+export interface AgentPlugin {
+  name: string;
+  source: string;
+  plugin_ref: { marketplace: string; plugin: string };
+  version?: string | null;
+  description?: string | null;
+  author?: unknown;
+  homepage?: string | null;
+  repository?: string | null;
+  license?: string | null;
+  keywords: string[];
+  extensions?: unknown;
+  installed_at: string;
+}
+
+export interface AgentPluginInstallResult {
+  plugin: AgentPlugin;
+  skills: string[];
+  mcp_servers: string[];
+  warnings: string[];
+}
+
+// GET /api/plugins/catalog's per-row shape: kiralm-web's cloud catalog
+// (GET /api/plugins) plus a real `installed` flag re-derived from the
+// matching backend's own live state -- not a separate install registry.
+export type PluginSourceKind = "claude_marketplace" | "agent_plugin" | "dsh";
+
+export interface CatalogPlugin {
+  id: string;
+  name: string;
+  description: string | null;
+  source_kind: PluginSourceKind;
+  source: string;
+  plugin_name: string | null;
+  enabled: boolean;
+  sort_order: number;
+  installed: boolean;
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -282,6 +386,118 @@ export const api = {
   stopGeneration: (sessionId: string) =>
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}/generation`, { method: "DELETE" }).then(
       (r) => asJson<void>(r),
+    ),
+
+  listSkills: () => fetch("/api/skills").then((r) => asJson<{ skills: Skill[] }>(r)),
+
+  createSkillFromMarkdown: (markdown: string) =>
+    fetch("/api/skills", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ markdown }),
+    }).then((r) => asJson<Skill>(r)),
+
+  // `folderPath` must already contain a SKILL.md -- same in-app
+  // folder-browser flow as adding a workspace (see FolderBrowserBody).
+  createSkillFromFolder: (folderPath: string) =>
+    fetch("/api/skills", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ folder_path: folderPath }),
+    }).then((r) => asJson<Skill>(r)),
+
+  setSkillEnabled: (name: string, on: boolean) =>
+    fetch(`/api/skills/${encodeURIComponent(name)}/enabled`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ on }),
+    }).then((r) => asJson<void>(r)),
+
+  deleteSkill: (name: string) =>
+    fetch(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  listMcpServers: () => fetch("/api/mcp/servers").then((r) => asJson<{ servers: McpServer[] }>(r)),
+
+  addMcpServer: (server: { name: string; command: string; args: string[]; env: Record<string, string> }) =>
+    fetch("/api/mcp/servers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(server),
+    }).then((r) => asJson<McpServer>(r)),
+
+  setMcpServerEnabled: (name: string, enabled: boolean) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    }).then((r) => asJson<McpServer>(r)),
+
+  deleteMcpServer: (name: string) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  refreshMcpServer: (name: string) =>
+    fetch(`/api/mcp/servers/${encodeURIComponent(name)}/refresh`, { method: "POST" }).then((r) =>
+      asJson<McpServer>(r),
+    ),
+
+  listMarketplaces: () =>
+    fetch("/api/marketplaces").then((r) => asJson<{ marketplaces: Marketplace[] }>(r)),
+
+  addMarketplace: (url: string) =>
+    fetch("/api/marketplaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).then((r) => asJson<Marketplace>(r)),
+
+  removeMarketplace: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  refreshMarketplace: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/refresh`, { method: "POST" }).then((r) =>
+      asJson<Marketplace>(r),
+    ),
+
+  listMarketplacePlugins: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins`).then((r) =>
+      asJson<{ plugins: MarketplacePlugin[] }>(r),
+    ),
+
+  installPlugin: (slug: string, name: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins/${encodeURIComponent(name)}/install`, {
+      method: "POST",
+    }).then((r) => asJson<PluginInstallResult>(r)),
+
+  uninstallPlugin: (slug: string, name: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then((r) => asJson<PluginUninstallResult>(r)),
+
+  listAgentPlugins: () => fetch("/api/agent-plugins").then((r) => asJson<{ plugins: AgentPlugin[] }>(r)),
+
+  installAgentPlugin: (source: string) =>
+    fetch("/api/agent-plugins", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ source }),
+    }).then((r) => asJson<AgentPluginInstallResult>(r)),
+
+  uninstallAgentPlugin: (name: string) =>
+    fetch(`/api/agent-plugins/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+      asJson<PluginUninstallResult>(r),
+    ),
+
+  listPluginCatalog: () =>
+    fetch("/api/plugins/catalog").then((r) => asJson<{ data: CatalogPlugin[] }>(r)),
+
+  installCatalogPlugin: (id: string) =>
+    fetch(`/api/plugins/catalog/${encodeURIComponent(id)}/install`, { method: "POST" }).then((r) =>
+      asJson<unknown>(r),
+    ),
+
+  uninstallCatalogPlugin: (id: string) =>
+    fetch(`/api/plugins/catalog/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) =>
+      asJson<unknown>(r),
     ),
 };
 

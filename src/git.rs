@@ -39,6 +39,26 @@ pub async fn clone(url: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `git clone --depth 1 <url> <dest>` -- full history is never needed
+/// for a marketplace checkout. Same dest-must-not-exist contract as
+/// `clone` above.
+pub async fn shallow_clone(url: &str, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    }
+    run(dest.parent().unwrap_or(dest), &["clone", "--depth", "1", url, &dest.to_string_lossy()]).await?;
+    Ok(())
+}
+
+/// `git pull --quiet` inside an existing clone -- the "fetch if already
+/// known" half of adding a marketplace, and what a refresh re-runs.
+pub async fn pull(root: &Path) -> Result<(), String> {
+    run(root, &["pull", "--quiet"]).await.map(|_| ())
+}
+
 pub async fn is_repo(root: &Path) -> bool {
     run(root, &["rev-parse", "--is-inside-work-tree"])
         .await
