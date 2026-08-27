@@ -82,6 +82,7 @@ async fn add_server(State(app): State<SharedState>, Json(body): Json<AddServerRe
         args: body.args,
         env: body.env,
         enabled: body.enabled,
+        installed_by: None,
     };
     let saved = match mcp::add_config(cfg) {
         Ok(c) => c,

@@ -9,6 +9,7 @@ mod config;
 mod engine;
 mod gguf;
 mod git;
+mod marketplace;
 mod mcp;
 mod pull;
 mod registry;

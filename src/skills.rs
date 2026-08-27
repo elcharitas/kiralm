@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::kiralm_home;
+use crate::marketplace::PluginRef;
 
 pub fn skills_dir() -> PathBuf {
     kiralm_home().join("skills")
@@ -51,6 +52,10 @@ pub struct Skill {
     pub metadata: Option<serde_json::Value>,
     pub body: String,
     pub enabled: bool,
+    /// Which marketplace plugin installed this skill, if any -- `None`
+    /// for one added by hand (paste/folder). What uninstall filters on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_by: Option<PluginRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +64,10 @@ struct SkillsState {
     /// defaults to enabled, see `enabled_for`.
     #[serde(default)]
     enabled: HashMap<String, bool>,
+    /// name -> installing plugin, for skills a marketplace install put
+    /// here -- absent for a hand-added skill.
+    #[serde(default)]
+    installed_by: HashMap<String, PluginRef>,
 }
 
 impl SkillsState {
@@ -132,6 +141,7 @@ fn skill_from_dir(dir: &Path, state: &SkillsState) -> Option<Skill> {
     let content = std::fs::read_to_string(dir.join("SKILL.md")).ok()?;
     let (fm, body) = parse_skill_md(&content).ok()?;
     let enabled = state.enabled_for(&fm.name);
+    let installed_by = state.installed_by.get(&fm.name).cloned();
     Some(Skill {
         name: fm.name,
         description: fm.description,
@@ -140,6 +150,7 @@ fn skill_from_dir(dir: &Path, state: &SkillsState) -> Option<Skill> {
         metadata: fm.metadata,
         body,
         enabled,
+        installed_by,
     })
 }
 
@@ -195,6 +206,7 @@ pub fn create_from_markdown(raw: &str) -> Result<Skill, String> {
         metadata: fm.metadata,
         body,
         enabled: true,
+        installed_by: None,
     })
 }
 
@@ -236,7 +248,37 @@ pub fn create_from_folder(src: &Path) -> Result<Skill, String> {
         metadata: fm.metadata,
         body,
         enabled: true,
+        installed_by: None,
     })
+}
+
+/// Tags an already-created skill with the plugin that installed it, so
+/// `delete_by_plugin` can later find it again.
+pub fn mark_installed(name: &str, plugin: PluginRef) -> Result<(), String> {
+    if get(name).is_none() {
+        return Err(format!("skill '{name}' not found"));
+    }
+    let mut state = SkillsState::load();
+    state.installed_by.insert(name.to_string(), plugin);
+    state.save().map_err(|e| e.to_string())
+}
+
+/// Deletes every skill tagged as installed by this plugin, and nothing
+/// else. Returns the names actually removed.
+pub fn delete_by_plugin(marketplace: &str, plugin: &str) -> Vec<String> {
+    let names: Vec<String> = list()
+        .into_iter()
+        .filter(|s| {
+            s.installed_by
+                .as_ref()
+                .is_some_and(|p| p.marketplace == marketplace && p.plugin == plugin)
+        })
+        .map(|s| s.name)
+        .collect();
+    for name in &names {
+        let _ = delete(name);
+    }
+    names
 }
 
 pub fn set_enabled(name: &str, on: bool) -> Result<(), String> {
@@ -257,6 +299,7 @@ pub fn delete(name: &str) -> Result<(), String> {
     std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut state = SkillsState::load();
     state.enabled.remove(&name);
+    state.installed_by.remove(&name);
     let _ = state.save();
     Ok(())
 }

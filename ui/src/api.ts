@@ -150,6 +150,41 @@ export interface McpServer {
   error?: string | null;
 }
 
+// A plugin entry as marketplace.json itself lists it -- no
+// installed-state here, that's only known per-marketplace (see
+// MarketplacePlugin below).
+export interface MarketplacePluginRef {
+  name: string;
+  source: string;
+  description?: string | null;
+}
+
+// `.claude-plugin/marketplace.json`'s wire shape, as cloned under
+// `~/.kiralm/marketplaces/<slug>/`.
+export interface Marketplace {
+  slug: string;
+  name: string;
+  owner?: unknown;
+  plugins: MarketplacePluginRef[];
+}
+
+// GET .../plugins's per-plugin view -- `installed` reflects real
+// tagged skills/mcp servers, not marketplace.json alone.
+export interface MarketplacePlugin extends MarketplacePluginRef {
+  installed: boolean;
+}
+
+export interface PluginInstallResult {
+  skills: string[];
+  mcp_servers: string[];
+  warnings: string[];
+}
+
+export interface PluginUninstallResult {
+  skills: string[];
+  mcp_servers: string[];
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -362,6 +397,39 @@ export const api = {
     fetch(`/api/mcp/servers/${encodeURIComponent(name)}/refresh`, { method: "POST" }).then((r) =>
       asJson<McpServer>(r),
     ),
+
+  listMarketplaces: () =>
+    fetch("/api/marketplaces").then((r) => asJson<{ marketplaces: Marketplace[] }>(r)),
+
+  addMarketplace: (url: string) =>
+    fetch("/api/marketplaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).then((r) => asJson<Marketplace>(r)),
+
+  removeMarketplace: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
+
+  refreshMarketplace: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/refresh`, { method: "POST" }).then((r) =>
+      asJson<Marketplace>(r),
+    ),
+
+  listMarketplacePlugins: (slug: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins`).then((r) =>
+      asJson<{ plugins: MarketplacePlugin[] }>(r),
+    ),
+
+  installPlugin: (slug: string, name: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins/${encodeURIComponent(name)}/install`, {
+      method: "POST",
+    }).then((r) => asJson<PluginInstallResult>(r)),
+
+  uninstallPlugin: (slug: string, name: string) =>
+    fetch(`/api/marketplaces/${encodeURIComponent(slug)}/plugins/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }).then((r) => asJson<PluginUninstallResult>(r)),
 };
 
 export interface GenerationState {

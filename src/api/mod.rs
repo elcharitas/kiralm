@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod anthropic;
 pub mod internal;
+pub mod marketplace;
 pub mod mcp;
 pub mod openai;
 pub mod tunnel;
@@ -249,6 +250,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(internal::routes())
         .merge(tunnel::routes())
         .merge(mcp::routes())
+        .merge(marketplace::routes())
         .fallback(internal::static_handler)
         .with_state(state)
 }

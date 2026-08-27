@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::config::kiralm_home;
+use crate::marketplace::PluginRef;
 
 pub fn mcp_servers_path() -> PathBuf {
     kiralm_home().join("mcp_servers.json")
@@ -33,6 +34,10 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Which marketplace plugin installed this server, if any -- `None`
+    /// for one added by hand. What uninstall filters on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_by: Option<PluginRef>,
 }
 
 fn default_enabled() -> bool {
@@ -102,6 +107,22 @@ pub fn delete_config(name: &str) -> Result<(), String> {
         return Err(format!("mcp server '{name}' not found"));
     }
     save_configs(&configs).map_err(|e| e.to_string())
+}
+
+/// Deletes every server tagged as installed by this plugin, and
+/// nothing else. Returns the names actually removed -- callers still
+/// need to `McpRegistry::disconnect` each one themselves.
+pub fn delete_by_plugin(marketplace: &str, plugin: &str) -> Vec<String> {
+    let configs = load_configs();
+    let (removed, kept): (Vec<_>, Vec<_>) = configs.into_iter().partition(|c| {
+        c.installed_by
+            .as_ref()
+            .is_some_and(|p| p.marketplace == marketplace && p.plugin == plugin)
+    });
+    if !removed.is_empty() {
+        let _ = save_configs(&kept);
+    }
+    removed.into_iter().map(|c| c.name).collect()
 }
 
 // ---------------------------------------------------------------------
@@ -321,6 +342,7 @@ mod tests {
             args: vec!["-y".to_string(), "@modelcontextprotocol/server-everything".to_string()],
             env: HashMap::from([("FOO".to_string(), "bar".to_string())]),
             enabled: true,
+            installed_by: None,
         }];
         save_configs_to(&configs, &path).unwrap();
         let loaded = load_configs_from(&path);
@@ -415,6 +437,7 @@ mod tests {
             args: vec![],
             env: HashMap::new(),
             enabled: true,
+            installed_by: None,
         };
         add_config(cfg.clone()).unwrap();
         assert!(add_config(cfg.clone()).is_err(), "duplicate name should be rejected");

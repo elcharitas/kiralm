@@ -15,12 +15,14 @@ import {
   Plus,
   Shapes,
   Sparkles,
+  Store,
   User,
 } from "lucide-react";
 import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
+import { MarketplacePanel } from "./MarketplacePanel";
 import { McpPanel } from "./McpPanel";
 import { Select } from "./Select";
 import { SkillsPanel } from "./SkillsPanel";
@@ -96,7 +98,9 @@ export function RightPanel({
 
   const [tab, setTab] = useState<string>("diff");
   const activeTab =
-    tab === "skills" || tab === "mcp" || files.some((f) => f.filename === tab) ? tab : "diff";
+    tab === "skills" || tab === "mcp" || tab === "marketplace" || files.some((f) => f.filename === tab)
+      ? tab
+      : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   // Collapsed = a slim rail with just the reopen control, same pattern
@@ -162,6 +166,17 @@ export function RightPanel({
         >
           <Plug size={14} /> MCP
         </button>
+        <button
+          type="button"
+          className={
+            activeTab === "marketplace"
+              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
+              : "right-panel-tab right-panel-tab-diff"
+          }
+          onClick={() => setTab("marketplace")}
+        >
+          <Store size={14} /> Marketplace
+        </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
@@ -180,7 +195,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && activeTab !== "mcp" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "marketplace" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -202,6 +217,8 @@ export function RightPanel({
           <SkillsPanel />
         ) : activeTab === "mcp" ? (
           <McpPanel />
+        ) : activeTab === "marketplace" ? (
+          <MarketplacePanel />
         ) : files.length === 0 ? (
           <p className="settings-hint">No changed files in this turn.</p>
         ) : activeTab === "diff" ? (
