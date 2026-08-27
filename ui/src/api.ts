@@ -210,13 +210,6 @@ export interface AgentPluginInstallResult {
   warnings: string[];
 }
 
-// DeepSeek Harness (dsh) bridge -- developer preview, so "not
-// detected" is the expected common state, not an error.
-export interface DshStatus {
-  detected: boolean;
-  version: string | null;
-}
-
 // GET /api/plugins/catalog's per-row shape: kiralm-web's cloud catalog
 // (GET /api/plugins) plus a real `installed` flag re-derived from the
 // matching backend's own live state -- not a separate install registry.
@@ -493,37 +486,6 @@ export const api = {
     fetch(`/api/agent-plugins/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
       asJson<PluginUninstallResult>(r),
     ),
-
-  dshStatus: () => fetch("/api/dsh/status").then((r) => asJson<DshStatus>(r)),
-
-  listDshProfiles: () => fetch("/api/dsh/profiles").then((r) => asJson<{ profiles: string[] }>(r)),
-
-  createDshProfile: (name: string) =>
-    fetch("/api/dsh/profiles", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name }),
-    }).then((r) => asJson<{ name: string }>(r)),
-
-  deleteDshProfile: (name: string) =>
-    fetch(`/api/dsh/profiles/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
-
-  listDshPlugins: (name: string) =>
-    fetch(`/api/dsh/profiles/${encodeURIComponent(name)}/plugins`).then((r) =>
-      asJson<{ plugins: string[] }>(r),
-    ),
-
-  installDshPlugin: (name: string, pkg: string) =>
-    fetch(`/api/dsh/profiles/${encodeURIComponent(name)}/plugins`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ package: pkg }),
-    }).then((r) => asJson<{ plugins: string[] }>(r)),
-
-  removeDshPlugin: (name: string, pkg: string) =>
-    fetch(`/api/dsh/profiles/${encodeURIComponent(name)}/plugins/${encodeURIComponent(pkg)}`, {
-      method: "DELETE",
-    }).then((r) => asJson<{ plugins: string[] }>(r)),
 
   listPluginCatalog: () =>
     fetch("/api/plugins/catalog").then((r) => asJson<{ data: CatalogPlugin[] }>(r)),

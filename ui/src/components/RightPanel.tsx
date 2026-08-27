@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  Bot,
   Braces,
   ChevronRight,
   Columns2,
@@ -23,7 +22,6 @@ import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
-import { DshPanel } from "./DshPanel";
 import { McpPanel } from "./McpPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { Select } from "./Select";
@@ -100,7 +98,7 @@ export function RightPanel({
 
   const [tab, setTab] = useState<string>("diff");
   const activeTab =
-    tab === "skills" || tab === "mcp" || tab === "plugins" || tab === "dsh" || files.some((f) => f.filename === tab)
+    tab === "skills" || tab === "mcp" || tab === "plugins" || files.some((f) => f.filename === tab)
       ? tab
       : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -179,17 +177,6 @@ export function RightPanel({
         >
           <Puzzle size={14} /> Plugins
         </button>
-        <button
-          type="button"
-          className={
-            activeTab === "dsh"
-              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
-              : "right-panel-tab right-panel-tab-diff"
-          }
-          onClick={() => setTab("dsh")}
-        >
-          <Bot size={14} /> dsh
-        </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
@@ -208,7 +195,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "plugins" && activeTab !== "dsh" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "plugins" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -232,8 +219,6 @@ export function RightPanel({
           <McpPanel />
         ) : activeTab === "plugins" ? (
           <PluginsPanel />
-        ) : activeTab === "dsh" ? (
-          <DshPanel />
         ) : files.length === 0 ? (
           <p className="settings-hint">No changed files in this turn.</p>
         ) : activeTab === "diff" ? (
