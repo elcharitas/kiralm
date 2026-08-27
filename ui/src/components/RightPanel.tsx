@@ -13,6 +13,7 @@ import {
   PanelRightClose,
   Plus,
   Shapes,
+  Sparkles,
   User,
 } from "lucide-react";
 import type { StatusResponse } from "../api";
@@ -20,6 +21,7 @@ import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
 import { Select } from "./Select";
+import { SkillsPanel } from "./SkillsPanel";
 
 export type RightPanelMode = "split" | "collapsed";
 
@@ -91,7 +93,7 @@ export function RightPanel({
   const files = turnFileDiffsOf(activeTurn?.steps);
 
   const [tab, setTab] = useState<string>("diff");
-  const activeTab = files.some((f) => f.filename === tab) ? tab : "diff";
+  const activeTab = tab === "skills" || files.some((f) => f.filename === tab) ? tab : "diff";
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   // Collapsed = a slim rail with just the reopen control, same pattern
@@ -135,6 +137,17 @@ export function RightPanel({
         >
           <FileDiff size={14} /> Diff
         </button>
+        <button
+          type="button"
+          className={
+            activeTab === "skills"
+              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
+              : "right-panel-tab right-panel-tab-diff"
+          }
+          onClick={() => setTab("skills")}
+        >
+          <Sparkles size={14} /> Skills
+        </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
@@ -153,7 +166,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {turns.length > 0 && (
+      {activeTab !== "skills" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -171,7 +184,9 @@ export function RightPanel({
       )}
 
       <div className="right-panel-body">
-        {files.length === 0 ? (
+        {activeTab === "skills" ? (
+          <SkillsPanel />
+        ) : files.length === 0 ? (
           <p className="settings-hint">No changed files in this turn.</p>
         ) : activeTab === "diff" ? (
           <ul className="file-list">

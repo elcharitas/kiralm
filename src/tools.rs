@@ -69,8 +69,37 @@ fn truncate(mut s: String) -> String {
     s
 }
 
+/// `load_skill`'s description is rebuilt from the currently-enabled
+/// skills on every call (not cached), so the model sees what's
+/// available without a separate discovery round trip.
+fn load_skill_def() -> serde_json::Value {
+    let skills = crate::skills::enabled();
+    let description = if skills.is_empty() {
+        "Load a reusable skill's full instructions by name. No skills are currently enabled.".to_string()
+    } else {
+        let mut lines = vec!["Load a reusable skill's full instructions by name. Available skills:".to_string()];
+        for s in &skills {
+            lines.push(format!("- {}: {}", s.name, s.description));
+        }
+        lines.join("\n")
+    };
+    json!({
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"],
+            }
+        }
+    })
+}
+
 /// The tool definitions sent to the model, OpenAI function-calling shape.
-/// `read_file`/`list_directory` are always offered;
+/// `read_file`/`list_directory`/`load_skill` are always offered (all
+/// read-only, like the sandboxed filesystem tools);
 /// `write_file`/`run_command` only in full-access, so a read-only session
 /// never even sees them as an option, on top of the server-side reject
 /// below (defense in depth: a model can name a tool it wasn't offered).
@@ -99,6 +128,7 @@ pub fn tool_defs(permission: Permission) -> Vec<serde_json::Value> {
                 }
             }
         }),
+        load_skill_def(),
     ];
     if permission == Permission::FullAccess {
         defs.push(json!({
@@ -182,6 +212,7 @@ pub async fn execute(name: &str, args_json: &str, root: &Path, permission: Permi
     let (ok, content, summary) = match name {
         "read_file" => read_file(&args, root),
         "list_directory" => list_directory(&args, root),
+        "load_skill" => load_skill(&args),
         "write_file" => {
             let (result, edit) = write_file(&args, root, permission);
             file_edit = edit;
@@ -239,6 +270,20 @@ fn list_directory(args: &serde_json::Value, root: &Path) -> (bool, String, Strin
     lines.sort();
     let summary = format!("listed {} entries in {path}", lines.len());
     (true, truncate(lines.join("\n")), summary)
+}
+
+fn load_skill(args: &serde_json::Value) -> (bool, String, String) {
+    let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+        return err("load_skill requires a 'name' argument");
+    };
+    match crate::skills::get(name) {
+        Some(skill) if skill.enabled => {
+            let summary = format!("loaded skill '{name}'");
+            (true, truncate(skill.body), summary)
+        }
+        Some(_) => err(&format!("skill '{name}' is disabled")),
+        None => err(&format!("skill '{name}' not found")),
+    }
 }
 
 fn write_file(

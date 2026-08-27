@@ -123,6 +123,19 @@ export interface GitStatus {
   files: GitFileStatus[];
 }
 
+// `~/.kiralm/skills/<name>/SKILL.md`'s wire shape -- global, no
+// per-workspace scoping. `enabled` is KiraLM's own state (skills.json),
+// not part of the SKILL.md format itself.
+export interface Skill {
+  name: string;
+  description: string;
+  allowed_tools?: string[] | null;
+  license?: string | null;
+  metadata?: unknown;
+  body: string;
+  enabled: boolean;
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -283,6 +296,34 @@ export const api = {
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}/generation`, { method: "DELETE" }).then(
       (r) => asJson<void>(r),
     ),
+
+  listSkills: () => fetch("/api/skills").then((r) => asJson<{ skills: Skill[] }>(r)),
+
+  createSkillFromMarkdown: (markdown: string) =>
+    fetch("/api/skills", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ markdown }),
+    }).then((r) => asJson<Skill>(r)),
+
+  // `folderPath` must already contain a SKILL.md -- same in-app
+  // folder-browser flow as adding a workspace (see FolderBrowserBody).
+  createSkillFromFolder: (folderPath: string) =>
+    fetch("/api/skills", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ folder_path: folderPath }),
+    }).then((r) => asJson<Skill>(r)),
+
+  setSkillEnabled: (name: string, on: boolean) =>
+    fetch(`/api/skills/${encodeURIComponent(name)}/enabled`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ on }),
+    }).then((r) => asJson<void>(r)),
+
+  deleteSkill: (name: string) =>
+    fetch(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) => asJson<void>(r)),
 };
 
 export interface GenerationState {

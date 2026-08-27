@@ -13,6 +13,7 @@ mod pull;
 mod registry;
 mod residency;
 mod settings;
+mod skills;
 mod state;
 mod tools;
 mod tunnel;
