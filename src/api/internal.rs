@@ -72,7 +72,6 @@ pub fn routes() -> Router<SharedState> {
             axum::routing::delete(delete_project).patch(touch_project),
         )
         .route("/api/projects/:id/git/status", get(git_status))
-        .route("/api/projects/:id/git/commit", post(git_commit))
         .route(
             "/api/sessions/:id/generation",
             get(get_generation).delete(stop_generation),
@@ -556,13 +555,13 @@ struct CreateProjectRequest {
     name: Option<String>,
 }
 
-async fn create_project(State(app): State<SharedState>, Json(body): Json<CreateProjectRequest>) -> Response {
-    let path = body.path.trim();
-    if path.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "path is required");
+/// Shared tail of create/clone: validate the directory is real, name
+/// it (explicit name, else the path's basename), persist, return it.
+fn register_project(app: &SharedState, path: &str, name: Option<String>) -> Response {
+    if !std::path::Path::new(path).is_dir() {
+        return err(StatusCode::BAD_REQUEST, format!("'{path}' is not an existing directory"));
     }
-    let name = body
-        .name
+    let name = name
         .map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| {
@@ -588,6 +587,14 @@ async fn create_project(State(app): State<SharedState>, Json(body): Json<CreateP
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
     Json(project).into_response()
+}
+
+async fn create_project(State(app): State<SharedState>, Json(body): Json<CreateProjectRequest>) -> Response {
+    let path = body.path.trim();
+    if path.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "path is required");
+    }
+    register_project(&app, path, body.name)
 }
 
 #[derive(Deserialize)]
@@ -608,32 +615,7 @@ async fn clone_project(State(app): State<SharedState>, Json(body): Json<ClonePro
     if let Err(e) = crate::git::clone(url, std::path::Path::new(path)).await {
         return err(StatusCode::BAD_REQUEST, e);
     }
-
-    let name = body
-        .name
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| {
-            std::path::Path::new(path)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path)
-                .to_string()
-        });
-    let now = chrono::Utc::now();
-    let project = crate::state::Project {
-        id: uuid::Uuid::new_v4().to_string(),
-        name,
-        path: path.to_string(),
-        created_at: now,
-        last_active_at: now,
-    };
-    let mut state = app.state.write();
-    state.projects.insert(project.id.clone(), project.clone());
-    if let Err(e) = state.save() {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-    }
-    Json(project).into_response()
+    register_project(&app, path, body.name)
 }
 
 async fn delete_project(State(app): State<SharedState>, Path(id): Path<String>) -> Response {
@@ -666,7 +648,9 @@ struct CreateChatRequest {
 }
 
 async fn create_chat(State(app): State<SharedState>, Json(body): Json<CreateChatRequest>) -> Response {
-    let now = chrono::Utc::now().to_rfc3339();
+    // Millis + `Z`, byte-identical to JS's toISOString(): the UI sorts
+    // these as strings, so one format everywhere or ordering breaks.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let chat = crate::chats::Chat {
         id: uuid::Uuid::new_v4().to_string(),
         title: "New chat".to_string(),
@@ -705,7 +689,7 @@ async fn update_chat(State(app): State<SharedState>, Path(id): Path<String>, Jso
     if let Some(messages) = body.messages {
         chat.messages = messages;
     }
-    chat.updated_at = chrono::Utc::now().to_rfc3339();
+    chat.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let updated = chat.clone();
     if let Err(e) = chats.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -775,34 +759,6 @@ async fn git_status(State(app): State<SharedState>, Path(id): Path<String>) -> R
         Err(e) => return e,
     };
     Json(crate::git::status(&root).await).into_response()
-}
-
-#[derive(Deserialize)]
-struct GitCommitRequest {
-    message: Option<String>,
-}
-
-/// `git add -A && git commit && git push`, for real, against the
-/// project's real directory -- what the UI's "Commit, push & PR" button
-/// drives.
-async fn git_commit(
-    State(app): State<SharedState>,
-    Path(id): Path<String>,
-    Json(body): Json<GitCommitRequest>,
-) -> Response {
-    let root = match project_path(&app, &id) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let message = body
-        .message
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| "Update via kiralm".to_string());
-    match crate::git::commit_and_push(&root, &message).await {
-        Ok(result) => Json(result).into_response(),
-        Err(e) => err(StatusCode::BAD_REQUEST, e),
-    }
 }
 
 /// Bumps `last_active_at` to now. Called by the UI whenever a session

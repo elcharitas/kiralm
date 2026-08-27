@@ -123,12 +123,6 @@ export interface GitStatus {
   files: GitFileStatus[];
 }
 
-export interface GitCommitResult {
-  commit: string;
-  branch: string;
-  pushed: boolean;
-}
-
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -267,16 +261,6 @@ export const api = {
   // for a project that isn't a git checkout, not an error.
   gitStatus: (projectId: string) =>
     fetch(`/api/projects/${encodeURIComponent(projectId)}/git/status`).then((r) => asJson<GitStatus>(r)),
-
-  // Real `git add -A && git commit && git push` against the project's
-  // directory. Throws with the real git error (e.g. "nothing to
-  // commit", or a commit that landed but failed to push).
-  gitCommit: (projectId: string, message?: string) =>
-    fetch(`/api/projects/${encodeURIComponent(projectId)}/git/commit`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message }),
-    }).then((r) => asJson<GitCommitResult>(r)),
 
   // Server-side generation state for a chat session: buffered-so-far
   // text + whether it's still running,

@@ -8,16 +8,12 @@ import {
   FileDiff,
   File as FileIcon,
   Image,
-  List,
   MemoryStick,
   Palette,
   PanelRightClose,
-  Pilcrow,
   Plus,
   Shapes,
   User,
-  WrapText,
-  X,
 } from "lucide-react";
 import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
@@ -170,21 +166,6 @@ export function RightPanel({
               +{files.reduce((n, f) => n + f.added, 0)}
             </span>
             <span className="stat-del">-{files.reduce((n, f) => n + f.removed, 0)}</span>
-            <button type="button" className="right-panel-icon-btn" title="Selection">
-              <X size={14} />
-            </button>
-            <button type="button" className="right-panel-icon-btn" title="List view">
-              <List size={14} />
-            </button>
-            <button type="button" className="right-panel-icon-btn" title="Split view">
-              <Columns2 size={14} />
-            </button>
-            <button type="button" className="right-panel-icon-btn" title="Wrap">
-              <WrapText size={14} />
-            </button>
-            <button type="button" className="right-panel-icon-btn right-panel-icon-btn-active" title="Paragraph marks">
-              <Pilcrow size={14} />
-            </button>
           </div>
         </div>
       )}

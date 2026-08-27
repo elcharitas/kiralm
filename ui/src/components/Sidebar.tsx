@@ -78,7 +78,6 @@ export function Sidebar({
 }) {
   const [query, setQuery] = useState("");
   const [openSettled, setOpenSettled] = useState<Record<string, boolean>>({});
-  const [allExpanded, setAllExpanded] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [, forceTick] = useState(0);
   const [sessionMenu, setSessionMenu] = useState<{ x: number; y: number; session: ChatSession } | null>(null);
@@ -165,13 +164,16 @@ export function Sidebar({
 
   // One toggle, two directions: collapses every workspace's chat list
   // on the first click, expands them all back on the next.
+  // Derived from the persisted per-workspace state, not tracked
+  // separately, so it can't drift when groups are collapsed one by one.
+  const allExpanded = groups.every((g) => !collapsedGroups[g.project.id]);
+
   const toggleAllGroups = () => {
     if (allExpanded) {
       setCollapsedGroups(Object.fromEntries(groups.map((g) => [g.project.id, true])));
     } else {
       setCollapsedGroups({});
     }
-    setAllExpanded((v) => !v);
   };
 
   const renderRow = (s: ChatSession) => {

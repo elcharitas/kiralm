@@ -40,6 +40,7 @@ export function useSessions() {
     const session = fromDto(dto);
     setSessions((prev) => [session, ...prev]);
     setActiveId(session.id);
+    api.touchProject(projectId).catch(() => {});
     return session;
   };
 
@@ -79,9 +80,11 @@ export function useSessions() {
         };
       }),
     );
-    const title = sessions.find((s) => s.id === id)?.title;
+    const current = sessions.find((s) => s.id === id);
+    const title = current?.title;
     const nextTitle = title && title !== "New chat" ? title : titleFromMessage(messages[0]?.content ?? "");
     api.updateChat(id, { messages, title: nextTitle }).catch(() => {});
+    if (current) api.touchProject(current.projectId).catch(() => {});
   };
 
   const active = sessions.find((s) => s.id === activeId) ?? null;

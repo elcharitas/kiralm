@@ -339,7 +339,7 @@ async fn run_tool_loop(
     }
 
     if is_stream {
-        synthetic_stream_response(requested_model, text, steps)
+        synthetic_stream_response(text, steps)
     } else {
         Json(json!({
             "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -363,7 +363,7 @@ async fn run_tool_loop(
 /// one extra data frame the real client (ui/src/api.ts) knows to read
 /// for the real tool-call step log, ignored by any standard OpenAI SSE
 /// consumer since it carries no `choices`.
-fn synthetic_stream_response(model: String, text: String, steps: Vec<crate::tools::ToolStep>) -> Response {
+fn synthetic_stream_response(text: String, steps: Vec<crate::tools::ToolStep>) -> Response {
     let mut frames = Vec::new();
     for word in split_keep_whitespace(&text) {
         frames.push(
@@ -379,7 +379,6 @@ fn synthetic_stream_response(model: String, text: String, steps: Vec<crate::tool
         .chain(std::iter::once("data: [DONE]\n\n".to_string()))
         .collect::<String>();
 
-    let _ = model; // kept for signature symmetry with the passthrough path
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/event-stream")
