@@ -1734,6 +1734,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiralm-desktop"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "libc",
+ "serde",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-shell",
+ "toml 0.8.2",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1915,19 +1928,6 @@ name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
-
-[[package]]
-name = "nodelm-desktop"
-version = "0.1.0"
-dependencies = [
- "dirs 5.0.1",
- "libc",
- "serde",
- "tauri",
- "tauri-build",
- "tauri-plugin-shell",
- "toml 0.8.2",
-]
 
 [[package]]
 name = "num-conv"

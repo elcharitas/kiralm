@@ -1,4 +1,4 @@
-//! `~/.kiralm/config.toml` load/parse/defaults. Hand-edited, static (§3).
+//! `~/.kiralm/config.toml` load/parse/defaults. Hand-edited, static.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ fn default_http_listen() -> String {
 }
 
 fn default_llama_server_bin() -> String {
-    // ponytail: naive default path, real install should set this explicitly
+    // Naive default path, real install should set this explicitly
     "/opt/homebrew/bin/llama-server".to_string()
 }
 
@@ -56,7 +56,7 @@ fn default_catalog_sync_on_startup() -> bool {
 }
 
 fn default_cloudflared_bin() -> String {
-    // ponytail: naive default path, same posture as llama_server_bin above
+    // Naive default path, same posture as llama_server_bin above
     "/opt/homebrew/bin/cloudflared".to_string()
 }
 
@@ -64,9 +64,9 @@ fn default_tunnel_listen() -> String {
     "127.0.0.1:11536".to_string()
 }
 
-/// `[cloud]` table (Cloud integration §"config.toml keys"). Same
-/// all-`Option` + one-default-fn-per-field pattern as the rest of this
-/// file. Never mirrored into state.json (hand-edited static config).
+/// `[cloud]` table. Same all-`Option` + one-default-fn-per-field
+/// pattern as the rest of this file. Never mirrored into state.json
+/// (hand-edited static config).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawCloudConfig {
     api_base_url: Option<String>,
@@ -100,9 +100,8 @@ impl Default for CloudConfig {
     }
 }
 
-/// `[tunnel]` table (§"Tunnel client (daemon)" -- Binary, and
-/// §"Remote-request auth" for `listen`). Same all-`Option` +
-/// default-fn pattern as the rest of this file.
+/// `[tunnel]` table. Same all-`Option` + default-fn pattern as the
+/// rest of this file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawTunnelConfig {
     cloudflared_bin: Option<String>,
@@ -112,7 +111,7 @@ struct RawTunnelConfig {
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
     pub cloudflared_bin: String,
-    /// Second HTTP listener, tunnel-origin traffic only (§"Remote-request auth").
+    /// Second HTTP listener, tunnel-origin traffic only.
     pub listen: String,
 }
 
@@ -126,7 +125,7 @@ impl Default for TunnelConfig {
 }
 
 /// On-disk config shape. Every field optional so a hand-edited partial
-/// file still parses; defaults fill the rest (§3).
+/// file still parses; defaults fill the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RawConfig {
     ram_headroom_gb: Option<f64>,
@@ -143,7 +142,7 @@ struct RawConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// None = auto-tiered default (2GB if total RAM <= 8GB else 1.5GB), §5.1.
+    /// None = auto-tiered default (2GB if total RAM <= 8GB else 1.5GB).
     pub ram_headroom_gb: Option<f64>,
     pub model_dir: PathBuf,
     pub unix_socket: PathBuf,

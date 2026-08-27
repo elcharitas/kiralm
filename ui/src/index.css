@@ -1,29 +1,44 @@
 :root {
   color-scheme: dark;
 
-  --bg: #0a0a0b;
-  --bg-raised: #131315;
-  --bg-inset: #1a1a1d;
-  --border: #26262a;
-  --border-strong: #37373d;
-  --text: #e8e6e1;
-  --text-dim: #9a978f;
-  --text-faint: #64625c;
+  --bg: #0a0a0a;
+  --bg-sidebar: #0c0c0c;
+  --bg-raised: #1f1f1f;
+  --bg-inset: #111111;
+  --border: #141414;
+  --border-strong: #1c1c1c;
+  --text: #e5e7eb;
+  --text-dim: #9ca3af;
+  --text-faint: #6b7280;
 
-  --accent: #d99a3e;
-  --accent-dim: #8a6428;
-  --accent-bg: #2a2013;
+  --accent: #3b82f6;
+  --accent-dim: #2563eb;
+  --accent-bg: #0f1b30;
 
-  --verdict-good: #4caf6e;
-  --verdict-good-bg: #16261c;
-  --verdict-warn: #d99a3e;
-  --verdict-warn-bg: #2a2013;
-  --verdict-bad: #d9534f;
-  --verdict-bad-bg: #2a1616;
+  --flare: #f97316;
+  --status-blue: #60a5fa;
+  --status-blue-bg: #0f1b30;
+  --send-btn: #3b82f6;
 
-  --radius: 6px;
+  --verdict-good: #22c55e;
+  --verdict-good-bg: #10261e;
+  --verdict-warn: #facc15;
+  --verdict-warn-bg: #2a2410;
+  --verdict-bad: #f87171;
+  --verdict-bad-bg: #2a1216;
+
+  --gap: 0.75rem;
+  --radius-sm: 0.25rem;
+  --radius: 0.5rem;
+  --radius-lg: 1rem;
+  --radius-pill: 999px;
   --font-mono: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* --font-sans-base is the real Open Sans stack; --font-sans is what's
+     actually used everywhere and gets overridden live from Settings >
+     Appearance (see settings.tsx), defaulting to this stack. */
+  --font-sans-base: "Open Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-sans: var(--font-sans-base);
+  --line-height: 1.4;
 }
 
 * {
@@ -41,8 +56,19 @@ body {
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: var(--line-height);
+  letter-spacing: 0.01em;
   -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01" 1, "cv05" 1;
+}
+
+h1,
+h2,
+h3,
+button,
+.sidebar-brand,
+.topbar {
+  letter-spacing: -0.01em;
 }
 
 #root {

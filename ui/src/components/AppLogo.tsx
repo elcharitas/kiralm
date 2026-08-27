@@ -1,0 +1,15 @@
+// The real KiraLM brand mark (traced from nodelm-web's favicon.png,
+// the source of truth -- see public/favicon.svg for the standalone
+// copy used as the actual favicon). Inline, not a raster/external
+// file, so it's colored via `currentColor` and follows the theme.
+export function AppLogo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 256 256" className={className} aria-hidden="true">
+      <g fill="currentColor" transform="translate(0,256) scale(0.1,-0.1)" stroke="none">
+        <path d="M1832 2265 c-46 -21 -56 -32 -77 -78 -23 -50 -25 -64 -24 -213 1 -166 -12 -305 -56 -564 -70 -415 -108 -767 -86 -794 7 -8 19 -12 26 -10 28 11 178 258 245 402 108 234 167 441 196 690 19 168 10 340 -26 454 -18 58 -27 73 -67 103 -25 19 -53 35 -62 35 -9 0 -40 -11 -69 -25z" />
+        <path d="M577 2193 c-84 -60 -100 -146 -68 -368 44 -298 178 -661 321 -870 15 -22 36 -54 46 -72 72 -122 148 -214 220 -267 80 -59 101 -66 111 -40 4 10 -23 45 -84 107 -98 101 -181 203 -208 257 -22 42 -71 216 -91 320 -24 123 -28 362 -10 563 20 228 21 306 0 335 -8 12 -20 22 -25 22 -6 0 -22 9 -36 20 -40 31 -127 28 -176 -7z" />
+        <path d="M1441 426 c-54 -57 -11 -156 61 -142 51 9 78 39 78 86 0 53 -27 80 -78 80 -28 0 -45 -7 -61 -24z m94 -51 c0 -39 -43 -65 -62 -38 -28 36 -4 76 42 70 15 -1 20 -9 20 -32z" />
+      </g>
+    </svg>
+  );
+}

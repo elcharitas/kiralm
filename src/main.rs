@@ -1,16 +1,20 @@
 //! `kiralm` binary entry point: arg parse -> dispatch to `cli.rs` or the
-//! `serve` daemon (§1, §7).
+//! `serve` daemon.
 
 mod api;
+mod chats;
 mod cli;
 mod cloud;
 mod config;
 mod engine;
 mod gguf;
+mod git;
 mod pull;
 mod registry;
 mod residency;
+mod settings;
 mod state;
+mod tools;
 mod tunnel;
 mod tunnel_auth;
 
@@ -134,7 +138,7 @@ fn repl_prompt() -> anyhow::Result<String> {
 }
 
 /// Wires the daemon together: loads state + manifests into the registry,
-/// then serves the OpenAI/Anthropic/internal API on both listeners (§2).
+/// then serves the OpenAI/Anthropic/internal API on both listeners.
 async fn run_serve(config: Config) -> anyhow::Result<()> {
     let home = config::kiralm_home();
     std::fs::create_dir_all(&home)?;
@@ -144,12 +148,18 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
 
     let state = State::load()?;
 
-    // Every model starts Unloaded (§3 "Runtime-only fields ... never
-    // persisted"); populate the registry from manifest sidecars on disk.
+    // Every model starts Unloaded (runtime-only field, never persisted);
+    // populate the registry from manifest sidecars on disk.
     // Same registration path a fresh pull uses (api::register_model), so
     // a model is loadable identically whether it was there at boot or
     // just finished downloading.
-    let app_state = Arc::new(AppState::new(config.clone(), Arc::new(ModelRegistry::new()), state));
+    let app_state = Arc::new(AppState::new(
+        config.clone(),
+        Arc::new(ModelRegistry::new()),
+        state,
+        settings::Settings::load(),
+        chats::Chats::load(),
+    ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
     }
@@ -171,8 +181,8 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     }
     let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
 
-    // Third listener, bearer-checked (SPEC.md "Remote-request auth"),
-    // the only thing `cloudflared`'s tunnel ingress ever points at.
+    // Third listener, bearer-checked -- the only thing `cloudflared`'s
+    // tunnel ingress ever points at.
     // Bound unconditionally, same as `http_listen`; nothing reaches it
     // from the public internet until `kiralm tunnel enable` configures
     // the tunnel's ingress to target this port.
@@ -201,14 +211,14 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
 
     let unix_task = tokio::spawn(serve_unix(unix_listener, router));
 
-    // Re-spawn `cloudflared` if it was left enabled across a restart
-    // (§"Daemon-restart behavior"), after listeners are already bound,
-    // same ordering catalog-sync-at-boot uses.
+    // Re-spawn `cloudflared` if it was left enabled across a restart,
+    // after listeners are already bound, same ordering
+    // catalog-sync-at-boot uses.
     api::tunnel::respawn_if_enabled(&app_state_for_tunnel).await;
 
-    // One non-blocking sync after the listeners are already accepting
-    // (Cloud integration §"Catalog sync"). Detached, never awaited, so
-    // a slow or unreachable backend can never delay `serve` startup.
+    // One non-blocking sync after the listeners are already accepting.
+    // Detached, never awaited, so a slow or unreachable backend can
+    // never delay `serve` startup.
     if cloud_config.catalog_sync_on_startup {
         tokio::spawn(async move {
             cloud::sync_cloud_models(&cloud_config.api_base_url, &registry_for_sync).await;
@@ -219,7 +229,7 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Both listeners route to the same handlers (§2). axum 0.7's
+/// Both listeners route to the same handlers. axum 0.7's
 /// `serve()` only accepts `TcpListener`, so the Unix socket gets its own
 /// small accept loop mirroring axum's own TCP implementation.
 async fn serve_unix(listener: tokio::net::UnixListener, router: axum::Router) {

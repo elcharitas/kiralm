@@ -1,7 +1,7 @@
-//! Bearer-auth middleware for the tunnel listener only (SPEC.md "Remote
-//! tunnel integration" §"Remote-request auth"). `http_listen` and the
-//! Unix socket stay exactly as they were, zero-auth, unchanged. This
-//! module is only ever layered onto the second, tunnel-only router.
+//! Bearer-auth middleware for the tunnel listener only. `http_listen`
+//! and the Unix socket stay exactly as they were, zero-auth,
+//! unchanged. This module is only ever layered onto the second,
+//! tunnel-only router.
 
 use axum::extract::Request;
 use axum::http::{header, StatusCode};
@@ -16,10 +16,10 @@ fn credentials_path() -> PathBuf {
     kiralm_home().join("tunnel_credentials.json")
 }
 
-/// Per-device tunnel credential, distinct from `CloudCredentials` (which
-/// is kiralm-web's, not this daemon's to gate remote requests with;
-/// see SPEC.md's "Tunnel credential" note). Minted by `kiralm tunnel
-/// enable` (outside this build's scope); this module only ever reads it.
+/// Per-device tunnel credential, distinct from `CloudCredentials`
+/// (which is kiralm-web's, not this daemon's to gate remote requests
+/// with). Minted by `kiralm tunnel enable` (outside this build's
+/// scope); this module only ever reads it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelCredentials {
     pub token: String,
@@ -38,7 +38,7 @@ impl TunnelCredentials {
         }
     }
 
-    // ponytail: unused until `kiralm tunnel enable` mints one for real
+    // Unused until `kiralm tunnel enable` mints one for real
     #[allow(dead_code)]
     pub fn save(&self) -> anyhow::Result<()> {
         self.save_to(&credentials_path())
@@ -95,8 +95,9 @@ fn unauthorized_response(path: &str) -> Response {
     }
 }
 
-/// axum middleware layered only onto the tunnel listener's router (§main.rs
-/// `run_serve`). Missing/non-matching bearer -> 401 in the same shape
+/// axum middleware layered only onto the tunnel listener's router
+/// (see `main.rs`'s `run_serve`). Missing/non-matching bearer -> 401
+/// in the same shape
 /// `GatewayError::AuthRequired` already uses on each surface, before any
 /// handler runs. No credential on disk (tunnel never enabled) means every
 /// request is rejected, since there is nothing valid to match against.

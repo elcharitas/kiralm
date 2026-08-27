@@ -1,5 +1,5 @@
 //! HF ref resolution, download+resume+sha256 verify, manifest write,
-//! post-pull load-verification pass (§8).
+//! post-pull load-verification pass.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,8 +23,8 @@ pub struct PullProgress {
 }
 
 /// Broadcast, not mpsc: `/api/models/:id/pull` SSE only has a listener
-/// while a download row is expanded/active (§2.5). Sends with no
-/// subscriber are fine to drop.
+/// while a download row is expanded/active. Sends with no subscriber
+/// are fine to drop.
 pub type ProgressTx = tokio::sync::broadcast::Sender<PullProgress>;
 
 struct ParsedRef {
@@ -36,7 +36,7 @@ struct ParsedRef {
     file: Option<String>,
 }
 
-/// `<ref>` = `org/repo:quant` or a bare `org/repo/file.gguf` path (§7/§8.1).
+/// `<ref>` = `org/repo:quant` or a bare `org/repo/file.gguf` path.
 fn parse_ref(s: &str) -> anyhow::Result<ParsedRef> {
     if let Some((repo_part, quant)) = s.split_once(':') {
         let mut segs = repo_part.splitn(2, '/');
@@ -97,7 +97,7 @@ struct ResolvedFile {
 /// Result of the fast, synchronous resolve phase. Enough to know the
 /// canonical id before the slow download starts (needed because
 /// `POST /api/models/pull` must return `{"id": "<canonical_id>"}`
-/// immediately, §2.5).
+/// immediately).
 pub struct Resolved {
     pub canonical_id: String,
     pub filename: String,
@@ -107,8 +107,8 @@ pub struct Resolved {
     expected_sha256: Option<String>,
 }
 
-/// Resolves `<ref>` against the HF repo's file listing (§8 step 1).
-/// Fast (one HF API call), so safe to run synchronously in a request
+/// Resolves `<ref>` against the HF repo's file listing. Fast (one HF
+/// API call), so safe to run synchronously in a request
 /// handler before spawning the actual download.
 pub async fn resolve(ref_str: &str) -> anyhow::Result<Resolved> {
     let parsed = parse_ref(ref_str)?;
@@ -198,8 +198,8 @@ fn quant_from_filename(filename: &str) -> String {
     stem.rsplit('-').next().unwrap_or(stem).to_uppercase()
 }
 
-/// Stream-downloads to `<file>.gguf.partial` with resume support (§8
-/// step 2), hashing sha256 as bytes arrive so no second full-file read is
+/// Stream-downloads to `<file>.gguf.partial` with resume support,
+/// hashing sha256 as bytes arrive so no second full-file read is
 /// needed for verification.
 async fn download_with_resume(
     client: &reqwest::Client,
@@ -285,8 +285,8 @@ async fn download_with_resume(
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Runs the slow half of the pipeline (§8 steps 2-4): download+verify,
-/// write manifest, then a real load-verification pass. Split from
+/// Runs the slow half of the pipeline: download+verify, write
+/// manifest, then a real load-verification pass. Split from
 /// `resolve()` so a caller (the `/api/models/pull` handler) can return
 /// the canonical id immediately and run this in a background task.
 pub async fn download_and_verify(
@@ -357,7 +357,7 @@ pub async fn download_and_verify(
         is_moe,
         expert_count,
         context_length_trained: gguf_meta.context_length.unwrap_or(4096),
-        vision_capable: false, // ponytail: no vision detection yet, see gguf.rs note
+        vision_capable: false, // no vision detection yet, see gguf.rs note
         source_ref: resolved.ref_str.clone(),
         pulled_at: chrono::Utc::now(),
     };
@@ -373,7 +373,7 @@ pub async fn download_and_verify(
         });
     }
 
-    // §8 step 4: run the same load path residency uses for a real request.
+    // Run the same load path residency uses for a real request.
     let load_result = engine::verify_load(
         &config.llama_server_bin,
         &final_path,
@@ -385,7 +385,7 @@ pub async fn download_and_verify(
     // Mutate the live in-memory state (shared with the rest of the
     // daemon via AppState), not a disk-only round-trip. Otherwise a
     // freshly-cached unsupported verdict wouldn't take effect until a
-    // daemon restart, defeating the point of caching it (§5.2/§8).
+    // daemon restart, defeating the point of caching it.
     let engine_version = engine::detect_version(&config.llama_server_bin);
     {
         let mut guard = state.write();
@@ -419,8 +419,8 @@ pub async fn download_and_verify(
         });
     }
 
-    // File and manifest are kept regardless of load outcome (§8 closing
-    // note). An unsupported verdict means this engine build can't load
+    // File and manifest are kept regardless of load outcome. An
+    // unsupported verdict means this engine build can't load
     // this architecture, not that the download is corrupt.
     Ok(())
 }

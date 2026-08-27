@@ -1,22 +1,25 @@
 import { useEffect, useState } from "react";
-import { api, type ModelManifest } from "../api";
+import { api, type ModelDetail } from "../api";
 import { VerdictBadge } from "../components/VerdictBadge";
 import { formatBytes, formatRelativeTime } from "../format";
 
 export function ModelDetailDrawer({ id, onClose }: { id: string; onClose: () => void }) {
-  const [manifest, setManifest] = useState<ModelManifest | null>(null);
+  const [detail, setDetail] = useState<ModelDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     api
       .model(id)
-      .then((m) => !cancelled && setManifest(m))
+      .then((d) => !cancelled && setDetail(d))
       .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
     return () => {
       cancelled = true;
     };
   }, [id]);
+
+  const manifest = detail?.manifest;
+  const state = detail?.state;
 
   return (
     <div className="drawer-overlay" onClick={onClose}>
@@ -29,51 +32,71 @@ export function ModelDetailDrawer({ id, onClose }: { id: string; onClose: () => 
         </div>
 
         {error && <div className="banner banner-bad">{error}</div>}
-        {!manifest && !error && <div className="drawer-loading">Loading manifest…</div>}
+        {!detail && !error && <div className="drawer-loading">Loading manifest…</div>}
 
-        {manifest && (
+        {detail && (
           <div className="drawer-body">
-            <VerdictBadge tier={manifest.verdict_tier} />
-            <p className="drawer-verdict-reason">{manifest.verdict_reason}</p>
+            {state?.verdict_tier && <VerdictBadge tier={state.verdict_tier} />}
+            {state?.verdict_reason && <p className="drawer-verdict-reason">{state.verdict_reason}</p>}
+
+            {!manifest && <p className="settings-hint">No manifest on disk for this model.</p>}
 
             <dl className="detail-grid">
-              <dt>Architecture</dt>
-              <dd className="mono">{manifest.architecture}</dd>
+              {state && (
+                <>
+                  <dt>Resident</dt>
+                  <dd>{state.loaded ? `yes, ${formatBytes(state.rss_bytes)}` : "no"}</dd>
 
-              <dt>Mixture-of-Experts</dt>
-              <dd>
-                {manifest.is_moe
-                  ? `yes: ${manifest.expert_count?.active}/${manifest.expert_count?.total} active`
-                  : "no (dense)"}
-              </dd>
+                  <dt>mlock</dt>
+                  <dd>{state.hot ? "locked (hot)" : "not locked, toggle Hot to pin"}</dd>
 
-              <dt>Size on disk</dt>
-              <dd className="mono">{formatBytes(manifest.size_bytes)}</dd>
+                  <dt>Quant</dt>
+                  <dd className="mono">{state.quant}</dd>
 
-              <dt>Trained context</dt>
-              <dd className="mono">{manifest.context_length_trained.toLocaleString()} tokens</dd>
+                  {state.aliases.length > 0 && (
+                    <>
+                      <dt>Aliases</dt>
+                      <dd className="mono">{state.aliases.join(", ")}</dd>
+                    </>
+                  )}
+                </>
+              )}
 
-              <dt>Vision</dt>
-              <dd>{manifest.vision_capable ? "yes" : "no"}</dd>
+              {manifest && (
+                <>
+                  <dt>Architecture</dt>
+                  <dd className="mono">{manifest.architecture}</dd>
 
-              <dt>Source</dt>
-              <dd className="mono">{manifest.source_ref}</dd>
+                  <dt>Mixture-of-Experts</dt>
+                  <dd>
+                    {manifest.is_moe
+                      ? `yes: ${manifest.expert_count?.active}/${manifest.expert_count?.total} active`
+                      : "no (dense)"}
+                  </dd>
 
-              <dt>SHA-256</dt>
-              <dd className="mono truncate" title={manifest.sha256}>
-                {manifest.sha256}
-              </dd>
+                  <dt>Size on disk</dt>
+                  <dd className="mono">{formatBytes(manifest.size_bytes)}</dd>
 
-              <dt>Pulled</dt>
-              <dd>{formatRelativeTime(manifest.pulled_at)}</dd>
+                  <dt>Trained context</dt>
+                  <dd className="mono">{manifest.context_length_trained.toLocaleString()} tokens</dd>
 
-              <dt>Last used</dt>
-              <dd>{formatRelativeTime(manifest.last_used)}</dd>
+                  <dt>Vision</dt>
+                  <dd>{manifest.vision_capable ? "yes" : "no"}</dd>
 
-              <dt>mlock</dt>
-              <dd>{manifest.hot ? "locked (hot)" : "not locked, toggle Hot to pin"}</dd>
+                  <dt>Source</dt>
+                  <dd className="mono">{manifest.source_ref}</dd>
+
+                  <dt>SHA-256</dt>
+                  <dd className="mono truncate" title={manifest.sha256}>
+                    {manifest.sha256}
+                  </dd>
+
+                  <dt>Pulled</dt>
+                  <dd>{formatRelativeTime(manifest.pulled_at)}</dd>
+                </>
+              )}
             </dl>
-            {/* context-size override has no /api write route yet in SPEC, add when one lands */}
+            {/* context-size override has no /api write route yet, add when one lands */}
           </div>
         )}
       </aside>

@@ -1,9 +1,9 @@
-//! Admission control, headroom math, RSS watcher (§5).
+//! Admission control, headroom math, RSS watcher.
 //!
-//! STUB NOTE: LRU eviction and the 5s-tick background RSS watcher (§5.4
-//! "Ongoing") are not implemented here. This worktree only needed the
-//! pre-spawn admission check for the pull load-verification pass (§8) and
-//! for `serve` to wire something real at startup. Whichever agent owns the
+//! STUB NOTE: LRU eviction and the 5s-tick background RSS watcher are
+//! not implemented here. This worktree only needed the pre-spawn
+//! admission check for the pull load-verification pass and for `serve`
+//! to wire something real at startup. Whichever agent owns the
 //! full residency manager should replace `AdmissionState` with the real
 //! `ModelRegistry`-driven accounting and add the watcher task.
 
@@ -16,8 +16,8 @@ pub struct RamInfo {
 }
 
 /// Reads live RAM info. `.available_memory()`, not `.free_memory()`, since it
-/// already accounts for reclaimable OS cache (§5.1).
-// ponytail: sysinfo 0.32 reliably returns 0 for available_memory() on
+/// already accounts for reclaimable OS cache.
+// sysinfo 0.32 reliably returns 0 for available_memory() on
 // some macOS setups (reproduced here) -- fall back to free_memory(),
 // which undercounts reclaimable pages but is never wrong-in-a-scary-way.
 // This is display-only (see admission math in check_admission, which
@@ -34,7 +34,7 @@ pub fn read_ram_info() -> RamInfo {
 }
 
 /// `ram_headroom_gb` from config if set, else auto-tiered: 2GB if total
-/// RAM <= 8GB, else 1.5GB (§5.1). Config-level `< 1GB` rejection already
+/// RAM <= 8GB, else 1.5GB. Config-level `< 1GB` rejection already
 /// happens in `Config::load`; this just does the GB->bytes conversion.
 pub fn headroom_bytes(total_ram_bytes: u64, configured_gb: Option<f64>) -> u64 {
     const GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -46,8 +46,8 @@ pub fn headroom_bytes(total_ram_bytes: u64, configured_gb: Option<f64>) -> u64 {
     (gb * GB) as u64
 }
 
-/// Reads a loaded child `llama-server`'s real resident memory (§5.4 RSS
-/// reporting). `None` if the pid is gone (already exited).
+/// Reads a loaded child `llama-server`'s real resident memory. `None`
+/// if the pid is gone (already exited).
 pub fn read_rss_bytes(pid: u32) -> Option<u64> {
     let mut sys = System::new();
     let pid = sysinfo::Pid::from_u32(pid);
@@ -55,7 +55,7 @@ pub fn read_rss_bytes(pid: u32) -> Option<u64> {
     sys.process(pid).map(|p| p.memory())
 }
 
-/// Pre-spawn admission check (§5.4): reject unless
+/// Pre-spawn admission check: reject unless
 /// `sum(loaded) + new <= total - headroom`. Returns the shortfall in
 /// bytes as `Err` when it doesn't fit.
 pub fn check_admission(

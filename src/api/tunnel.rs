@@ -1,7 +1,5 @@
 //! `/api/tunnel/*`, daemon-owned `cloudflared` supervision, called by
-//! the `kiralm tunnel` CLI subcommands over the local socket (SPEC.md
-//! "Remote tunnel (Cloudflare Tunnel) integration" §"Tunnel client
-//! (daemon)").
+//! the `kiralm tunnel` CLI subcommands over the local socket.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -39,9 +37,9 @@ async fn enable(State(app): State<SharedState>) -> Response {
         return err(StatusCode::PRECONDITION_FAILED, e.to_string());
     }
 
-    // A `disable` leaves the provisioned Cloudflare tunnel + its token in
-    // place (§"Tunnel client (daemon)" CLI table). Re-enabling reuses
-    // both rather than round-tripping kiralm-web/Cloudflare again.
+    // A `disable` leaves the provisioned Cloudflare tunnel + its token
+    // in place. Re-enabling reuses both rather than round-tripping
+    // kiralm-web/Cloudflare again.
     let prior = app.state.read().tunnel.clone();
     let (cf_token, hostname, cf_tunnel_id) = match (tunnel::TunnelToken::load(), prior) {
         (Ok(Some(stored)), Some(prev)) => (stored.token, prev.hostname, prev.cf_tunnel_id),
@@ -109,9 +107,8 @@ async fn disable(State(app): State<SharedState>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `kiralm tunnel status`: cross-checks persisted state against the live
-/// child (§"Health check", process-alive) plus a best-effort
-/// connectivity probe.
+/// `kiralm tunnel status`: cross-checks persisted state against the
+/// live child (process-alive) plus a best-effort connectivity probe.
 async fn status(State(app): State<SharedState>) -> Response {
     let Some(t) = app.state.read().tunnel.clone() else {
         return Json(json!({"enabled": false})).into_response();
@@ -140,10 +137,10 @@ async fn status(State(app): State<SharedState>) -> Response {
 }
 
 /// Re-spawns `cloudflared` on daemon startup if `state.json` says the
-/// tunnel was left enabled (§"Daemon-restart behavior"). No new
-/// Cloudflare API call. A failed re-spawn (missing binary, revoked
-/// token) just warns and leaves `enabled = true` so `kiralm tunnel
-/// status` reports the crash honestly instead of silently flipping off.
+/// tunnel was left enabled. No new Cloudflare API call. A failed
+/// re-spawn (missing binary, revoked token) just warns and leaves
+/// `enabled = true` so `kiralm tunnel status` reports the crash
+/// honestly instead of silently flipping off.
 pub async fn respawn_if_enabled(app: &SharedState) {
     let enabled = app.state.read().tunnel.as_ref().is_some_and(|t| t.enabled);
     if !enabled {
