@@ -72,6 +72,8 @@ pub fn routes() -> Router<SharedState> {
             axum::routing::delete(delete_project).patch(touch_project),
         )
         .route("/api/projects/:id/git/status", get(git_status))
+        .route("/api/projects/:id/git/log", get(git_log))
+        .route("/api/projects/:id/git/commit", post(git_commit))
         .route(
             "/api/sessions/:id/generation",
             get(get_generation).delete(stop_generation),
@@ -762,6 +764,38 @@ async fn git_status(State(app): State<SharedState>, Path(id): Path<String>) -> R
         Err(e) => return e,
     };
     Json(crate::git::status(&root).await).into_response()
+}
+
+/// Most recent 50 commits for a project's directory. Always 200 -- a
+/// non-repo project just comes back with an empty list.
+async fn git_log(State(app): State<SharedState>, Path(id): Path<String>) -> Response {
+    let root = match project_path(&app, &id) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    Json(json!({"commits": crate::git::log(&root, 50).await})).into_response()
+}
+
+#[derive(Deserialize)]
+struct GitCommitRequest {
+    message: String,
+}
+
+/// Real `git add -A` + `git commit -m` for a project's directory. 400 on
+/// a blank message or a clean working tree, not a raw git error.
+async fn git_commit(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitCommitRequest>,
+) -> Response {
+    let root = match project_path(&app, &id) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match crate::git::commit(&root, &body.message).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e),
+    }
 }
 
 async fn list_skills(State(_app): State<SharedState>) -> Json<serde_json::Value> {
