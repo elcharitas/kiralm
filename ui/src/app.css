@@ -1396,6 +1396,78 @@
   white-space: pre-wrap;
 }
 
+/* Chat/composer markdown: paragraphs, lists, inline code, links -- fenced
+   code blocks are handled separately by the "N code blocks" collapsible,
+   so this stays plain (no syntax highlighting, no block-code styling). */
+.md p {
+  margin: 0 0 0.6em;
+}
+
+.md p:last-child {
+  margin-bottom: 0;
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 0.6em;
+  padding-left: 1.4em;
+}
+
+.md li {
+  margin: 0.15em 0;
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.md h1:first-child,
+.md h2:first-child,
+.md h3:first-child {
+  margin-top: 0;
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.1em 0.35em;
+}
+
+.md pre {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.md blockquote {
+  margin: 0 0 0.6em;
+  padding-left: 0.8em;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.md a {
+  color: var(--accent);
+}
+
 .worked-line {
   display: flex;
   align-items: center;
@@ -1579,6 +1651,15 @@
 
 .composer-input:focus {
   outline: none;
+}
+
+.composer-preview {
+  overflow-y: auto;
+  color: var(--text-dim);
+}
+
+.composer-preview-toggle {
+  cursor: pointer;
 }
 
 .composer-toolbar {
