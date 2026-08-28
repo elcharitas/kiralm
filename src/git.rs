@@ -195,6 +195,19 @@ pub async fn commit(root: &Path, message: &str) -> Result<CommitResult, String> 
     Ok(CommitResult { hash, short_hash, summary: message.to_string() })
 }
 
+/// Unified diff of every uncommitted change (staged + unstaged) against
+/// `HEAD`. Falls back to a plain working-tree diff on an unborn branch
+/// (no commits yet, so `HEAD` doesn't resolve) rather than erroring.
+pub async fn diff(root: &Path) -> Result<String, String> {
+    if !is_repo(root).await {
+        return Err(format!("{} is not a git repository", root.display()));
+    }
+    match run(root, &["diff", "HEAD"]).await {
+        Ok(out) => Ok(out),
+        Err(_) => run(root, &["diff"]).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +292,41 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message, "add b.txt");
         assert_eq!(entries[0].hash, result.hash);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn diff_rejects_a_non_repo() {
+        let dir = temp_dir("diff-non-repo");
+        let err = diff(&dir).await.unwrap_err();
+        assert!(err.contains("not a git repository"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn diff_shows_uncommitted_changes_against_head() {
+        let dir = temp_dir("diff-real");
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&dir, &["add", "-A"]).await.unwrap();
+        run(&dir, &["commit", "-m", "seed"]).await.unwrap();
+
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let out = diff(&dir).await.unwrap();
+        assert!(out.contains("-one"));
+        assert!(out.contains("+two"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn diff_falls_back_on_an_unborn_branch() {
+        let dir = temp_dir("diff-unborn");
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        // No commit yet -- `HEAD` doesn't resolve, only tracked changes
+        // (there are none, `a.txt` is untracked) show up either way.
+        let out = diff(&dir).await.unwrap();
+        assert_eq!(out, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

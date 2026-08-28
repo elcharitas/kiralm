@@ -80,6 +80,9 @@ export interface AppSettings {
   sidebar_collapsed: boolean;
   // Project ids whose chat list is collapsed in the sidebar.
   collapsed_workspaces: string[];
+  // Whether a long chat gets its older messages summarized
+  // automatically instead of always resending full history.
+  auto_compact: boolean;
 }
 
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
@@ -690,4 +693,17 @@ export async function streamChat(
       }
     }
   }
+}
+
+// Plain, non-streaming completion -- no session/project headers, so this
+// never enters the tool-calling loop (used by context compaction to
+// summarize older messages, which needs one text answer, not tools).
+export async function chatCompletion(model: string, messages: ChatMessage[]): Promise<string> {
+  const res = await fetch("/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model, messages, stream: false }),
+  });
+  const body = await asJson<{ choices: { message: { content: string } }[] }>(res);
+  return body.choices[0]?.message.content ?? "";
 }

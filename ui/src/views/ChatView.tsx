@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { api, streamChat, type GitStatus, type StatusResponse, type ToolStep } from "../api";
+import { compactMessages, shouldAutoCompact } from "../compact";
 import { formatContextLength, formatDuration, groupBySection, modelName } from "../format";
 import { changedFilesOf, codeBlockCountOf, stripCodeBlocks } from "../diff";
 import type { ChatSession, StoredMessage } from "../sessions";
@@ -55,6 +56,7 @@ export function ChatView({
   const [input, setInput] = useState("");
   const [liveText, setLiveText] = useState("");
   const [sending, setSending] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [streamingSessionId, setStreamingSessionId] = useState<string | null>(null);
@@ -67,13 +69,46 @@ export function ChatView({
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
   const effectiveModelObj = models.find((m) => m.id === effectiveModel);
 
+  // Manual compaction: typing "/compact" replaces the older half of the
+  // chat with one model-written summary instead of sending it as a
+  // message. Same routine `send()` below runs automatically when
+  // settings.auto_compact is on and the history outgrows the model's
+  // context window.
+  const compact = async () => {
+    if (!effectiveModel || !session || compacting) return;
+    setInput("");
+    setError(null);
+    setCompacting(true);
+    try {
+      onUpdateMessages(session.id, await compactMessages(effectiveModel, session.messages));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCompacting(false);
+    }
+  };
+
   const send = async () => {
     const text = input.trim();
     if (!text || !effectiveModel || sending) return;
+    if (text.toLowerCase() === "/compact") {
+      await compact();
+      return;
+    }
     const target = session ?? (await onEnsureSession());
     setError(null);
     setInput("");
-    const startMessages: StoredMessage[] = [...target.messages, { role: "user", content: text }];
+
+    let baseMessages = target.messages;
+    if (settings.auto_compact && shouldAutoCompact(baseMessages, effectiveModelObj?.context_length)) {
+      try {
+        baseMessages = await compactMessages(effectiveModel, baseMessages);
+        onUpdateMessages(target.id, baseMessages);
+      } catch {
+        // Best-effort: send the uncompacted history rather than block the turn over it.
+      }
+    }
+    const startMessages: StoredMessage[] = [...baseMessages, { role: "user", content: text }];
     onUpdateMessages(target.id, startMessages);
 
     setSending(true);
@@ -364,9 +399,15 @@ export function ChatView({
           )}
           <textarea
             className="composer-input"
-            placeholder={effectiveModel ? "Ask about your project, a file, or some connected tool…" : "Pull a model first"}
+            placeholder={
+              compacting
+                ? "Compacting chat…"
+                : effectiveModel
+                  ? "Ask about your project, a file, or some connected tool… ('/compact' to summarize older messages)"
+                  : "Pull a model first"
+            }
             value={input}
-            disabled={!effectiveModel}
+            disabled={!effectiveModel || compacting}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key !== "Enter") return;
@@ -423,7 +464,7 @@ export function ChatView({
               <button
                 type="submit"
                 className="composer-send"
-                disabled={!effectiveModel || !input.trim() || sending}
+                disabled={!effectiveModel || !input.trim() || sending || compacting}
                 title="Send"
               >
                 <ArrowUp size={14} />

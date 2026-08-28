@@ -60,6 +60,11 @@ pub struct FileEdit {
 
 const MAX_OUTPUT_CHARS: usize = 8_000;
 const RUN_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_WALK_FILES: usize = 5_000;
+const MAX_SEARCH_RESULTS: usize = 200;
+const MAX_GLOB_RESULTS: usize = 500;
+const WEB_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SKIP_DIR_NAMES: [&str; 4] = ["node_modules", "target", "dist", ".venv"];
 
 fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT_CHARS {
@@ -134,6 +139,44 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "search_files",
+                "description": "Search file contents for a literal substring, recursively from a directory (defaults to the project root). Returns matching 'path:line: text' entries.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path": { "type": "string", "description": "defaults to '.'" },
+                    },
+                    "required": ["pattern"],
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Find files by name pattern ('*' wildcards supported), recursively from a directory (defaults to the project root).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path": { "type": "string", "description": "defaults to '.'" },
+                    },
+                    "required": ["pattern"],
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": "Show a unified diff of every uncommitted change in the project (staged and unstaged).",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }),
         load_skill_def(),
     ];
     if permission == Permission::FullAccess {
@@ -161,6 +204,74 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
                     "type": "object",
                     "properties": { "command": { "type": "string" } },
                     "required": ["command"],
+                }
+            }
+        }));
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "Replace an exact snippet of text in an existing file with new text, without rewriting the whole file. 'old_string' must match exactly once unless 'replace_all' is set.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "old_string": { "type": "string" },
+                        "new_string": { "type": "string" },
+                        "replace_all": { "type": "boolean", "description": "defaults to false" },
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                }
+            }
+        }));
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "delete_file",
+                "description": "Delete a file or directory (recursively), path relative to the project root.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                }
+            }
+        }));
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "move_file",
+                "description": "Move or rename a file or directory within the project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" },
+                    },
+                    "required": ["from", "to"],
+                }
+            }
+        }));
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "git_commit",
+                "description": "Stage every change and create a git commit with the given message.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "message": { "type": "string" } },
+                    "required": ["message"],
+                }
+            }
+        }));
+        defs.push(json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "Fetch a URL over HTTP(S) and return its text content (HTML is stripped to plain text).",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "url": { "type": "string" } },
+                    "required": ["url"],
                 }
             }
         }));
@@ -226,6 +337,86 @@ fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
+/// Recursively lists files under `root` for `search_files`/`glob`,
+/// skipping hidden dirs and common heavy/irrelevant ones, capped at
+/// `MAX_WALK_FILES` so one call can't turn into a multi-second scan of
+/// a huge repo (or a runaway one via a symlink cycle).
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= MAX_WALK_FILES {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || SKIP_DIR_NAMES.contains(&name.as_ref()) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+                if out.len() >= MAX_WALK_FILES {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Minimal `*`-only wildcard matcher (no `?`/`[]`/`**`) -- enough for
+/// "find files named *.rs" without pulling in a glob crate.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !text[pos..].starts_with(part) {
+                return false;
+            }
+            pos += part.len();
+        } else if i == parts.len() - 1 {
+            return text[pos..].ends_with(part);
+        } else {
+            match text[pos..].find(part) {
+                Some(idx) => pos += idx + part.len(),
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Naive tag stripper for `web_fetch`'s HTML pages: drops everything
+/// between `<`/`>` and collapses whitespace runs. Good enough to turn a
+/// docs page into readable text without a full HTML parser dependency;
+/// won't handle `<script>`/`<style>` bodies specially, so their raw
+/// text still leaks through.
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Executes one tool call for real. Returns the content fed back to the
 /// model plus a `ToolStep` for logging/UI, on both success and failure --
 /// a rejected call is a normal tool result (the model gets told why),
@@ -243,12 +434,24 @@ pub async fn execute(
     let (ok, content, summary) = match name {
         "read_file" => read_file(&args, root),
         "list_directory" => list_directory(&args, root),
+        "search_files" => search_files(&args, root),
+        "glob" => glob_tool(&args, root),
+        "git_diff" => git_diff_tool(root).await,
         "load_skill" => load_skill(&args),
         "write_file" => {
             let (result, edit) = write_file(&args, root, permission);
             file_edit = edit;
             result
         }
+        "edit_file" => {
+            let (result, edit) = edit_file(&args, root, permission);
+            file_edit = edit;
+            result
+        }
+        "delete_file" => delete_file(&args, root, permission),
+        "move_file" => move_file(&args, root, permission),
+        "git_commit" => git_commit_tool(&args, root, permission).await,
+        "web_fetch" => web_fetch(&args, permission).await,
         "run_command" => run_command(&args, root, permission).await,
         "run_dsh_profile" => run_dsh_profile(&args, dsh_bin).await,
         other if other.starts_with("mcp__") => match mcp.dispatch(other, args_json).await {
@@ -362,6 +565,231 @@ fn write_file(
         }
         Err(e) => (err(&format!("failed to write '{path}': {e}")), None),
     }
+}
+
+fn search_files(args: &serde_json::Value, root: &Path) -> (bool, String, String) {
+    let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
+        return err("search_files requires a 'pattern' argument");
+    };
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let search_root = match resolve_in_root(root, path) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    // `resolve_in_root` canonicalizes internally (e.g. macOS's
+    // /var -> /private/var), so paths it hands back must be stripped
+    // against that same canonical root, not the raw `root` argument.
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut matches = Vec::new();
+    'files: for file in walk_files(&search_root) {
+        let Ok(bytes) = std::fs::read(&file) else { continue };
+        // A null byte in the first slice is a cheap, reliable-enough
+        // binary check -- good enough to skip images/archives/etc.
+        if bytes[..bytes.len().min(512)].contains(&0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let rel = file.strip_prefix(&root_canon).unwrap_or(&file).display().to_string();
+        for (i, line) in text.lines().enumerate() {
+            if line.contains(pattern) {
+                matches.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                if matches.len() >= MAX_SEARCH_RESULTS {
+                    break 'files;
+                }
+            }
+        }
+    }
+    let summary = format!("found {} matches for '{pattern}'", matches.len());
+    (true, truncate(matches.join("\n")), summary)
+}
+
+fn glob_tool(args: &serde_json::Value, root: &Path) -> (bool, String, String) {
+    let Some(pattern) = args.get("pattern").and_then(|v| v.as_str()) else {
+        return err("glob requires a 'pattern' argument");
+    };
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+    let search_root = match resolve_in_root(root, path) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    // See `search_files`'s matching comment: strip against the same
+    // canonical root `resolve_in_root` resolved paths against.
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut matches: Vec<String> = walk_files(&search_root)
+        .into_iter()
+        .filter_map(|file| {
+            let rel = file.strip_prefix(&root_canon).ok()?.display().to_string();
+            let name = file.file_name()?.to_string_lossy().into_owned();
+            (glob_match(pattern, &name) || glob_match(pattern, &rel)).then_some(rel)
+        })
+        .take(MAX_GLOB_RESULTS)
+        .collect();
+    matches.sort();
+    let summary = format!("found {} files matching '{pattern}'", matches.len());
+    (true, truncate(matches.join("\n")), summary)
+}
+
+async fn git_diff_tool(root: &Path) -> (bool, String, String) {
+    match crate::git::diff(root).await {
+        Ok(out) if out.trim().is_empty() => (true, "no uncommitted changes".to_string(), "no changes".to_string()),
+        Ok(out) => (true, truncate(out), "read uncommitted diff".to_string()),
+        Err(e) => err(&e),
+    }
+}
+
+async fn git_commit_tool(args: &serde_json::Value, root: &Path, permission: Permission) -> (bool, String, String) {
+    if permission != Permission::FullAccess {
+        return err("git_commit requires full-access permission (this session is read-only)");
+    }
+    let Some(message) = args.get("message").and_then(|v| v.as_str()) else {
+        return err("git_commit requires a 'message' argument");
+    };
+    match crate::git::commit(root, message).await {
+        Ok(result) => {
+            let summary = format!("committed {} ({})", result.short_hash, result.summary);
+            (true, summary.clone(), summary)
+        }
+        Err(e) => err(&e),
+    }
+}
+
+fn edit_file(
+    args: &serde_json::Value,
+    root: &Path,
+    permission: Permission,
+) -> ((bool, String, String), Option<FileEdit>) {
+    if permission != Permission::FullAccess {
+        return (err("edit_file requires full-access permission (this session is read-only)"), None);
+    }
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return (err("edit_file requires a 'path' argument"), None);
+    };
+    let Some(old_string) = args.get("old_string").and_then(|v| v.as_str()) else {
+        return (err("edit_file requires an 'old_string' argument"), None);
+    };
+    let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let resolved = match resolve_in_root(root, path) {
+        Ok(p) => p,
+        Err(e) => return (err(&e), None),
+    };
+    let before = match std::fs::read_to_string(&resolved) {
+        Ok(s) => s,
+        Err(e) => return (err(&format!("failed to read '{path}': {e}")), None),
+    };
+    let occurrences = before.matches(old_string).count();
+    if occurrences == 0 {
+        return (err(&format!("'old_string' not found in '{path}'")), None);
+    }
+    if occurrences > 1 && !replace_all {
+        return (
+            err(&format!(
+                "'old_string' matches {occurrences} places in '{path}'; include more surrounding \
+                 context to make it unique, or set replace_all"
+            )),
+            None,
+        );
+    }
+    let after =
+        if replace_all { before.replace(old_string, new_string) } else { before.replacen(old_string, new_string, 1) };
+    match std::fs::write(&resolved, &after) {
+        Ok(()) => {
+            let plural = if occurrences == 1 { "" } else { "s" };
+            let summary = format!("edited {path} ({occurrences} replacement{plural})");
+            let edit = FileEdit { path: path.to_string(), before: Some(before), after: after.clone() };
+            ((true, summary.clone(), summary), Some(edit))
+        }
+        Err(e) => (err(&format!("failed to write '{path}': {e}")), None),
+    }
+}
+
+fn delete_file(args: &serde_json::Value, root: &Path, permission: Permission) -> (bool, String, String) {
+    if permission != Permission::FullAccess {
+        return err("delete_file requires full-access permission (this session is read-only)");
+    }
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return err("delete_file requires a 'path' argument");
+    };
+    let resolved = match resolve_in_root(root, path) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    let result = if resolved.is_dir() { std::fs::remove_dir_all(&resolved) } else { std::fs::remove_file(&resolved) };
+    match result {
+        Ok(()) => {
+            let summary = format!("deleted {path}");
+            (true, summary.clone(), summary)
+        }
+        Err(e) => err(&format!("failed to delete '{path}': {e}")),
+    }
+}
+
+fn move_file(args: &serde_json::Value, root: &Path, permission: Permission) -> (bool, String, String) {
+    if permission != Permission::FullAccess {
+        return err("move_file requires full-access permission (this session is read-only)");
+    }
+    let Some(from) = args.get("from").and_then(|v| v.as_str()) else {
+        return err("move_file requires a 'from' argument");
+    };
+    let Some(to) = args.get("to").and_then(|v| v.as_str()) else {
+        return err("move_file requires a 'to' argument");
+    };
+    let resolved_from = match resolve_in_root(root, from) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    let resolved_to = match resolve_in_root(root, to) {
+        Ok(p) => p,
+        Err(e) => return err(&e),
+    };
+    if let Some(parent) = resolved_to.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return err(&format!("failed to create parent dirs for '{to}': {e}"));
+        }
+    }
+    match std::fs::rename(&resolved_from, &resolved_to) {
+        Ok(()) => {
+            let summary = format!("moved {from} to {to}");
+            (true, summary.clone(), summary)
+        }
+        Err(e) => err(&format!("failed to move '{from}' to '{to}': {e}")),
+    }
+}
+
+async fn web_fetch(args: &serde_json::Value, permission: Permission) -> (bool, String, String) {
+    if permission != Permission::FullAccess {
+        return err("web_fetch requires full-access permission (this session is read-only)");
+    }
+    let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
+        return err("web_fetch requires a 'url' argument");
+    };
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return err("'url' must be an http(s) URL");
+    }
+    let client = match reqwest::Client::builder().timeout(WEB_FETCH_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return err(&format!("failed to build http client: {e}")),
+    };
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => return err(&format!("request to '{url}' failed: {e}")),
+    };
+    let status = resp.status();
+    let is_html = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("html"));
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => return err(&format!("failed to read response body: {e}")),
+    };
+    if !status.is_success() {
+        return err(&format!("'{url}' returned {status}"));
+    }
+    let body = if is_html { strip_html_tags(&body) } else { body };
+    let summary = format!("fetched {url} ({status})");
+    (true, truncate(body), summary)
 }
 
 async fn run_command(args: &serde_json::Value, root: &Path, permission: Permission) -> (bool, String, String) {
@@ -574,5 +1002,252 @@ mod tests {
         crate::dsh::create_profile("p1").unwrap();
         let defs = tool_defs(Permission::FullAccess, &crate::mcp::McpRegistry::new(), "sh");
         assert!(defs.iter().any(|d| d["function"]["name"] == "run_dsh_profile"));
+    }
+
+    fn mcp() -> crate::mcp::McpRegistry {
+        crate::mcp::McpRegistry::new()
+    }
+
+    #[tokio::test]
+    async fn edit_file_replaces_a_unique_match() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "hello world").unwrap();
+        let (content, step) = execute(
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"world","new_string":"there"}"#,
+            &root,
+            Permission::FullAccess,
+            &mcp(),
+            "dsh",
+        )
+        .await;
+        assert!(step.ok, "{content}");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "hello there");
+        let edit = step.file_edit.unwrap();
+        assert_eq!(edit.before.as_deref(), Some("hello world"));
+        assert_eq!(edit.after, "hello there");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_an_ambiguous_match_without_replace_all() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x x x").unwrap();
+        let (content, step) =
+            execute("edit_file", r#"{"path":"a.txt","old_string":"x","new_string":"y"}"#, &root, Permission::FullAccess, &mcp(), "dsh")
+                .await;
+        assert!(!step.ok);
+        assert!(content.contains("matches 3 places"));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "x x x");
+    }
+
+    #[tokio::test]
+    async fn edit_file_replace_all_replaces_every_match() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x x x").unwrap();
+        let (_content, step) = execute(
+            "edit_file",
+            r#"{"path":"a.txt","old_string":"x","new_string":"y","replace_all":true}"#,
+            &root,
+            Permission::FullAccess,
+            &mcp(),
+            "dsh",
+        )
+        .await;
+        assert!(step.ok);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "y y y");
+    }
+
+    #[tokio::test]
+    async fn edit_file_reports_missing_old_string() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "hello").unwrap();
+        let (content, step) =
+            execute("edit_file", r#"{"path":"a.txt","old_string":"nope","new_string":"y"}"#, &root, Permission::FullAccess, &mcp(), "dsh")
+                .await;
+        assert!(!step.ok);
+        assert!(content.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejected_in_read_only_mode() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "hello").unwrap();
+        let (content, step) =
+            execute("edit_file", r#"{"path":"a.txt","old_string":"hello","new_string":"hi"}"#, &root, Permission::ReadOnly, &mcp(), "dsh")
+                .await;
+        assert!(!step.ok);
+        assert!(content.contains("full-access"));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn delete_file_removes_a_real_file() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let (_content, step) = execute("delete_file", r#"{"path":"a.txt"}"#, &root, Permission::FullAccess, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(!root.join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_file_removes_a_directory_recursively() {
+        let root = tmp_root();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/a.txt"), "x").unwrap();
+        let (_content, step) = execute("delete_file", r#"{"path":"sub"}"#, &root, Permission::FullAccess, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(!root.join("sub").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_file_rejected_in_read_only_mode() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let (content, step) = execute("delete_file", r#"{"path":"a.txt"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("full-access"));
+        assert!(root.join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_file_renames_within_root() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let (_content, step) =
+            execute("move_file", r#"{"from":"a.txt","to":"nested/b.txt"}"#, &root, Permission::FullAccess, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(std::fs::read_to_string(root.join("nested/b.txt")).unwrap(), "x");
+    }
+
+    #[tokio::test]
+    async fn move_file_rejected_in_read_only_mode() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let (content, step) =
+            execute("move_file", r#"{"from":"a.txt","to":"b.txt"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("full-access"));
+    }
+
+    #[tokio::test]
+    async fn search_files_finds_a_match_with_line_number() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.txt"), "one\ntwo needle\nthree").unwrap();
+        let (content, step) = execute("search_files", r#"{"pattern":"needle"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(content.contains("a.txt:2: two needle"), "{content}");
+    }
+
+    #[tokio::test]
+    async fn search_files_skips_binary_looking_files() {
+        let root = tmp_root();
+        std::fs::write(root.join("bin.dat"), [0u8, 1, 2, b'n', b'e', b'e', b'd', b'l', b'e']).unwrap();
+        let (content, step) = execute("search_files", r#"{"pattern":"needle"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(!content.contains("bin.dat"));
+    }
+
+    #[tokio::test]
+    async fn glob_matches_a_wildcard_pattern() {
+        let root = tmp_root();
+        std::fs::write(root.join("a.rs"), "").unwrap();
+        std::fs::write(root.join("a.txt"), "").unwrap();
+        let (content, step) = execute("glob", r#"{"pattern":"*.rs"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert_eq!(content, "a.rs");
+    }
+
+    #[tokio::test]
+    async fn git_diff_reports_not_a_repo_cleanly() {
+        let root = tmp_root();
+        let (content, step) = execute("git_diff", "{}", &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("not a git repository"));
+    }
+
+    async fn git(root: &Path, args: &[&str]) {
+        let status = tokio::process::Command::new("git").args(args).current_dir(root).status().await.unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn git_diff_and_commit_round_trip_for_real() {
+        let root = tmp_root();
+        git(&root, &["init", "--quiet"]).await;
+        git(&root, &["config", "user.email", "test@example.com"]).await;
+        git(&root, &["config", "user.name", "Test"]).await;
+        std::fs::write(root.join("a.txt"), "one").unwrap();
+        git(&root, &["add", "-A"]).await;
+        git(&root, &["commit", "--quiet", "-m", "seed"]).await;
+
+        std::fs::write(root.join("a.txt"), "two").unwrap();
+        let (content, step) = execute("git_diff", "{}", &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert!(content.contains("-one") && content.contains("+two"), "{content}");
+
+        let (content, step) =
+            execute("git_commit", r#"{"message":"second"}"#, &root, Permission::FullAccess, &mcp(), "dsh").await;
+        assert!(step.ok, "{content}");
+
+        let (content, step) = execute("git_diff", "{}", &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(step.ok);
+        assert_eq!(content, "no uncommitted changes");
+    }
+
+    #[tokio::test]
+    async fn git_commit_rejected_in_read_only_mode() {
+        let root = tmp_root();
+        git(&root, &["init", "--quiet"]).await;
+        let (content, step) =
+            execute("git_commit", r#"{"message":"x"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("full-access"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejected_in_read_only_mode() {
+        let root = tmp_root();
+        let (content, step) =
+            execute("web_fetch", r#"{"url":"http://example.com"}"#, &root, Permission::ReadOnly, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("full-access"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_a_non_http_url() {
+        let root = tmp_root();
+        let (content, step) =
+            execute("web_fetch", r#"{"url":"file:///etc/passwd"}"#, &root, Permission::FullAccess, &mcp(), "dsh").await;
+        assert!(!step.ok);
+        assert!(content.contains("http(s)"));
+    }
+
+    #[test]
+    fn glob_match_supports_leading_trailing_and_middle_wildcards() {
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(!glob_match("*.rs", "main.txt"));
+        assert!(glob_match("test_*", "test_foo"));
+        assert!(glob_match("a*b*c", "a123b456c"));
+        assert!(glob_match("exact", "exact"));
+        assert!(!glob_match("exact", "exactish"));
+    }
+
+    #[test]
+    fn strip_html_tags_drops_markup_and_collapses_whitespace() {
+        let html = "<html>\n<body>  <p>Hello   <b>World</b></p>\n</body></html>";
+        assert_eq!(strip_html_tags(html), "Hello World");
+    }
+
+    #[test]
+    fn read_only_sessions_are_not_offered_mutating_tools() {
+        let defs = tool_defs(Permission::ReadOnly, &mcp(), "dsh");
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
+            assert!(!names.contains(&mutating), "read-only session should not see '{mutating}'");
+        }
+        for readable in ["read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill"] {
+            assert!(names.contains(&readable), "'{readable}' should always be offered");
+        }
     }
 }
