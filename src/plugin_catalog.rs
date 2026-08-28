@@ -177,7 +177,7 @@ pub async fn install(dsh_bin: &str, row: &CloudPlugin) -> Result<CatalogInstallO
                 .as_deref()
                 .ok_or_else(|| "catalog row missing plugin_name for claude_marketplace source".to_string())?;
             let added = marketplace::add(&row.source).await?;
-            let outcome = marketplace::install_plugin(&added.slug, plugin_name)?;
+            let outcome = marketplace::install_plugin(&added.slug, plugin_name).await?;
             Ok(CatalogInstallOutcome::Marketplace(outcome))
         }
         "agent_plugin" => {
@@ -312,8 +312,8 @@ mod tests {
         assert_eq!(parsed.data[0].plugin_name.as_deref(), Some("plug"));
     }
 
-    #[test]
-    fn claude_marketplace_installed_state_matches_real_marketplace_and_skill() {
+    #[tokio::test]
+    async fn claude_marketplace_installed_state_matches_real_marketplace_and_skill() {
         let _home = TempHome::new();
         let slug = "repo";
         let dir = marketplace::marketplaces_dir().join(slug);
@@ -334,7 +334,7 @@ mod tests {
         let r = row("c1", "claude_marketplace", "https://github.com/org/repo", Some("plug"));
         assert!(!is_installed(&r), "not installed until install_plugin runs");
 
-        marketplace::install_plugin(slug, "plug").unwrap();
+        marketplace::install_plugin(slug, "plug").await.unwrap();
         assert!(is_installed(&r));
     }
 

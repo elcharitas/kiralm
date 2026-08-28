@@ -27,13 +27,48 @@ pub struct PluginRef {
     pub plugin: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The real marketplace.json source forms: a relative path, or an
+/// object naming one of git's shapes. `npm`/`archive`/`command` are
+/// real kinds this adapter doesn't install, kept only so they still
+/// list -- `Unsupported` carries the kind name for that error message.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum PluginSource {
+    Path {
+        path: String,
+    },
+    Github {
+        repo: String,
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+    },
+    Url {
+        url: String,
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+    },
+    GitSubdir {
+        url: String,
+        path: String,
+        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+        git_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha: Option<String>,
+    },
+    Unsupported {
+        #[serde(rename = "unsupported_kind")]
+        kind: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MarketplacePlugin {
     pub name: String,
-    /// A relative path within the marketplace repo. A separate git url
-    /// here (the other form the real format allows) isn't fetched --
-    /// install reports a clear error for it instead of guessing.
-    pub source: String,
+    pub source: PluginSource,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -44,6 +79,10 @@ pub struct Marketplace {
     pub name: String,
     pub owner: Option<serde_json::Value>,
     pub plugins: Vec<MarketplacePlugin>,
+    /// One plugin entry's parse failure (missing name, malformed or
+    /// unrecognizable source shape) -- the rest of the list still loads.
+    #[serde(default)]
+    pub plugin_warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,7 +91,65 @@ struct RawMarketplace {
     #[serde(default)]
     owner: Option<serde_json::Value>,
     #[serde(default)]
-    plugins: Vec<MarketplacePlugin>,
+    plugins: Vec<serde_json::Value>,
+}
+
+fn parse_plugin_source(v: &serde_json::Value) -> Result<PluginSource, String> {
+    if let Some(s) = v.as_str() {
+        return Ok(PluginSource::Path { path: s.to_string() });
+    }
+    let Some(obj) = v.as_object() else {
+        return Err("'source' must be a string or an object".to_string());
+    };
+    let str_field = |key: &str| obj.get(key).and_then(|f| f.as_str()).map(str::to_string);
+    let kind = str_field("source").ok_or_else(|| "object source missing its own 'source' kind".to_string())?;
+    match kind.as_str() {
+        "github" => Ok(PluginSource::Github {
+            repo: str_field("repo").ok_or_else(|| "github source missing 'repo'".to_string())?,
+            git_ref: str_field("ref"),
+            sha: str_field("sha"),
+        }),
+        "url" => Ok(PluginSource::Url {
+            url: str_field("url").ok_or_else(|| "url source missing 'url'".to_string())?,
+            git_ref: str_field("ref"),
+            sha: str_field("sha"),
+        }),
+        "git-subdir" => Ok(PluginSource::GitSubdir {
+            url: str_field("url").ok_or_else(|| "git-subdir source missing 'url'".to_string())?,
+            path: str_field("path").ok_or_else(|| "git-subdir source missing 'path'".to_string())?,
+            git_ref: str_field("ref"),
+            sha: str_field("sha"),
+        }),
+        other => Ok(PluginSource::Unsupported { kind: other.to_string() }),
+    }
+}
+
+fn parse_plugin_entry(v: &serde_json::Value) -> Result<MarketplacePlugin, String> {
+    let name = v
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "plugin entry missing 'name'".to_string())?;
+    let source_val = v.get("source").ok_or_else(|| format!("plugin '{name}': missing 'source'"))?;
+    let source = parse_plugin_source(source_val).map_err(|e| format!("plugin '{name}': {e}"))?;
+    let description = v.get("description").and_then(|d| d.as_str()).map(str::to_string);
+    Ok(MarketplacePlugin { name: name.to_string(), source, description })
+}
+
+/// Per-entry resilient: one bad plugin entry becomes a warning, not a
+/// failure of the whole array -- mirrors skills.rs/agent_plugin.rs's
+/// skip-and-warn posture for content it can't parse or doesn't support.
+fn parse_plugin_entries(raw: &[serde_json::Value]) -> (Vec<MarketplacePlugin>, Vec<String>) {
+    let mut plugins = Vec::new();
+    let mut warnings = Vec::new();
+    for v in raw {
+        match parse_plugin_entry(v) {
+            Ok(p) => plugins.push(p),
+            Err(e) => warnings.push(e),
+        }
+    }
+    (plugins, warnings)
 }
 
 fn sanitize_slug(raw: &str) -> String {
@@ -83,13 +180,21 @@ fn marketplace_json_path(dir: &Path) -> PathBuf {
     dir.join(".claude-plugin").join("marketplace.json")
 }
 
-fn parse_marketplace_json(raw: &str) -> Result<RawMarketplace, String> {
+struct ParsedMarketplace {
+    name: String,
+    owner: Option<serde_json::Value>,
+    plugins: Vec<MarketplacePlugin>,
+    plugin_warnings: Vec<String>,
+}
+
+fn parse_marketplace_json(raw: &str) -> Result<ParsedMarketplace, String> {
     let parsed: RawMarketplace =
         serde_json::from_str(raw).map_err(|e| format!("invalid marketplace.json: {e}"))?;
     if parsed.name.trim().is_empty() {
         return Err("marketplace.json 'name' is required".to_string());
     }
-    Ok(parsed)
+    let (plugins, plugin_warnings) = parse_plugin_entries(&parsed.plugins);
+    Ok(ParsedMarketplace { name: parsed.name, owner: parsed.owner, plugins, plugin_warnings })
 }
 
 fn load(slug: &str) -> Result<Marketplace, String> {
@@ -102,6 +207,7 @@ fn load(slug: &str) -> Result<Marketplace, String> {
         name: parsed.name,
         owner: parsed.owner,
         plugins: parsed.plugins,
+        plugin_warnings: parsed.plugin_warnings,
     })
 }
 
@@ -174,8 +280,8 @@ pub fn is_installed(marketplace: &str, plugin: &str) -> bool {
             .any(|c| c.installed_by.is_some_and(|r| tagged(&r.marketplace, &r.plugin)))
 }
 
-fn plugin_root(marketplace_dir: &Path, plugin: &MarketplacePlugin) -> PathBuf {
-    marketplace_dir.join(plugin.source.trim_start_matches("./"))
+fn plugin_root(marketplace_dir: &Path, path: &str) -> PathBuf {
+    marketplace_dir.join(path.trim_start_matches("./"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,24 +308,75 @@ pub struct InstallOutcome {
     pub warnings: Vec<String>,
 }
 
+/// Real marketplace.json entries sometimes give `git-subdir`'s `url` as
+/// bare `owner/repo` (same shorthand `github`'s `repo` field uses),
+/// not always a full clone URL as its own name implies.
+fn expand_repo_shorthand(url: &str) -> String {
+    if url.contains("://") || url.starts_with("git@") {
+        url.to_string()
+    } else {
+        format!("https://github.com/{url}.git")
+    }
+}
+
+/// Resolves a plugin's content root for install: a relative path stays
+/// under the marketplace's own clone; `github`/`url`/`git-subdir` each
+/// clone their own throwaway checkout, cleaned up by the caller once
+/// skills/mcp servers have been copied out of it.
+async fn resolve_plugin_root(
+    marketplace_slug: &str,
+    plugin_name: &str,
+    source: &PluginSource,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    match source {
+        PluginSource::Path { path } => {
+            let root = plugin_root(&marketplaces_dir().join(marketplace_slug), path);
+            if !root.is_dir() {
+                return Err(format!("plugin '{plugin_name}' source '{path}' not found"));
+            }
+            Ok((root, None))
+        }
+        PluginSource::Github { repo, git_ref, sha } => {
+            let url = expand_repo_shorthand(repo);
+            let tmp = kiralm_home().join("tmp").join(format!("plugin-{}", uuid::Uuid::new_v4()));
+            crate::git::clone_at(&url, &tmp, git_ref.as_deref(), sha.as_deref()).await?;
+            Ok((tmp.clone(), Some(tmp)))
+        }
+        PluginSource::Url { url, git_ref, sha } => {
+            let url = expand_repo_shorthand(url);
+            let tmp = kiralm_home().join("tmp").join(format!("plugin-{}", uuid::Uuid::new_v4()));
+            crate::git::clone_at(&url, &tmp, git_ref.as_deref(), sha.as_deref()).await?;
+            Ok((tmp.clone(), Some(tmp)))
+        }
+        PluginSource::GitSubdir { url, path, git_ref, sha } => {
+            let url = expand_repo_shorthand(url);
+            let tmp = kiralm_home().join("tmp").join(format!("plugin-{}", uuid::Uuid::new_v4()));
+            crate::git::clone_at(&url, &tmp, git_ref.as_deref(), sha.as_deref()).await?;
+            let root = tmp.join(path);
+            if !root.is_dir() {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(format!("plugin '{plugin_name}' git-subdir path '{path}' not found in clone"));
+            }
+            Ok((root, Some(tmp)))
+        }
+        PluginSource::Unsupported { kind } => {
+            Err(format!("plugin '{plugin_name}' source kind '{kind}' not supported yet"))
+        }
+    }
+}
+
 /// Copies a plugin's `skills/*/SKILL.md` (+ siblings) into skills.rs's
 /// store and its `.mcp.json` servers into mcp.rs's, tagging both with
 /// this plugin. `commands/`, `agents/`, `hooks/` are out of scope and
 /// simply ignored, not errored.
-pub fn install_plugin(marketplace_slug: &str, plugin_name: &str) -> Result<InstallOutcome, String> {
+pub async fn install_plugin(marketplace_slug: &str, plugin_name: &str) -> Result<InstallOutcome, String> {
     let marketplace = load(marketplace_slug)?;
     let plugin = marketplace
         .plugins
         .iter()
         .find(|p| p.name == plugin_name)
         .ok_or_else(|| format!("plugin '{plugin_name}' not found in marketplace '{marketplace_slug}'"))?;
-    if plugin.source.contains("://") || plugin.source.starts_with("git@") {
-        return Err(format!("plugin '{plugin_name}' source is a separate git url, not supported"));
-    }
-    let root = plugin_root(&marketplaces_dir().join(marketplace_slug), plugin);
-    if !root.is_dir() {
-        return Err(format!("plugin '{plugin_name}' source '{}' not found", plugin.source));
-    }
+    let (root, tmp_clone) = resolve_plugin_root(marketplace_slug, plugin_name, &plugin.source).await?;
     let plugin_ref = PluginRef { marketplace: marketplace_slug.to_string(), plugin: plugin_name.to_string() };
 
     let mut outcome = InstallOutcome::default();
@@ -257,6 +414,10 @@ pub fn install_plugin(marketplace_slug: &str, plugin_name: &str) -> Result<Insta
             }
             Err(e) => outcome.warnings.push(format!(".mcp.json: {e}")),
         }
+    }
+
+    if let Some(tmp) = tmp_clone {
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     if outcome.skills.is_empty() && outcome.mcp_servers.is_empty() && !outcome.warnings.is_empty() {
@@ -328,6 +489,60 @@ mod tests {
         assert!(parse_marketplace_json(r#"{"name":""}"#).is_err(), "blank name");
     }
 
+    #[test]
+    fn parses_github_url_and_git_subdir_object_sources() {
+        let raw = r#"{"name":"demo","plugins":[
+            {"name":"a","source":{"source":"github","repo":"owner/repo","ref":"v2.0.0"}},
+            {"name":"b","source":{"source":"url","url":"https://example.com/x.git","sha":"deadbeef"}},
+            {"name":"c","source":{"source":"git-subdir","url":"https://example.com/mono.git","path":"tools/p"}}
+        ]}"#;
+        let parsed = parse_marketplace_json(raw).unwrap();
+        assert!(parsed.plugin_warnings.is_empty());
+        assert_eq!(parsed.plugins.len(), 3);
+
+        match &parsed.plugins[0].source {
+            PluginSource::Github { repo, git_ref, sha } => {
+                assert_eq!(repo, "owner/repo");
+                assert_eq!(git_ref.as_deref(), Some("v2.0.0"));
+                assert!(sha.is_none());
+            }
+            other => panic!("expected Github, got {other:?}"),
+        }
+        match &parsed.plugins[1].source {
+            PluginSource::Url { url, sha, .. } => {
+                assert_eq!(url, "https://example.com/x.git");
+                assert_eq!(sha.as_deref(), Some("deadbeef"));
+            }
+            other => panic!("expected Url, got {other:?}"),
+        }
+        match &parsed.plugins[2].source {
+            PluginSource::GitSubdir { url, path, .. } => {
+                assert_eq!(url, "https://example.com/mono.git");
+                assert_eq!(path, "tools/p");
+            }
+            other => panic!("expected GitSubdir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_mixed_plugin_array_keeps_the_supported_and_warns_on_the_rest() {
+        let raw = r#"{"name":"demo","plugins":[
+            {"name":"good","source":"./plugins/good"},
+            {"name":"bad-source-shape","source":123},
+            {"source":"./plugins/no-name"},
+            {"name":"npm-kind","source":{"source":"npm","package":"whatever"}}
+        ]}"#;
+        let parsed = parse_marketplace_json(raw).unwrap();
+        assert_eq!(parsed.plugin_warnings.len(), 2, "the two truly malformed entries should warn");
+        assert_eq!(parsed.plugins.len(), 2, "good + npm-kind still list, npm just isn't installable");
+        assert_eq!(parsed.plugins[0].name, "good");
+        assert_eq!(parsed.plugins[1].name, "npm-kind");
+        match &parsed.plugins[1].source {
+            PluginSource::Unsupported { kind } => assert_eq!(kind, "npm"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
     fn seed_plugin(marketplace_dir: &Path, plugin_name: &str, skill_name: &str, mcp_name: &str) {
         std::fs::create_dir_all(marketplace_dir.join(".claude-plugin")).unwrap();
         std::fs::write(
@@ -351,14 +566,14 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn install_writes_into_real_skills_and_mcp_stores_with_tagging() {
+    #[tokio::test]
+    async fn install_writes_into_real_skills_and_mcp_stores_with_tagging() {
         let _home = TempHome::new();
         let slug = "demo-mp";
         let dir = marketplaces_dir().join(slug);
         seed_plugin(&dir, "plugin-a", "one", "srv");
 
-        let outcome = install_plugin(slug, "plugin-a").unwrap();
+        let outcome = install_plugin(slug, "plugin-a").await.unwrap();
         assert_eq!(outcome.skills, vec!["one".to_string()]);
         assert_eq!(outcome.mcp_servers, vec!["srv".to_string()]);
         assert!(outcome.warnings.is_empty());
@@ -369,13 +584,13 @@ mod tests {
         assert!(is_installed(slug, "plugin-a"));
     }
 
-    #[test]
-    fn uninstall_removes_exactly_the_tagged_items_and_nothing_else() {
+    #[tokio::test]
+    async fn uninstall_removes_exactly_the_tagged_items_and_nothing_else() {
         let _home = TempHome::new();
         let slug = "demo-mp";
         let dir = marketplaces_dir().join(slug);
         seed_plugin(&dir, "plugin-a", "one", "srv");
-        install_plugin(slug, "plugin-a").unwrap();
+        install_plugin(slug, "plugin-a").await.unwrap();
 
         skills::create_from_markdown("---\nname: other\ndescription: hand-added.\n---\nBody\n").unwrap();
         mcp::add_config(McpServerConfig {
@@ -404,5 +619,91 @@ mod tests {
         assert_eq!(slug_from_url("https://github.com/org/repo").unwrap(), "repo");
         assert_eq!(slug_from_url("https://github.com/org/repo.git").unwrap(), "repo");
         assert_eq!(slug_from_url("git@github.com:org/repo.git").unwrap(), "repo");
+    }
+
+    /// A real local git repo with a plugin at its root (or under
+    /// `subdir`, for the git-subdir case), for install to actually clone.
+    fn init_local_git_plugin_repo(skill_name: &str, mcp_name: &str, subdir: Option<&str>) -> PathBuf {
+        let src = std::env::temp_dir().join(format!("kiralm-marketplace-git-src-{}", uuid::Uuid::new_v4()));
+        let plugin_root = match subdir {
+            Some(sub) => src.join(sub),
+            None => src.clone(),
+        };
+        let skill_dir = plugin_root.join("skills").join(skill_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {skill_name}\ndescription: test skill.\n---\nBody\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_root.join(".mcp.json"),
+            format!(r#"{{"mcpServers":{{"{mcp_name}":{{"command":"echo","args":["hi"]}}}}}}"#),
+        )
+        .unwrap();
+
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git").args(args).current_dir(&src).status().unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["-c", "user.email=test@test.com", "-c", "user.name=test", "add", "-A"]);
+        run_git(&["-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-q", "-m", "init"]);
+        src
+    }
+
+    fn write_marketplace_with_source(slug: &str, plugin_name: &str, source_json: &str) {
+        let dir = marketplaces_dir().join(slug);
+        std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            dir.join(".claude-plugin").join("marketplace.json"),
+            format!(r#"{{"name":"Demo","plugins":[{{"name":"{plugin_name}","source":{source_json}}}]}}"#),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_routes_a_url_source_through_a_real_clone() {
+        let _home = TempHome::new();
+        let src = init_local_git_plugin_repo("one", "srv", None);
+        write_marketplace_with_source(
+            "url-mp",
+            "plugin-a",
+            &format!(r#"{{"source":"url","url":"file://{}"}}"#, src.display()),
+        );
+
+        let outcome = install_plugin("url-mp", "plugin-a").await.unwrap();
+        assert_eq!(outcome.skills, vec!["one".to_string()]);
+        assert_eq!(outcome.mcp_servers, vec!["srv".to_string()]);
+        assert!(skills::get("one").is_some());
+
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    #[tokio::test]
+    async fn install_routes_a_git_subdir_source_through_a_real_clone() {
+        let _home = TempHome::new();
+        let src = init_local_git_plugin_repo("two", "srv2", Some("tools/plugin"));
+        write_marketplace_with_source(
+            "subdir-mp",
+            "plugin-b",
+            &format!(r#"{{"source":"git-subdir","url":"file://{}","path":"tools/plugin"}}"#, src.display()),
+        );
+
+        let outcome = install_plugin("subdir-mp", "plugin-b").await.unwrap();
+        assert_eq!(outcome.skills, vec!["two".to_string()]);
+        assert_eq!(outcome.mcp_servers, vec!["srv2".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    #[tokio::test]
+    async fn install_of_an_unsupported_source_kind_errors_clearly() {
+        let _home = TempHome::new();
+        write_marketplace_with_source("npm-mp", "plugin-c", r#"{"source":"npm","package":"whatever"}"#);
+
+        let err = install_plugin("npm-mp", "plugin-c").await.unwrap_err();
+        assert!(err.contains("npm"), "{err}");
+        assert!(err.contains("not supported"), "{err}");
     }
 }

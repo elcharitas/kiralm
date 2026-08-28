@@ -25,32 +25,49 @@ async fn run(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// `git clone <url> <dest>`, real op -- what "Pull from git" on the
-/// project-home screen drives. `dest`'s parent is created if missing;
-/// `dest` itself must not already exist (git refuses a non-empty one).
-pub async fn clone(url: &str, dest: &Path) -> Result<(), String> {
+async fn clone_impl(url: &str, dest: &Path, extra_args: &[&str]) -> Result<(), String> {
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
     }
-    run(dest.parent().unwrap_or(dest), &["clone", url, &dest.to_string_lossy()]).await?;
+    let dest_str = dest.to_string_lossy().into_owned();
+    let mut args = vec!["clone"];
+    args.extend_from_slice(extra_args);
+    args.push(url);
+    args.push(&dest_str);
+    run(dest.parent().unwrap_or(dest), &args).await?;
     Ok(())
+}
+
+/// `git clone <url> <dest>`, real op -- what "Pull from git" on the
+/// project-home screen drives. `dest`'s parent is created if missing;
+/// `dest` itself must not already exist (git refuses a non-empty one).
+pub async fn clone(url: &str, dest: &Path) -> Result<(), String> {
+    clone_impl(url, dest, &[]).await
 }
 
 /// `git clone --depth 1 <url> <dest>` -- full history is never needed
 /// for a marketplace checkout. Same dest-must-not-exist contract as
 /// `clone` above.
 pub async fn shallow_clone(url: &str, dest: &Path) -> Result<(), String> {
-    if dest.exists() {
-        return Err(format!("{} already exists", dest.display()));
+    clone_impl(url, dest, &["--depth", "1"]).await
+}
+
+/// Clones `url` pinned to a ref/sha for a marketplace plugin source.
+/// A sha needs a full clone + checkout (shallow can't fetch an
+/// arbitrary commit); a branch/tag ref can stay shallow.
+pub async fn clone_at(url: &str, dest: &Path, git_ref: Option<&str>, sha: Option<&str>) -> Result<(), String> {
+    if let Some(sha) = sha {
+        clone(url, dest).await?;
+        run(dest, &["checkout", sha]).await?;
+        return Ok(());
     }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+    match git_ref {
+        Some(r) => clone_impl(url, dest, &["--depth", "1", "--branch", r]).await,
+        None => shallow_clone(url, dest).await,
     }
-    run(dest.parent().unwrap_or(dest), &["clone", "--depth", "1", url, &dest.to_string_lossy()]).await?;
-    Ok(())
 }
 
 /// `git pull --quiet` inside an existing clone -- the "fetch if already
