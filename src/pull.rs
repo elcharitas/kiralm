@@ -390,25 +390,33 @@ pub async fn download_and_verify(
     {
         let mut guard = state.write();
         let entry = guard.models.entry(canonical_id.clone()).or_default();
-        entry.verdict_cache = Some(match &load_result {
-            Ok(()) => VerdictCache {
-                engine_version: engine_version.clone(),
-                status: "supported".to_string(),
-                error: None,
-            },
-            Err(e) => VerdictCache {
-                engine_version: engine_version.clone(),
-                status: "unsupported".to_string(),
-                error: Some(e.clone()),
-            },
-        });
+        match &load_result {
+            Ok(()) => {
+                entry.verdict_cache = Some(VerdictCache {
+                    engine_version: engine_version.clone(),
+                    status: "supported".to_string(),
+                    error: None,
+                });
+            }
+            Err(f) if f.permanent => {
+                entry.verdict_cache = Some(VerdictCache {
+                    engine_version: engine_version.clone(),
+                    status: "unsupported".to_string(),
+                    error: Some(f.message.clone()),
+                });
+            }
+            // Transient failure: leave verdict_cache as-is so the normal
+            // RAM/MoE-ratio tier applies instead of a false permanent
+            // "unsupported", and a later load attempt can still succeed.
+            Err(_) => {}
+        }
         guard.save()?;
     }
 
     if let Some(tx) = &progress {
         let (phase, message) = match &load_result {
             Ok(()) => ("done".to_string(), None),
-            Err(e) => ("failed".to_string(), Some(e.clone())),
+            Err(f) => ("failed".to_string(), Some(f.message.clone())),
         };
         let _ = tx.send(PullProgress {
             canonical_id: canonical_id.clone(),
