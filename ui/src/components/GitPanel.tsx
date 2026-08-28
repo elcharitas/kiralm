@@ -69,7 +69,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
           disabled={!message.trim() || committing}
           onClick={commit}
         >
-          <GitCommit size={14} /> Commit
+          <GitCommit size={14} />Commit
         </button>
       </div>
 

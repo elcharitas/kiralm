@@ -98,10 +98,10 @@ export function SkillsPanel() {
     <div className="skills-panel">
       <div className="skills-panel-actions">
         <button type="button" className="btn" onClick={() => setAdding((v) => !v)}>
-          <Plus size={14} /> Paste markdown
+          <Plus size={14} />Paste markdown
         </button>
         <button type="button" className="btn" onClick={addFromFolder}>
-          <FolderOpen size={14} /> From folder
+          <FolderOpen size={14} />From folder
         </button>
       </div>
 

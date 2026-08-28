@@ -710,6 +710,9 @@
 /* Buttons + inputs */
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-radius: var(--radius);
   border: 1px solid var(--border-strong);
   background: var(--bg-inset);
