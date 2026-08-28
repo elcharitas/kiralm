@@ -141,8 +141,9 @@ export function RightPanel({
               : "right-panel-tab right-panel-tab-diff"
           }
           onClick={() => setTab("diff")}
+          title="Diff"
         >
-          <FileDiff size={14} /> Diff
+          <FileDiff size={14} /> <span className="right-panel-tab-label">Diff</span>
         </button>
         <button
           type="button"
@@ -152,8 +153,9 @@ export function RightPanel({
               : "right-panel-tab right-panel-tab-diff"
           }
           onClick={() => setTab("skills")}
+          title="Skills"
         >
-          <Sparkles size={14} /> Skills
+          <Sparkles size={14} /> <span className="right-panel-tab-label">Skills</span>
         </button>
         <button
           type="button"
@@ -163,8 +165,9 @@ export function RightPanel({
               : "right-panel-tab right-panel-tab-diff"
           }
           onClick={() => setTab("mcp")}
+          title="MCP"
         >
-          <Plug size={14} /> MCP
+          <Plug size={14} /> <span className="right-panel-tab-label">MCP</span>
         </button>
         <button
           type="button"
@@ -174,8 +177,9 @@ export function RightPanel({
               : "right-panel-tab right-panel-tab-diff"
           }
           onClick={() => setTab("plugins")}
+          title="Plugins"
         >
-          <Puzzle size={14} /> Plugins
+          <Puzzle size={14} /> <span className="right-panel-tab-label">Plugins</span>
         </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>

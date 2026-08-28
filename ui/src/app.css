@@ -1806,6 +1806,17 @@
   background: var(--border);
 }
 
+/* Icon-only until active, so the fixed tab row (Diff/Skills/MCP/
+   Plugins) stays compact -- the label only earns its space once
+   it's the thing you're actually looking at. */
+.right-panel-tab-diff .right-panel-tab-label {
+  display: none;
+}
+
+.right-panel-tab-diff.right-panel-tab-active .right-panel-tab-label {
+  display: inline;
+}
+
 .right-panel-tab-icon {
   color: var(--text-faint);
   flex-shrink: 0;
