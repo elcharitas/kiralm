@@ -173,11 +173,17 @@ fn main() {
                 // the webview shows its own connection error, honest enough.
             }
 
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("KiraLM")
-                .decorations(false)
-                .inner_size(1100.0, 760.0)
-                .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("KiraLM")
+                    .inner_size(1100.0, 760.0);
+            #[cfg(target_os = "macos")]
+            let window = window
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            #[cfg(not(target_os = "macos"))]
+            let window = window.decorations(false);
+            window.build()?;
 
             build_tray(app.handle())?;
             Ok(())
