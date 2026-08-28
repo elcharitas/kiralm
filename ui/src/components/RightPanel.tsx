@@ -21,7 +21,7 @@ import {
 import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
-import { formatBytes } from "../format";
+import { formatBytes, formatBytesPair } from "../format";
 import { GitPanel } from "./GitPanel";
 import { McpPanel } from "./McpPanel";
 import { PluginsPanel } from "./PluginsPanel";
@@ -321,9 +321,7 @@ function RamFooter({ status }: { status: StatusResponse }) {
         <div className="progress-track right-panel-ram-track">
           <div className="progress-fill" style={{ width: `${percent}%` }} />
         </div>
-        <span className="right-panel-ram-label mono">
-          {formatBytes(usedBytes)} / {formatBytes(totalBytes)}
-        </span>
+        <span className="right-panel-ram-label mono">{formatBytesPair(usedBytes, totalBytes)}</span>
       </div>
     </div>
   );
