@@ -242,6 +242,17 @@ export interface CatalogPlugin {
   installed: boolean;
 }
 
+// GET /api/models/catalog's per-row shape: kiralm-web's cloud catalog
+// local_pull rows, already synced to disk -- replaces the hardcoded
+// "pick a model to pull" list ModelsView.tsx used to ship with.
+export interface CloudPullSuggestion {
+  id: string;
+  name: string;
+  ref: string;
+  size_bytes: number | null;
+  description: string | null;
+}
+
 export interface CloudLoginStart {
   device_code: string;
   user_code: string;
@@ -265,6 +276,8 @@ export const api = {
 
   model: (id: string) =>
     fetch(`/api/models/${encodeURIComponent(id)}`).then((r) => asJson<ModelDetail>(r)),
+
+  modelsCatalog: () => fetch("/api/models/catalog").then((r) => asJson<{ data: CloudPullSuggestion[] }>(r)),
 
   pull: (ref: string) =>
     fetch("/api/models/pull", {
