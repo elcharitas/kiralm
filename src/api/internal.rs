@@ -54,6 +54,7 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/config", post(update_config))
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/models/pull", post(start_pull))
+        .route("/api/models/catalog", get(models_catalog))
         .route(
             "/api/models/:id",
             get(get_model).delete(delete_model),
@@ -244,6 +245,14 @@ fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
         "verdict_reason": m.verdict.as_ref().map(|v| v.reason.clone()),
         "verdict_tier": m.verdict.as_ref().map(|v| v.tier.as_str()),
     })
+}
+
+/// Real `kiralm pull` suggestions (kiralm-web's `local_pull` catalog
+/// rows, already synced to disk) for the Models settings view's "pick
+/// one to pull" list -- replaces a hardcoded array that used to live
+/// in the frontend.
+async fn models_catalog(State(_app): State<SharedState>) -> Response {
+    Json(json!({"data": crate::cloud::cached_pull_suggestions()})).into_response()
 }
 
 async fn get_model(State(app): State<SharedState>, Path(id): Path<String>) -> Response {

@@ -453,6 +453,15 @@ fn save_cache(models: &[CloudModel]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The cached catalog's `local_pull` rows -- curated `kiralm pull`
+/// suggestions for the Models settings view, distinct from the
+/// registry (which only routes `workers_ai`/cloud-invocable kinds).
+pub fn cached_pull_suggestions() -> Vec<CloudModel> {
+    load_cache()
+        .map(|c| c.models.into_iter().filter(|m| m.kind == "local_pull" && m.enabled).collect())
+        .unwrap_or_default()
+}
+
 /// `fetched_at` of whatever's cached on disk, or `None` if there's never
 /// been a successful fetch. Drives the "older than
 /// `catalog_sync_interval_secs`" staleness gate.
@@ -561,6 +570,78 @@ mod tests {
         assert_eq!(m.r#ref, "@cf/meta/llama-3.1-70b-instruct");
         assert_eq!(m.size_bytes, None);
         assert!(m.enabled);
+    }
+
+    #[test]
+    fn cached_pull_suggestions_filters_to_enabled_local_pull_only() {
+        let _guard = crate::config::HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("kiralm-cloud-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+
+        let models = vec![
+            CloudModel {
+                id: "a".into(),
+                name: "A".into(),
+                r#ref: "org/a:Q4_K_M".into(),
+                kind: "local_pull".into(),
+                size_bytes: Some(123),
+                description: None,
+                enabled: true,
+                sort_order: 0,
+            },
+            CloudModel {
+                id: "b".into(),
+                name: "B".into(),
+                r#ref: "org/b:Q4_K_M".into(),
+                kind: "local_pull".into(),
+                size_bytes: None,
+                description: None,
+                enabled: false,
+                sort_order: 0,
+            },
+            CloudModel {
+                id: "c".into(),
+                name: "C".into(),
+                r#ref: "@cf/c".into(),
+                kind: "workers_ai".into(),
+                size_bytes: None,
+                description: None,
+                enabled: true,
+                sort_order: 0,
+            },
+        ];
+        save_cache(&models).unwrap();
+
+        let suggestions = cached_pull_suggestions();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].id, "a");
+
+        if let Some(p) = prev {
+            std::env::set_var("HOME", p);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_pull_suggestions_is_empty_when_no_cache_exists() {
+        let _guard = crate::config::HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("kiralm-cloud-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+
+        assert!(cached_pull_suggestions().is_empty());
+
+        if let Some(p) = prev {
+            std::env::set_var("HOME", p);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
