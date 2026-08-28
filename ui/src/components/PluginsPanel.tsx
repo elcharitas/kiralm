@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type CatalogPlugin } from "../api";
 import { useDialogs } from "./Dialogs";
+import { Select } from "./Select";
 
 const sourceKindLabel: Record<CatalogPlugin["source_kind"], string> = {
   claude_marketplace: "Claude Marketplace",
@@ -16,9 +17,22 @@ const sourceKindBadgeClass: Record<CatalogPlugin["source_kind"], string> = {
 
 const PAGE_SIZE = 50;
 
+type InstalledFilter = "all" | "installed" | "uninstalled";
+
+const installedFilterOptions = [
+  { value: "all" as const, label: "All" },
+  { value: "installed" as const, label: "Installed" },
+  { value: "uninstalled" as const, label: "Not installed" },
+];
+
 // Module-scope so remounting the panel (every sidebar tab switch)
 // restores instantly instead of refetching 2000+ rows every time.
-let catalogCache: { query: string; items: CatalogPlugin[]; total: number } | null = null;
+let catalogCache: {
+  query: string;
+  installedFilter: InstalledFilter;
+  items: CatalogPlugin[];
+  total: number;
+} | null = null;
 
 // Single browsable catalog, sourced from kiralm-web (GET /api/plugins),
 // covering all three install backends (marketplace.rs, agent_plugin.rs,
@@ -28,6 +42,7 @@ let catalogCache: { query: string; items: CatalogPlugin[]; total: number } | nul
 export function PluginsPanel() {
   const [searchInput, setSearchInput] = useState(catalogCache?.query ?? "");
   const [query, setQuery] = useState(catalogCache?.query ?? "");
+  const [installedFilter, setInstalledFilter] = useState<InstalledFilter>(catalogCache?.installedFilter ?? "all");
   const [plugins, setPlugins] = useState<CatalogPlugin[]>(catalogCache?.items ?? []);
   const [total, setTotal] = useState(catalogCache?.total ?? 0);
   const [loading, setLoading] = useState(catalogCache === null);
@@ -44,16 +59,21 @@ export function PluginsPanel() {
   }, [searchInput]);
 
   useEffect(() => {
-    if (catalogCache !== null && catalogCache.query === query) return;
+    if (catalogCache !== null && catalogCache.query === query && catalogCache.installedFilter === installedFilter) return;
     let cancelled = false;
     setLoading(true);
     api
-      .listPluginCatalog({ q: query || undefined, offset: 0, limit: PAGE_SIZE })
+      .listPluginCatalog({
+        q: query || undefined,
+        offset: 0,
+        limit: PAGE_SIZE,
+        installed: installedFilter === "all" ? undefined : installedFilter,
+      })
       .then((res) => {
         if (cancelled) return;
         setPlugins(res.data);
         setTotal(res.total);
-        catalogCache = { query, items: res.data, total: res.total };
+        catalogCache = { query, installedFilter, items: res.data, total: res.total };
       })
       .catch(() => {})
       .finally(() => {
@@ -62,16 +82,21 @@ export function PluginsPanel() {
     return () => {
       cancelled = true;
     };
-  }, [query]);
+  }, [query, installedFilter]);
 
   const loadMore = async () => {
     if (loadingMore || plugins.length >= total) return;
     setLoadingMore(true);
     try {
-      const res = await api.listPluginCatalog({ q: query || undefined, offset: plugins.length, limit: PAGE_SIZE });
+      const res = await api.listPluginCatalog({
+        q: query || undefined,
+        offset: plugins.length,
+        limit: PAGE_SIZE,
+        installed: installedFilter === "all" ? undefined : installedFilter,
+      });
       setPlugins((prev) => {
         const next = [...prev, ...res.data];
-        catalogCache = { query, items: next, total: res.total };
+        catalogCache = { query, installedFilter, items: next, total: res.total };
         return next;
       });
       setTotal(res.total);
@@ -90,7 +115,7 @@ export function PluginsPanel() {
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [plugins.length, total, loading, loadingMore, query]);
+  }, [plugins.length, total, loading, loadingMore, query, installedFilter]);
 
   const patchInstalled = (id: string, installed: boolean) => {
     setPlugins((prev) => {
@@ -131,45 +156,55 @@ export function PluginsPanel() {
   };
 
   return (
-    <div className="skills-panel">
-      <input
-        className="mcp-field"
-        placeholder="Search plugins…"
-        value={searchInput}
-        onChange={(e) => setSearchInput(e.target.value)}
-      />
+    <div className="plugins-panel">
+      <div className="plugins-search-row">
+        <input
+          className="mcp-field plugins-search"
+          placeholder="Search plugins…"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+        />
+        <Select
+          triggerClassName="settings-select plugins-filter"
+          value={installedFilter}
+          onChange={setInstalledFilter}
+          options={installedFilterOptions}
+        />
+      </div>
 
-      {loading ? (
-        <p className="settings-hint">Loading…</p>
-      ) : plugins.length === 0 ? (
-        <p className="settings-hint">{query ? "No plugins match your search." : "No plugins available yet."}</p>
-      ) : (
-        <ul className="skills-list">
-          {plugins.map((p) => (
-            <li key={p.id} className="skills-row plugins-row">
-              <div className="skills-row-main">
-                <span className="mono truncate">{p.name}</span>
-                <span className={`badge ${sourceKindBadgeClass[p.source_kind]}`}>
-                  {sourceKindLabel[p.source_kind]}
-                </span>
-                <span className="settings-hint skills-row-desc truncate">{p.description ?? p.source}</span>
-              </div>
-              {pendingId === p.id ? (
-                <div className="plugins-progress" title={pendingAction === "install" ? "Installing…" : "Uninstalling…"} />
-              ) : p.installed ? (
-                <button type="button" className="btn plugins-btn" onClick={() => uninstall(p)}>
-                  Uninstall
-                </button>
-              ) : (
-                <button type="button" className="btn btn-accent plugins-btn" onClick={() => install(p)}>
-                  Install
-                </button>
-              )}
-            </li>
-          ))}
-          <li ref={sentinelRef} className="plugins-sentinel" aria-hidden="true" />
-        </ul>
-      )}
+      <div className="plugins-list-scroll">
+        {loading ? (
+          <p className="settings-hint">Loading…</p>
+        ) : plugins.length === 0 ? (
+          <p className="settings-hint">{query ? "No plugins match your search." : "No plugins available yet."}</p>
+        ) : (
+          <ul className="skills-list">
+            {plugins.map((p) => (
+              <li key={p.id} className="skills-row plugins-row">
+                <div className="skills-row-main">
+                  <span className="mono truncate">{p.name}</span>
+                  <span className={`badge ${sourceKindBadgeClass[p.source_kind]}`}>
+                    {sourceKindLabel[p.source_kind]}
+                  </span>
+                  <span className="settings-hint skills-row-desc truncate">{p.description ?? p.source}</span>
+                </div>
+                {pendingId === p.id ? (
+                  <div className="plugins-progress" title={pendingAction === "install" ? "Installing…" : "Uninstalling…"} />
+                ) : p.installed ? (
+                  <button type="button" className="btn plugins-btn" onClick={() => uninstall(p)}>
+                    Uninstall
+                  </button>
+                ) : (
+                  <button type="button" className="btn btn-accent plugins-btn" onClick={() => install(p)}>
+                    Install
+                  </button>
+                )}
+              </li>
+            ))}
+            <li ref={sentinelRef} className="plugins-sentinel" aria-hidden="true" />
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

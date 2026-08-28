@@ -39,11 +39,17 @@ struct ListCatalogQuery {
     q: Option<String>,
     offset: Option<usize>,
     limit: Option<usize>,
+    installed: Option<String>,
 }
 
 async fn list_catalog(State(_app): State<SharedState>, Query(params): Query<ListCatalogQuery>) -> Response {
+    let installed = match params.installed.as_deref() {
+        Some("installed") => Some(true),
+        Some("uninstalled") => Some(false),
+        _ => None,
+    };
     let all = plugin_catalog::cached_plugins();
-    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref());
+    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref(), installed);
     let total = filtered.len();
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(plugin_catalog::DEFAULT_CATALOG_LIMIT);

@@ -75,9 +75,11 @@ export function SettingsView({
         </button>
       </div>
 
-      <GeneralSettingsForm status={status} />
-      <RemoteAccessSection />
-      <DataSection />
+      <div className="settings-scroll">
+        <GeneralSettingsForm status={status} />
+        <RemoteAccessSection />
+        <DataSection />
+      </div>
     </div>
   );
 }
