@@ -55,7 +55,7 @@ pub async fn run(
         let resp = http_req
             .send()
             .await
-            .map_err(|e| AgentError::Other(format!("upstream request failed: {e}")))?;
+            .map_err(|e| AgentError::Other(super::upstream_unreachable("tool-calling loop", &e)))?;
 
         if bearer.is_some() && resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(AgentError::AuthRequired(
@@ -65,13 +65,13 @@ pub async fn run(
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentError::Other(format!("upstream returned {status}: {body}")));
+            return Err(AgentError::Other(super::upstream_error("tool-calling loop", status, &body)));
         }
 
         let parsed: ChatCompletionResponse = resp
             .json()
             .await
-            .map_err(|e| AgentError::Other(format!("upstream returned malformed response: {e}")))?;
+            .map_err(|e| AgentError::Other(super::upstream_malformed("tool-calling loop", &e)))?;
         let Some(choice) = parsed.choices.first() else {
             return Err(AgentError::Other("upstream returned no choices".to_string()));
         };
