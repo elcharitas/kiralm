@@ -719,12 +719,14 @@ mod tests {
     }
 
     fn test_state() -> SharedState {
+        let (tunnel_listener, _) = tokio::sync::mpsc::channel(1);
         Arc::new(super::super::AppState::new(
             Config::default(),
             Arc::new(ModelRegistry::new()),
             State::default(),
             crate::settings::Settings::default(),
             crate::chats::Chats::default(),
+            tunnel_listener,
         ))
     }
 

@@ -9,6 +9,9 @@ import App from "./App";
 import { DialogsProvider } from "./components/Dialogs";
 import { SettingsProvider, DEFAULT_SETTINGS } from "./settings";
 import { api } from "./api";
+import { installDesktopTransport } from "./desktopTransport";
+
+installDesktopTransport();
 
 // Settings are fetched once, before the first render, so every
 // consumer (ChatView, useSessions, ...) can read them synchronously

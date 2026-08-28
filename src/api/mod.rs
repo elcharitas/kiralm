@@ -83,6 +83,7 @@ pub struct AppState {
     /// `ensure_loaded`'s reaper task; `state.tunnel` is the persisted
     /// on/off record that survives a restart.
     pub tunnel_child: parking_lot::Mutex<Option<tokio::process::Child>>,
+    pub tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
     /// Chat generations, keyed by the UI's session id, decoupled from
     /// any one HTTP connection so generation keeps running/buffering
     /// server-side even once the UI stops watching it.
@@ -97,7 +98,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config, registry: Arc<ModelRegistry>, state: State, settings: Settings, chats: Chats) -> AppState {
+    pub fn new(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+    ) -> AppState {
         AppState {
             config,
             registry,
@@ -107,6 +115,7 @@ impl AppState {
             pulls: RwLock::new(HashMap::new()),
             logins: RwLock::new(HashMap::new()),
             tunnel_child: parking_lot::Mutex::new(None),
+            tunnel_listener,
             generations: RwLock::new(HashMap::new()),
             mcp: crate::mcp::McpRegistry::new(),
         }

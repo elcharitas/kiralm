@@ -1,11 +1,17 @@
 // prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::{Method, Request};
+use hyper_util::client::legacy::Client;
+use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 use serde::Deserialize;
-use std::net::{SocketAddr, TcpStream};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::ipc::Channel;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -16,44 +22,136 @@ use tauri_plugin_shell::ShellExt;
 /// (src/config.rs) -- only the one field this shell needs.
 #[derive(Deserialize, Default)]
 struct RawConfig {
-    http_listen: Option<String>,
+    unix_socket: Option<PathBuf>,
 }
 
 fn kiralm_home() -> PathBuf {
-    dirs::home_dir().expect("no home directory found").join(".kiralm")
+    if let Some(path) = std::env::var_os("KIRALM_HOME") {
+        return PathBuf::from(path);
+    }
+    dirs::home_dir()
+        .expect("no home directory found")
+        .join(".kiralm")
 }
 
 /// Reads the daemon's configured address, same default it uses.
-fn read_http_listen() -> String {
+fn read_unix_socket() -> PathBuf {
+    if let Some(path) = std::env::var_os("KIRALM_UNIX_SOCKET") {
+        return PathBuf::from(path);
+    }
     let path = kiralm_home().join("config.toml");
     let raw: RawConfig = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
         .unwrap_or_default();
-    raw.http_listen.unwrap_or_else(|| "127.0.0.1:11535".to_string())
+    raw.unix_socket
+        .unwrap_or_else(|| kiralm_home().join("kiralm.sock"))
 }
 
-fn is_listening(addr: &SocketAddr) -> bool {
-    TcpStream::connect_timeout(addr, Duration::from_millis(300)).is_ok()
+fn is_listening(path: &PathBuf) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
 /// Tracks whether *this* app spawned the daemon, so Quit only stops a
 /// daemon it owns -- never one it merely found already running.
 struct AppState {
     child: Option<CommandChild>,
+    unix_socket: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonResponseHead {
+    status: u16,
+    status_text: String,
+    headers: HashMap<String, String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase", tag = "event", content = "data")]
+enum DaemonResponseEvent {
+    Chunk(Vec<u8>),
+    End,
+    Error(String),
+}
+
+#[tauri::command]
+async fn daemon_request(
+    state: tauri::State<'_, Mutex<AppState>>,
+    request: DaemonRequest,
+    on_event: Channel<DaemonResponseEvent>,
+) -> Result<DaemonResponseHead, String> {
+    if !request.path.starts_with("/api/") && !request.path.starts_with("/v1/") {
+        return Err("desktop IPC only accepts KiraLM API paths".to_string());
+    }
+    let socket = state.lock().map_err(|e| e.to_string())?.unix_socket.clone();
+    let method = Method::from_bytes(request.method.as_bytes()).map_err(|e| e.to_string())?;
+    let uri: hyper::Uri = Uri::new(socket, &request.path).into();
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in request.headers {
+        builder = builder.header(name, value);
+    }
+    let body = Full::new(Bytes::from(request.body.unwrap_or_default()));
+    let response = Client::<UnixConnector, Full<Bytes>>::unix()
+        .request(builder.body(body).map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_string())))
+        .collect();
+    tauri::async_runtime::spawn(async move {
+        let mut body = response.into_body();
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => {
+                    if let Some(data) = frame.data_ref() {
+                        if on_event
+                            .send(DaemonResponseEvent::Chunk(data.to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = on_event.send(DaemonResponseEvent::Error(error.to_string()));
+                    return;
+                }
+            }
+        }
+        let _ = on_event.send(DaemonResponseEvent::End);
+    });
+    Ok(DaemonResponseHead {
+        status: status.as_u16(),
+        status_text: status.canonical_reason().unwrap_or_default().to_string(),
+        headers,
+    })
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(Mutex::new(AppState { child: None }))
+        .manage(Mutex::new(AppState {
+            child: None,
+            unix_socket: read_unix_socket(),
+        }))
+        .invoke_handler(tauri::generate_handler![daemon_request])
         .setup(|app| {
-            let addr_str = read_http_listen();
-            let addr: SocketAddr = addr_str
-                .parse()
-                .unwrap_or_else(|_| "127.0.0.1:11535".parse().unwrap());
+            let socket = read_unix_socket();
 
-            if !is_listening(&addr) {
+            if !is_listening(&socket) {
                 let (_rx, child) = app
                     .shell()
                     .sidecar("kiralm")
@@ -66,7 +164,7 @@ fn main() {
                 // Poll for readiness, same 50x100ms budget as the CLI's
                 // own ensure_daemon_running (src/cli.rs).
                 for _ in 0..50 {
-                    if is_listening(&addr) {
+                    if is_listening(&socket) {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(100));
@@ -75,11 +173,17 @@ fn main() {
                 // the webview shows its own connection error, honest enough.
             }
 
-            let url = format!("http://{addr}");
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
-                .title("KiraLM")
-                .inner_size(1100.0, 760.0)
-                .build()?;
+            let window =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                    .title("KiraLM")
+                    .inner_size(1100.0, 760.0);
+            #[cfg(target_os = "macos")]
+            let window = window
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            #[cfg(not(target_os = "macos"))]
+            let window = window.decorations(false);
+            window.build()?;
 
             build_tray(app.handle())?;
             Ok(())

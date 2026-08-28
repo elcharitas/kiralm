@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from "react";
 import { Trash2 } from "lucide-react";
 import {
   api,
+  subscribeSse,
   type CloudLoginStart,
   type CloudPullSuggestion,
   type CloudStatus,
@@ -214,25 +215,24 @@ function CloudLoginPanel({ onChange }: { onChange: () => void }) {
 
   useEffect(() => {
     if (!start) return;
-    const source = new EventSource(api.cloudLoginProgressUrl(start.device_code));
-    source.onmessage = (ev) => {
+    let close = () => {};
+    close = subscribeSse(api.cloudLoginProgressUrl(start.device_code), (raw) => {
       try {
-        const data = JSON.parse(ev.data) as { phase: string; message: string | null };
+        const data = JSON.parse(raw) as { phase: string; message: string | null };
         setProgress(data);
         if (data.phase === "success") {
-          source.close();
+          close();
           setStart(null);
           loadStatus();
           onChange();
         } else if (data.phase === "expired" || data.phase === "error") {
-          source.close();
+          close();
         }
       } catch {
         // ignore malformed frame, next one carries fresh state
       }
-    };
-    source.onerror = () => source.close();
-    return () => source.close();
+    }, () => close());
+    return close;
   }, [start]);
 
   const login = async () => {

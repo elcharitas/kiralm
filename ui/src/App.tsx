@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { RightPanel } from "./components/RightPanel";
+import { AppLogo } from "./components/AppLogo";
 import { ChatView } from "./views/ChatView";
 import { HomeView } from "./views/HomeView";
 import { SettingsView, type SettingsTab } from "./views/SettingsView";
@@ -109,7 +110,11 @@ export default function App() {
   ].join(" ");
 
   return (
-    <div className="app" style={{ gridTemplateColumns }}>
+    <div className="app" style={{ gridTemplateColumns }} data-tauri-drag-region>
+      <div className="desktop-title-brand" data-tauri-drag-region>
+        <AppLogo className="desktop-title-logo" />
+        <span>KiraLM</span>
+      </div>
       <Sidebar
         sessions={sessions}
         projects={projects}

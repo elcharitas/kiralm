@@ -277,6 +277,39 @@ async function asJson<T>(res: Response): Promise<T> {
   return body as T;
 }
 
+export function subscribeSse(
+  path: string,
+  onMessage: (data: string) => void,
+  onError: () => void,
+) {
+  const abort = new AbortController();
+  fetch(path, { signal: abort.signal })
+    .then(async (response) => {
+      if (!response.ok || !response.body) throw new Error(`${response.status} ${response.statusText}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const event = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          for (const line of event.split("\n")) {
+            if (line.startsWith("data:")) onMessage(line.slice(5).trim());
+          }
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+    })
+    .catch((error) => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) onError();
+    });
+  return () => abort.abort();
+}
+
 export const api = {
   status: () => fetch("/api/status").then((r) => asJson<StatusResponse>(r)),
 

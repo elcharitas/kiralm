@@ -14,7 +14,7 @@ export function TopBar({
   onClose: () => void;
 }) {
   return (
-    <header className="topbar">
+    <header className="topbar" data-tauri-drag-region>
       <div className="topbar-breadcrumb">
         {projectName && (
           <>

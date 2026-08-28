@@ -46,7 +46,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Runs the daemon in the foreground.
-    Serve,
+    Serve {
+        /// Also exposes the UI and API over HTTP for browser testing.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<String>,
+    },
     /// `<ref>` = org/repo:quant or org/repo/file.gguf.
     Pull { r#ref: String },
     /// All downloaded models + verdict.
@@ -94,14 +98,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     let cli = Cli::parse();
 
-    if let Command::Serve = cli.command {
-        let config = Config::load()?;
-        return run_serve(config).await;
-    }
-
     let config = Config::load()?;
     match cli.command {
-        Command::Serve => unreachable!(),
+        Command::Serve { http } => run_serve(config, http).await,
         Command::Pull { r#ref } => cli::pull(&config, &r#ref).await,
         Command::List => cli::list(&config).await,
         Command::Ps => cli::ps(&config).await,
@@ -143,9 +142,21 @@ fn repl_prompt() -> anyhow::Result<String> {
     Ok(line.trim().to_string())
 }
 
-/// Wires the daemon together: loads state + manifests into the registry,
-/// then serves the OpenAI/Anthropic/internal API on both listeners.
-async fn run_serve(config: Config) -> anyhow::Result<()> {
+pub enum TunnelListenerCommand {
+    Start(tokio::sync::oneshot::Sender<Result<(), String>>),
+    Stop,
+}
+
+pub async fn start_tunnel_listener(app: &Arc<AppState>) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.tunnel_listener
+        .send(TunnelListenerCommand::Start(tx))
+        .await
+        .map_err(|_| "tunnel listener manager stopped".to_string())?;
+    rx.await.map_err(|_| "tunnel listener manager stopped".to_string())?
+}
+
+async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Result<()> {
     let home = config::kiralm_home();
     std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(&config.model_dir)?;
@@ -159,12 +170,14 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     // Same registration path a fresh pull uses (api::register_model), so
     // a model is loadable identically whether it was there at boot or
     // just finished downloading.
+    let (tunnel_listener, tunnel_commands) = tokio::sync::mpsc::channel(2);
     let app_state = Arc::new(AppState::new(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
         settings::Settings::load(),
         chats::Chats::load(),
+        tunnel_listener,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
@@ -176,10 +189,6 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     let app_state_for_mcp = app_state.clone();
     let router = api::build_router(app_state);
 
-    // bind TCP first: if another daemon already owns this port, fail fast
-    // here instead of deleting and re-creating its live unix socket file.
-    let tcp_listener = tokio::net::TcpListener::bind(&config.http_listen).await?;
-
     if config.unix_socket.exists() {
         std::fs::remove_file(&config.unix_socket)?;
     }
@@ -188,33 +197,26 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
     }
     let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
 
-    // Third listener, bearer-checked -- the only thing `cloudflared`'s
-    // tunnel ingress ever points at.
-    // Bound unconditionally, same as `http_listen`; nothing reaches it
-    // from the public internet until `kiralm tunnel enable` configures
-    // the tunnel's ingress to target this port.
-    let tunnel_listener = tokio::net::TcpListener::bind(&config.tunnel.listen).await?;
+    tracing::info!("kiralm serving on {} (unix)", config.unix_socket.display());
 
-    tracing::info!(
-        "kiralm serving on {}, {} (unix), and {} (tunnel, bearer-checked)",
-        config.http_listen,
-        config.unix_socket.display(),
-        config.tunnel.listen
-    );
+    let http_task = if let Some(addr) = http_listen {
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        tracing::info!("browser target available at http://{addr}");
+        let http_router = router.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, http_router.into_make_service()).await {
+                tracing::error!("http listener stopped: {e}");
+            }
+        }))
+    } else {
+        None
+    };
 
-    let tcp_router = router.clone();
-    let tcp_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(tcp_listener, tcp_router.into_make_service()).await {
-            tracing::error!("tcp listener stopped: {e}");
-        }
-    });
-
-    let tunnel_router = router.clone().layer(axum::middleware::from_fn(tunnel_auth::require_tunnel_bearer));
-    let tunnel_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(tunnel_listener, tunnel_router.into_make_service()).await {
-            tracing::error!("tunnel listener stopped: {e}");
-        }
-    });
+    let tunnel_task = tokio::spawn(manage_tunnel_listener(
+        tunnel_commands,
+        config.tunnel.listen.clone(),
+        router.clone(),
+    ));
 
     let unix_task = tokio::spawn(serve_unix(unix_listener, router));
 
@@ -241,8 +243,51 @@ async fn run_serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    let _ = tokio::join!(tcp_task, unix_task, tunnel_task);
+    if let Some(http_task) = http_task {
+        let _ = tokio::join!(http_task, unix_task, tunnel_task);
+    } else {
+        let _ = tokio::join!(unix_task, tunnel_task);
+    }
     Ok(())
+}
+
+async fn manage_tunnel_listener(
+    mut commands: tokio::sync::mpsc::Receiver<TunnelListenerCommand>,
+    addr: String,
+    router: axum::Router,
+) {
+    let mut server: Option<tokio::task::JoinHandle<()>> = None;
+    while let Some(command) = commands.recv().await {
+        match command {
+            TunnelListenerCommand::Start(ready) => {
+                if server.is_some() {
+                    let _ = ready.send(Ok(()));
+                    continue;
+                }
+                match tokio::net::TcpListener::bind(&addr).await {
+                    Ok(listener) => {
+                        let tunnel_router = router
+                            .clone()
+                            .layer(axum::middleware::from_fn(tunnel_auth::require_tunnel_bearer));
+                        server = Some(tokio::spawn(async move {
+                            if let Err(e) = axum::serve(listener, tunnel_router.into_make_service()).await {
+                                tracing::error!("tunnel listener stopped: {e}");
+                            }
+                        }));
+                        let _ = ready.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = ready.send(Err(format!("failed to bind tunnel listener: {e}")));
+                    }
+                }
+            }
+            TunnelListenerCommand::Stop => {
+                if let Some(task) = server.take() {
+                    task.abort();
+                }
+            }
+        }
+    }
 }
 
 /// Both listeners route to the same handlers. axum 0.7's
