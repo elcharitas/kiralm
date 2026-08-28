@@ -73,20 +73,26 @@ pub fn cached_plugins() -> Vec<CloudPlugin> {
 pub const DEFAULT_CATALOG_LIMIT: usize = 50;
 pub const MAX_CATALOG_LIMIT: usize = 200;
 
-/// Case-insensitive substring match on name/description, kept as
-/// borrows so `is_installed` only runs on the page actually returned.
-pub fn filter_catalog<'a>(plugins: &'a [CloudPlugin], q: Option<&str>) -> Vec<&'a CloudPlugin> {
+/// Case-insensitive substring match on name/description, plus an
+/// optional installed/uninstalled split -- both applied before paging
+/// so `total` reflects the actually-filtered count.
+pub fn filter_catalog<'a>(
+    plugins: &'a [CloudPlugin],
+    q: Option<&str>,
+    installed: Option<bool>,
+) -> Vec<&'a CloudPlugin> {
     let needle = q.map(str::trim).filter(|s| !s.is_empty()).map(str::to_lowercase);
-    match needle {
-        None => plugins.iter().collect(),
-        Some(needle) => plugins
-            .iter()
-            .filter(|p| {
-                p.name.to_lowercase().contains(&needle)
-                    || p.description.as_deref().unwrap_or("").to_lowercase().contains(&needle)
-            })
-            .collect(),
-    }
+    plugins
+        .iter()
+        .filter(|p| match &needle {
+            None => true,
+            Some(needle) => {
+                p.name.to_lowercase().contains(needle)
+                    || p.description.as_deref().unwrap_or("").to_lowercase().contains(needle)
+            }
+        })
+        .filter(|p| installed.is_none_or(|want| is_installed(p) == want))
+        .collect()
 }
 
 /// Slices an already-filtered list; an out-of-range offset yields an
@@ -432,15 +438,54 @@ mod tests {
     fn filter_catalog_matches_name_or_description_case_insensitively() {
         let plugins =
             vec![described("a", "Alpha Tools", "linting"), described("b", "Beta", "ALPHA-flavored helper")];
-        let hits = filter_catalog(&plugins, Some("alpha"));
+        let hits = filter_catalog(&plugins, Some("alpha"), None);
         assert_eq!(hits.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]
     fn filter_catalog_empty_query_returns_everything() {
         let plugins = vec![described("a", "Alpha", "x"), described("b", "Beta", "y")];
-        assert_eq!(filter_catalog(&plugins, None).len(), 2);
-        assert_eq!(filter_catalog(&plugins, Some("  ")).len(), 2);
+        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
+        assert_eq!(filter_catalog(&plugins, Some("  "), None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn filter_catalog_installed_param_filters_before_paging_and_combines_with_q() {
+        let _home = TempHome::new();
+        let src = std::env::temp_dir().join(format!("kiralm-catalog-installed-filter-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("plugin.json"),
+            r#"{"$schema":"https://agent-plugins.org/schema/v1.json","name":"demo-plugin"}"#,
+        )
+        .unwrap();
+
+        let mut installed_row = row("i1", "agent_plugin", src.to_str().unwrap(), None);
+        installed_row.name = "Alpha Installed".to_string();
+        let uninstalled_row = described("u1", "Alpha Uninstalled", "not installed yet");
+        let plugins = vec![installed_row, uninstalled_row];
+
+        assert!(filter_catalog(&plugins, None, Some(true)).is_empty());
+        assert_eq!(filter_catalog(&plugins, None, Some(false)).len(), 2);
+        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
+
+        agent_plugin::install(src.to_str().unwrap()).await.unwrap();
+
+        assert_eq!(
+            filter_catalog(&plugins, None, Some(true)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["i1"]
+        );
+        assert_eq!(
+            filter_catalog(&plugins, None, Some(false)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["u1"]
+        );
+        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
+        assert_eq!(
+            filter_catalog(&plugins, Some("alpha"), Some(true)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["i1"]
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
     }
 
     #[test]

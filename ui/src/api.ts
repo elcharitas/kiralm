@@ -531,11 +531,14 @@ export const api = {
       asJson<PluginUninstallResult>(r),
     ),
 
-  listPluginCatalog: (params: { q?: string; offset?: number; limit?: number } = {}) => {
+  listPluginCatalog: (
+    params: { q?: string; offset?: number; limit?: number; installed?: "installed" | "uninstalled" } = {},
+  ) => {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.offset) qs.set("offset", String(params.offset));
     if (params.limit) qs.set("limit", String(params.limit));
+    if (params.installed) qs.set("installed", params.installed);
     const suffix = qs.toString();
     return fetch(`/api/plugins/catalog${suffix ? `?${suffix}` : ""}`).then((r) =>
       asJson<{ data: CatalogPlugin[]; total: number }>(r),
