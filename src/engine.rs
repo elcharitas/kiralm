@@ -68,6 +68,9 @@ fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
         "on".to_string(),
         "-ngl".to_string(),
         "99".to_string(),
+        // use the GGUF's own chat template (tool-call syntax lives there)
+        // instead of llama-server's generic built-in template
+        "--jinja".to_string(),
     ]
 }
 
