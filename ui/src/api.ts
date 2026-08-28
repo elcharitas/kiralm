@@ -518,8 +518,16 @@ export const api = {
       asJson<PluginUninstallResult>(r),
     ),
 
-  listPluginCatalog: () =>
-    fetch("/api/plugins/catalog").then((r) => asJson<{ data: CatalogPlugin[] }>(r)),
+  listPluginCatalog: (params: { q?: string; offset?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.limit) qs.set("limit", String(params.limit));
+    const suffix = qs.toString();
+    return fetch(`/api/plugins/catalog${suffix ? `?${suffix}` : ""}`).then((r) =>
+      asJson<{ data: CatalogPlugin[]; total: number }>(r),
+    );
+  },
 
   installCatalogPlugin: (id: string) =>
     fetch(`/api/plugins/catalog/${encodeURIComponent(id)}/install`, { method: "POST" }).then((r) =>
