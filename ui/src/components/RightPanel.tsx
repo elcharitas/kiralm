@@ -22,6 +22,7 @@ import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes, formatBytesPair } from "../format";
+import { Dial } from "./Dial";
 import { GitPanel } from "./GitPanel";
 import { McpPanel } from "./McpPanel";
 import { PluginsPanel } from "./PluginsPanel";
@@ -332,25 +333,7 @@ function RamFooter({ status }: { status: StatusResponse }) {
 // one glanceable indicator, no room for the labeled bar.
 function RamDial({ status }: { status: StatusResponse }) {
   const { usedBytes, totalBytes, availableBytes, percent } = ramUsage(status);
-  const r = 8;
-  const circumference = 2 * Math.PI * r;
-  const offset = circumference * (1 - percent / 100);
   return (
-    <svg width="20" height="20" viewBox="0 0 20 20" className="right-panel-ram-dial">
-      <title>{`${formatBytes(usedBytes)} / ${formatBytes(totalBytes)} (${formatBytes(availableBytes)} available)`}</title>
-      <circle cx="10" cy="10" r={r} className="right-panel-ram-dial-track" strokeWidth="2.5" fill="none" />
-      <circle
-        cx="10"
-        cy="10"
-        r={r}
-        className="right-panel-ram-dial-fill"
-        strokeWidth="2.5"
-        fill="none"
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={offset}
-        transform="rotate(-90 10 10)"
-      />
-    </svg>
+    <Dial percent={percent} title={`${formatBytes(usedBytes)} / ${formatBytes(totalBytes)} (${formatBytes(availableBytes)} available)`} />
   );
 }
