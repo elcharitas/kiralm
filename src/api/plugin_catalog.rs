@@ -49,14 +49,21 @@ async fn list_catalog(State(_app): State<SharedState>, Query(params): Query<List
         _ => None,
     };
     let all = plugin_catalog::cached_plugins();
-    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref(), installed);
+    // Built once and reused for both the filter step and the page's own
+    // `installed` field -- each backing file gets read once per request
+    // no matter how many of the ~2300 real rows reference it, not once
+    // per row (`plugin_catalog::is_installed` alone would re-read every
+    // referenced marketplace.json, skills.json, and mcp_servers.json for
+    // every single row it's called on).
+    let lookup = plugin_catalog::InstalledLookup::build(&all);
+    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref(), installed, &lookup);
     let total = filtered.len();
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.unwrap_or(plugin_catalog::DEFAULT_CATALOG_LIMIT);
     let rows: Vec<CatalogRow> = plugin_catalog::page(&filtered, offset, limit)
         .into_iter()
         .map(|plugin| {
-            let installed = plugin_catalog::is_installed(plugin);
+            let installed = lookup.is_installed(plugin);
             CatalogRow { plugin: plugin.clone(), installed }
         })
         .collect();

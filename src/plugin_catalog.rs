@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::config::kiralm_home;
-use crate::{agent_plugin, dsh, marketplace};
+use crate::{agent_plugin, dsh, marketplace, mcp, skills};
 
 /// The single `dsh` profile every catalog-sourced plugin installs into.
 /// Profiles aren't plugins to browse, so a dedicated hand-managed one
@@ -80,6 +80,7 @@ pub fn filter_catalog<'a>(
     plugins: &'a [CloudPlugin],
     q: Option<&str>,
     installed: Option<bool>,
+    lookup: &InstalledLookup,
 ) -> Vec<&'a CloudPlugin> {
     let needle = q.map(str::trim).filter(|s| !s.is_empty()).map(str::to_lowercase);
     plugins
@@ -91,7 +92,7 @@ pub fn filter_catalog<'a>(
                     || p.description.as_deref().unwrap_or("").to_lowercase().contains(needle)
             }
         })
-        .filter(|p| installed.is_none_or(|want| is_installed(p) == want))
+        .filter(|p| installed.is_none_or(|want| lookup.is_installed(p) == want))
         .collect()
 }
 
@@ -160,24 +161,55 @@ async fn sync_cloud_plugins_inner(api_base_url: &str) {
     }
 }
 
-/// Re-derives the same identifiers the three adapters already use and
-/// checks their real live state, rather than a separate persisted
-/// install-registry that could drift from what's actually on disk.
-pub fn is_installed(row: &CloudPlugin) -> bool {
-    match row.source_kind.as_str() {
-        "claude_marketplace" => {
-            let Some(plugin_name) = &row.plugin_name else { return false };
-            let Ok(slug) = marketplace::slug_from_url(&row.source) else { return false };
-            marketplace::get(&slug).is_ok() && marketplace::is_installed(&slug, plugin_name)
+/// Re-derives the same identifiers the three adapters (marketplace.rs,
+/// agent_plugin.rs, dsh.rs) already use for their own install state,
+/// but each backing store (skills.json, mcp_servers.json, each distinct
+/// marketplace.json, the agent_plugin registry, the dsh default
+/// profile) is read exactly once per `build()`, not once per catalog
+/// row -- a naive per-row version would re-read the same multi-MB
+/// marketplace.json thousands of times across the real ~2300-row
+/// catalog, most of which share one marketplace.
+pub struct InstalledLookup {
+    tagged: std::collections::HashSet<(String, String)>,
+    marketplace_known: std::collections::HashMap<String, bool>,
+    agent_plugin_sources: std::collections::HashSet<String>,
+    dsh_packages: std::collections::HashSet<String>,
+}
+
+impl InstalledLookup {
+    pub fn build(plugins: &[CloudPlugin]) -> Self {
+        let tagged: std::collections::HashSet<(String, String)> = skills::list()
+            .into_iter()
+            .filter_map(|s| s.installed_by)
+            .chain(mcp::load_configs().into_iter().filter_map(|c| c.installed_by))
+            .map(|r| (r.marketplace, r.plugin))
+            .collect();
+
+        let mut marketplace_known = std::collections::HashMap::new();
+        for row in plugins.iter().filter(|p| p.source_kind == "claude_marketplace") {
+            let Ok(slug) = marketplace::slug_from_url(&row.source) else { continue };
+            marketplace_known.entry(slug.clone()).or_insert_with(|| marketplace::get(&slug).is_ok());
         }
-        // agent_plugin's own registry records the literal `source` string
-        // given at install time -- the only stable handle before install,
-        // since the plugin's real name only exists inside its manifest.
-        "agent_plugin" => agent_plugin::list_installed().iter().any(|p| p.source == row.source),
-        "dsh" => dsh::list_plugins(DSH_DEFAULT_PROFILE)
-            .unwrap_or_default()
-            .contains(&row.source),
-        _ => false,
+
+        let agent_plugin_sources =
+            agent_plugin::list_installed().into_iter().map(|p| p.source).collect();
+        let dsh_packages = dsh::list_plugins(DSH_DEFAULT_PROFILE).unwrap_or_default().into_iter().collect();
+
+        InstalledLookup { tagged, marketplace_known, agent_plugin_sources, dsh_packages }
+    }
+
+    pub fn is_installed(&self, row: &CloudPlugin) -> bool {
+        match row.source_kind.as_str() {
+            "claude_marketplace" => {
+                let Some(plugin_name) = &row.plugin_name else { return false };
+                let Ok(slug) = marketplace::slug_from_url(&row.source) else { return false };
+                self.marketplace_known.get(&slug).copied().unwrap_or(false)
+                    && self.tagged.contains(&(slug, plugin_name.clone()))
+            }
+            "agent_plugin" => self.agent_plugin_sources.contains(&row.source),
+            "dsh" => self.dsh_packages.contains(&row.source),
+            _ => false,
+        }
     }
 }
 
@@ -264,6 +296,12 @@ pub async fn uninstall(dsh_bin: &str, row: &CloudPlugin) -> Result<CatalogUninst
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Single-row convenience wrapper over `InstalledLookup` for tests
+    /// that only care about one row at a time.
+    fn is_installed(row: &CloudPlugin) -> bool {
+        InstalledLookup::build(std::slice::from_ref(row)).is_installed(row)
+    }
 
     struct TempHome {
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -436,17 +474,21 @@ mod tests {
 
     #[test]
     fn filter_catalog_matches_name_or_description_case_insensitively() {
+        let _home = TempHome::new();
         let plugins =
             vec![described("a", "Alpha Tools", "linting"), described("b", "Beta", "ALPHA-flavored helper")];
-        let hits = filter_catalog(&plugins, Some("alpha"), None);
+        let lookup = InstalledLookup::build(&plugins);
+        let hits = filter_catalog(&plugins, Some("alpha"), None, &lookup);
         assert_eq!(hits.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
     }
 
     #[test]
     fn filter_catalog_empty_query_returns_everything() {
+        let _home = TempHome::new();
         let plugins = vec![described("a", "Alpha", "x"), described("b", "Beta", "y")];
-        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
-        assert_eq!(filter_catalog(&plugins, Some("  "), None).len(), 2);
+        let lookup = InstalledLookup::build(&plugins);
+        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
+        assert_eq!(filter_catalog(&plugins, Some("  "), None, &lookup).len(), 2);
     }
 
     #[tokio::test]
@@ -465,23 +507,30 @@ mod tests {
         let uninstalled_row = described("u1", "Alpha Uninstalled", "not installed yet");
         let plugins = vec![installed_row, uninstalled_row];
 
-        assert!(filter_catalog(&plugins, None, Some(true)).is_empty());
-        assert_eq!(filter_catalog(&plugins, None, Some(false)).len(), 2);
-        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
+        let lookup = InstalledLookup::build(&plugins);
+        assert!(filter_catalog(&plugins, None, Some(true), &lookup).is_empty());
+        assert_eq!(filter_catalog(&plugins, None, Some(false), &lookup).len(), 2);
+        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
 
         agent_plugin::install(src.to_str().unwrap()).await.unwrap();
+        // Rebuilt, same as a fresh request would -- InstalledLookup is a
+        // one-time snapshot, not a live view.
+        let lookup = InstalledLookup::build(&plugins);
 
         assert_eq!(
-            filter_catalog(&plugins, None, Some(true)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            filter_catalog(&plugins, None, Some(true), &lookup).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             vec!["i1"]
         );
         assert_eq!(
-            filter_catalog(&plugins, None, Some(false)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            filter_catalog(&plugins, None, Some(false), &lookup).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             vec!["u1"]
         );
-        assert_eq!(filter_catalog(&plugins, None, None).len(), 2);
+        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
         assert_eq!(
-            filter_catalog(&plugins, Some("alpha"), Some(true)).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            filter_catalog(&plugins, Some("alpha"), Some(true), &lookup)
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["i1"]
         );
 
