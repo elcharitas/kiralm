@@ -5,9 +5,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Eye,
   GitBranch,
   Lock,
   MoreHorizontal,
+  Pencil,
   Sparkles,
   Unlock,
   X,
@@ -19,6 +21,7 @@ import { changedFilesOf, codeBlockCountOf, stripCodeBlocks } from "../diff";
 import type { ChatSession, StoredMessage } from "../sessions";
 import { useSettings } from "../settings";
 import { Select } from "../components/Select";
+import { Markdown } from "../components/Markdown";
 
 function openRaw(text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
@@ -54,6 +57,7 @@ export function ChatView({
   // <think> pass before the real answer, only useful for reasoning models.
   const [thinking, setThinking] = useState(false);
   const [input, setInput] = useState("");
+  const [previewing, setPreviewing] = useState(false);
   const [liveText, setLiveText] = useState("");
   const [sending, setSending] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -77,6 +81,7 @@ export function ChatView({
   const compact = async () => {
     if (!effectiveModel || !session || compacting) return;
     setInput("");
+    setPreviewing(false);
     setError(null);
     setCompacting(true);
     try {
@@ -98,6 +103,7 @@ export function ChatView({
     const target = session ?? (await onEnsureSession());
     setError(null);
     setInput("");
+    setPreviewing(false);
 
     let baseMessages = target.messages;
     if (settings.auto_compact && shouldAutoCompact(baseMessages, effectiveModelObj?.context_length)) {
@@ -265,12 +271,14 @@ export function ChatView({
         {messages.map((m, i) =>
           m.role === "user" ? (
             <div key={i} className="turn-user">
-              <div className="chat-bubble chat-bubble-user">{m.content}</div>
+              <div className="chat-bubble chat-bubble-user">
+                <Markdown>{m.content}</Markdown>
+              </div>
             </div>
           ) : (
             <div key={i} className="turn-assistant">
               {stripCodeBlocks(m.content) && (
-                <div className="chat-text">{stripCodeBlocks(m.content)}</div>
+                <Markdown className="chat-text">{stripCodeBlocks(m.content)}</Markdown>
               )}
               {typeof m.durationMs === "number" && (
                 <>
@@ -372,7 +380,7 @@ export function ChatView({
         )}
         {isStreamingThisSession && (
           <div className="turn-assistant">
-            <div className="chat-text">{liveText || "…"}</div>
+            {liveText ? <Markdown className="chat-text">{liveText}</Markdown> : <div className="chat-text">…</div>}
           </div>
         )}
       </div>
@@ -397,32 +405,47 @@ export function ChatView({
               </button>
             </div>
           )}
-          <textarea
-            className="composer-input"
-            placeholder={
-              compacting
-                ? "Compacting chat…"
-                : effectiveModel
-                  ? "Ask about your project, a file, or some connected tool… ('/compact' to summarize older messages)"
-                  : "Pull a model first"
-            }
-            value={input}
-            disabled={!effectiveModel || compacting}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter") return;
-              // Default: Enter sends, Shift+Enter for a newline. If the
-              // user's flipped "Enter sends" off in Settings, it's the
-              // other way around: Enter is a newline, Ctrl/Cmd+Enter sends.
-              const sends = settings.send_on_enter ? !e.shiftKey : e.metaKey || e.ctrlKey;
-              if (sends) {
-                e.preventDefault();
-                send();
+          {previewing ? (
+            <Markdown className="composer-input composer-preview">
+              {input || "Nothing to preview yet."}
+            </Markdown>
+          ) : (
+            <textarea
+              className="composer-input"
+              placeholder={
+                compacting
+                  ? "Compacting chat…"
+                  : effectiveModel
+                    ? "Ask about your project, a file, or some connected tool… ('/compact' to summarize older messages)"
+                    : "Pull a model first"
               }
-            }}
-          />
+              value={input}
+              disabled={!effectiveModel || compacting}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                // Default: Enter sends, Shift+Enter for a newline. If the
+                // user's flipped "Enter sends" off in Settings, it's the
+                // other way around: Enter is a newline, Ctrl/Cmd+Enter sends.
+                const sends = settings.send_on_enter ? !e.shiftKey : e.metaKey || e.ctrlKey;
+                if (sends) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+            />
+          )}
           <div className="composer-toolbar">
             <div className="composer-chips">
+              <button
+                type="button"
+                className="chip-select composer-preview-toggle"
+                title={previewing ? "Back to editing" : "Preview markdown"}
+                onClick={() => setPreviewing((p) => !p)}
+              >
+                {previewing ? <Pencil size={12} /> : <Eye size={12} />}
+                {previewing ? "Write" : "Preview"}
+              </button>
               <Select
                 triggerClassName="chip-select chip-select-model"
                 icon={<Sparkles size={12} className="chip-select-flare" />}

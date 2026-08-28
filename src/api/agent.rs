@@ -11,7 +11,9 @@
 
 use std::path::Path;
 
-use super::openai::{ChatCompletionRequest, ChatCompletionResponse, ChatContent, ChatMessage};
+use super::openai::{
+    ChatCompletionRequest, ChatCompletionResponse, ChatContent, ChatMessage, ToolCall, ToolCallFunction,
+};
 use crate::mcp::McpRegistry;
 use crate::tools::{self, Permission, ToolStep};
 
@@ -78,7 +80,14 @@ pub async fn run(
         let tool_calls = choice.message.tool_calls.clone();
         let assistant_content = choice.message.content.clone();
 
-        let Some(calls) = tool_calls.filter(|c| !c.is_empty()) else {
+        // A model with no native tool-call support (or a template --jinja
+        // couldn't fix) may still emit the widely-used Hermes/Qwen
+        // <tool_call>{...}</tool_call> text convention. Recover those so a
+        // "dumb" model isn't stuck giving up after one plain-text turn.
+        let calls = tool_calls
+            .filter(|c| !c.is_empty())
+            .or_else(|| non_empty(parse_text_tool_calls(assistant_content.as_deref().unwrap_or_default())));
+        let Some(calls) = calls else {
             return Ok((parsed, steps));
         };
 
@@ -128,6 +137,39 @@ fn restrict_tools_to_loaded_skill(req: &mut ChatCompletionRequest, load_skill_ar
     if let Some(defs) = &mut req.tools {
         defs.retain(|d| d["function"]["name"].as_str().is_some_and(|n| allowed.contains(n)));
     }
+}
+
+fn non_empty(calls: Vec<ToolCall>) -> Option<Vec<ToolCall>> {
+    (!calls.is_empty()).then_some(calls)
+}
+
+/// Only this exact tag is trusted, so an ordinary answer that happens to
+/// contain JSON-looking prose can't misfire into executing a tool.
+fn parse_text_tool_calls(content: &str) -> Vec<ToolCall> {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+    let mut calls = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(CLOSE) else { break };
+        let body = after[..end].trim();
+        rest = &after[end + CLOSE.len()..];
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else { continue };
+        let Some(name) = value.get("name").and_then(|v| v.as_str()) else { continue };
+        let Some(arguments) = value.get("arguments").or_else(|| value.get("parameters")) else { continue };
+        let arguments = match arguments {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        calls.push(ToolCall {
+            id: format!("fallback-{}", uuid::Uuid::new_v4()),
+            kind: "function".to_string(),
+            function: ToolCallFunction { name: name.to_string(), arguments },
+        });
+    }
+    calls
 }
 
 #[cfg(test)]
@@ -211,5 +253,37 @@ mod tests {
         let mut req = fake_req(&["read_file", "write_file"]);
         restrict_tools_to_loaded_skill(&mut req, r#"{"name":"nope"}"#);
         assert_eq!(req.tools.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_text_tool_calls_recovers_a_single_tagged_call() {
+        let content = r#"Sure, let me check.
+<tool_call>
+{"name": "read_file", "arguments": {"path": "src/main.rs"}}
+</tool_call>"#;
+        let calls = parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_file");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
+        assert_eq!(args["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn parse_text_tool_calls_recovers_multiple_calls_in_one_turn() {
+        let content = r#"<tool_call>{"name": "a", "arguments": {}}</tool_call>
+<tool_call>{"name": "b", "parameters": {"x": 1}}</tool_call>"#;
+        let calls = parse_text_tool_calls(content);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "a");
+        assert_eq!(calls[1].function.name, "b");
+        assert_eq!(calls[1].function.arguments, r#"{"x":1}"#);
+    }
+
+    #[test]
+    fn parse_text_tool_calls_ignores_ordinary_prose_and_malformed_bodies() {
+        assert!(parse_text_tool_calls("Here's a JSON example: {\"name\": \"x\"}").is_empty());
+        assert!(parse_text_tool_calls("<tool_call>not json</tool_call>").is_empty());
+        assert!(parse_text_tool_calls("<tool_call>{\"arguments\": {}}</tool_call>").is_empty());
+        assert!(parse_text_tool_calls("no tags here at all").is_empty());
     }
 }
