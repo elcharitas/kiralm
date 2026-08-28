@@ -14,6 +14,10 @@
   transition: grid-template-columns 0.15s ease;
 }
 
+.tauri-macos .app {
+  padding-top: 40px;
+}
+
 .sidebar,
 .topbar,
 .main-body,

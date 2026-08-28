@@ -18,6 +18,9 @@ function isDesktopApiRequest(input: RequestInfo | URL) {
 
 export function installDesktopTransport() {
   if (!("__TAURI_INTERNALS__" in window)) return;
+  if (navigator.userAgent.includes("Macintosh")) {
+    document.documentElement.classList.add("tauri-macos");
+  }
   const browserFetch = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     if (!isDesktopApiRequest(input)) return browserFetch(input, init);
