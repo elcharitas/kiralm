@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type CatalogPlugin } from "../api";
 import { useDialogs } from "./Dialogs";
 
@@ -14,96 +14,162 @@ const sourceKindBadgeClass: Record<CatalogPlugin["source_kind"], string> = {
   dsh: "badge-bad",
 };
 
+const PAGE_SIZE = 50;
+
+// Module-scope so remounting the panel (every sidebar tab switch)
+// restores instantly instead of refetching 2000+ rows every time.
+let catalogCache: { query: string; items: CatalogPlugin[]; total: number } | null = null;
+
 // Single browsable catalog, sourced from kiralm-web (GET /api/plugins),
 // covering all three install backends (marketplace.rs, agent_plugin.rs,
 // dsh.rs) behind one Install/Uninstall button each -- no URL/path/
 // package text input anywhere here, the source is baked into the
 // catalog row server-side.
 export function PluginsPanel() {
-  const [plugins, setPlugins] = useState<CatalogPlugin[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [searchInput, setSearchInput] = useState(catalogCache?.query ?? "");
+  const [query, setQuery] = useState(catalogCache?.query ?? "");
+  const [plugins, setPlugins] = useState<CatalogPlugin[]>(catalogCache?.items ?? []);
+  const [total, setTotal] = useState(catalogCache?.total ?? 0);
+  const [loading, setLoading] = useState(catalogCache === null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<"install" | "uninstall" | null>(null);
+  const sentinelRef = useRef<HTMLLIElement | null>(null);
   const { toast } = useDialogs();
 
-  const load = () => api.listPluginCatalog().then((d) => setPlugins(d.data), () => {});
+  // Debounce typing before it becomes the query that actually re-fetches.
+  useEffect(() => {
+    const id = setTimeout(() => setQuery(searchInput), 250);
+    return () => clearTimeout(id);
+  }, [searchInput]);
 
   useEffect(() => {
-    load().finally(() => setLoading(false));
-  }, []);
+    if (catalogCache !== null && catalogCache.query === query) return;
+    let cancelled = false;
+    setLoading(true);
+    api
+      .listPluginCatalog({ q: query || undefined, offset: 0, limit: PAGE_SIZE })
+      .then((res) => {
+        if (cancelled) return;
+        setPlugins(res.data);
+        setTotal(res.total);
+        catalogCache = { query, items: res.data, total: res.total };
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [query]);
+
+  const loadMore = async () => {
+    if (loadingMore || plugins.length >= total) return;
+    setLoadingMore(true);
+    try {
+      const res = await api.listPluginCatalog({ q: query || undefined, offset: plugins.length, limit: PAGE_SIZE });
+      setPlugins((prev) => {
+        const next = [...prev, ...res.data];
+        catalogCache = { query, items: next, total: res.total };
+        return next;
+      });
+      setTotal(res.total);
+    } catch {
+      // sentinel stays visible, next scroll/intersection retries
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || loading || loadingMore || plugins.length >= total) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) loadMore();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [plugins.length, total, loading, loadingMore, query]);
+
+  const patchInstalled = (id: string, installed: boolean) => {
+    setPlugins((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, installed } : p));
+      if (catalogCache) catalogCache = { ...catalogCache, items: next };
+      return next;
+    });
+  };
 
   const install = async (p: CatalogPlugin) => {
     setPendingId(p.id);
+    setPendingAction("install");
     try {
       await api.installCatalogPlugin(p.id);
-      await load();
+      patchInstalled(p.id, true);
       toast(`${p.name} installed`, "success");
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     } finally {
       setPendingId(null);
+      setPendingAction(null);
     }
   };
 
   const uninstall = async (p: CatalogPlugin) => {
     setPendingId(p.id);
+    setPendingAction("uninstall");
     try {
       await api.uninstallCatalogPlugin(p.id);
-      await load();
+      patchInstalled(p.id, false);
       toast(`${p.name} uninstalled`, "info");
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     } finally {
       setPendingId(null);
+      setPendingAction(null);
     }
   };
 
-  if (loading) {
-    return (
-      <div className="skills-panel">
-        <p className="settings-hint">Loading…</p>
-      </div>
-    );
-  }
-
-  if (plugins.length === 0) {
-    return (
-      <div className="skills-panel">
-        <p className="settings-hint">No plugins available yet.</p>
-      </div>
-    );
-  }
-
   return (
     <div className="skills-panel">
-      <ul className="skills-list">
-        {plugins.map((p) => (
-          <li key={p.id} className="skills-row">
-            <div className="skills-row-main">
-              <span className="mono truncate">{p.name}</span>
-              <span className={`badge ${sourceKindBadgeClass[p.source_kind]}`}>
-                {sourceKindLabel[p.source_kind]}
-              </span>
-              <span className="settings-hint skills-row-desc truncate">
-                {p.description ?? p.source}
-              </span>
-            </div>
-            {p.installed ? (
-              <button type="button" className="btn" disabled={pendingId === p.id} onClick={() => uninstall(p)}>
-                {pendingId === p.id ? "Uninstalling…" : "Uninstall"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-accent"
-                disabled={pendingId === p.id}
-                onClick={() => install(p)}
-              >
-                {pendingId === p.id ? "Installing…" : "Install"}
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
+      <input
+        className="mcp-field"
+        placeholder="Search plugins…"
+        value={searchInput}
+        onChange={(e) => setSearchInput(e.target.value)}
+      />
+
+      {loading ? (
+        <p className="settings-hint">Loading…</p>
+      ) : plugins.length === 0 ? (
+        <p className="settings-hint">{query ? "No plugins match your search." : "No plugins available yet."}</p>
+      ) : (
+        <ul className="skills-list">
+          {plugins.map((p) => (
+            <li key={p.id} className="skills-row plugins-row">
+              <div className="skills-row-main">
+                <span className="mono truncate">{p.name}</span>
+                <span className={`badge ${sourceKindBadgeClass[p.source_kind]}`}>
+                  {sourceKindLabel[p.source_kind]}
+                </span>
+                <span className="settings-hint skills-row-desc truncate">{p.description ?? p.source}</span>
+              </div>
+              {pendingId === p.id ? (
+                <div className="plugins-progress" title={pendingAction === "install" ? "Installing…" : "Uninstalling…"} />
+              ) : p.installed ? (
+                <button type="button" className="btn plugins-btn" onClick={() => uninstall(p)}>
+                  Uninstall
+                </button>
+              ) : (
+                <button type="button" className="btn btn-accent plugins-btn" onClick={() => install(p)}>
+                  Install
+                </button>
+              )}
+            </li>
+          ))}
+          <li ref={sentinelRef} className="plugins-sentinel" aria-hidden="true" />
+        </ul>
+      )}
     </div>
   );
 }
