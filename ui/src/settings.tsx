@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   font: "default",
   sidebar_collapsed: false,
   collapsed_workspaces: [],
+  auto_compact: true,
 };
 
 const LINE_HEIGHTS: Record<AppSettings["line_height"], string> = {

@@ -215,6 +215,15 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
             onChange={(e) => patchSettings({ default_hot_on_pull: e.target.checked })}
           />
         </label>
+        <label className="settings-toggle">
+          <span>Automatically compact long chats (summarize older messages instead of resending them)</span>
+          <input
+            type="checkbox"
+            className="switch-input"
+            checked={settings.auto_compact}
+            onChange={(e) => patchSettings({ auto_compact: e.target.checked })}
+          />
+        </label>
       </section>
 
       <section className="settings-section">

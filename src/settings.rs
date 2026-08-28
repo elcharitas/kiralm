@@ -30,6 +30,11 @@ pub struct Settings {
     pub sidebar_collapsed: bool,
     /// Project ids whose chat list is collapsed in the sidebar.
     pub collapsed_workspaces: Vec<String>,
+    /// Whether the UI should summarize a chat's older messages once it
+    /// grows large, instead of always resending the full history. The
+    /// summarization itself is client-driven (a plain chat-completion
+    /// call), this flag just gates whether it fires automatically.
+    pub auto_compact: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +48,7 @@ impl Default for Settings {
             font: "default".to_string(),
             sidebar_collapsed: false,
             collapsed_workspaces: Vec::new(),
+            auto_compact: true,
         }
     }
 }

@@ -188,6 +188,21 @@ fn build_tool_defs(server: &str, tools: &[Tool]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Hard ceiling on how many MCP tool defs get merged into a single
+/// request -- a handful of heavily-tooled servers is fine, but nothing
+/// else stops dozens of servers from bloating every turn's request with
+/// tool schemas.
+const MAX_TOOL_DEFS: usize = 60;
+
+fn cap_tool_defs(all: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    if all.len() > MAX_TOOL_DEFS {
+        tracing::warn!("mcp: {} tools available across connected servers, capping at {MAX_TOOL_DEFS}", all.len());
+        all.into_iter().take(MAX_TOOL_DEFS).collect()
+    } else {
+        all
+    }
+}
+
 fn render_content(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -268,14 +283,16 @@ impl McpRegistry {
     /// Every connected server's tools, namespaced and merge-ready for
     /// `tools::tool_defs()`. Failed servers contribute nothing.
     pub fn tool_defs(&self) -> Vec<serde_json::Value> {
-        self.conns
+        let all: Vec<_> = self
+            .conns
             .read()
             .iter()
             .flat_map(|(server, entry)| match entry {
                 McpEntry::Connected(conn) => build_tool_defs(server, &conn.tools.read()),
                 McpEntry::Failed(_) => Vec::new(),
             })
-            .collect()
+            .collect();
+        cap_tool_defs(all)
     }
 
     /// Routes one `mcp__<server>__<tool>` call to its server's real
@@ -366,6 +383,20 @@ mod tests {
     fn missing_config_file_is_empty_not_an_error() {
         let path = tmp_path();
         assert!(load_configs_from(&path).is_empty());
+    }
+
+    #[test]
+    fn cap_tool_defs_leaves_a_small_list_untouched() {
+        let defs: Vec<serde_json::Value> = (0..10).map(|i| json!({"i": i})).collect();
+        assert_eq!(cap_tool_defs(defs.clone()), defs);
+    }
+
+    #[test]
+    fn cap_tool_defs_truncates_past_the_max() {
+        let defs: Vec<serde_json::Value> = (0..80).map(|i| json!({"i": i})).collect();
+        let capped = cap_tool_defs(defs);
+        assert_eq!(capped.len(), 60);
+        assert_eq!(capped[0]["i"], 0);
     }
 
     #[test]
