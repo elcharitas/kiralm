@@ -1,8 +1,8 @@
 //! `/api/plugins/catalog*` -- the unified cloud-hosted plugin catalog:
-//! browse, install, uninstall across all three source kinds. Dispatch
-//! logic lives in plugin_catalog.rs; this layer's own job is the same
-//! live-mcp-registry wiring api/marketplace.rs and api/agent_plugin.rs
-//! do for their own installs.
+//! browse, install, uninstall across all three source kinds. Live proxy
+//! to kiralm-web plus dispatch logic lives in plugin_catalog.rs; this
+//! layer's own job is the same live-mcp-registry wiring api/marketplace.rs
+//! and api/agent_plugin.rs do for their own installs.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -42,46 +42,49 @@ struct ListCatalogQuery {
     installed: Option<String>,
 }
 
-async fn list_catalog(State(_app): State<SharedState>, Query(params): Query<ListCatalogQuery>) -> Response {
+async fn list_catalog(State(app): State<SharedState>, Query(params): Query<ListCatalogQuery>) -> Response {
     let installed = match params.installed.as_deref() {
         Some("installed") => Some(true),
         Some("uninstalled") => Some(false),
         _ => None,
     };
-    let all = plugin_catalog::cached_plugins();
-    // Built once and reused for both the filter step and the page's own
-    // `installed` field -- each backing file gets read once per request
-    // no matter how many of the ~2300 real rows reference it, not once
-    // per row (`plugin_catalog::is_installed` alone would re-read every
-    // referenced marketplace.json, skills.json, and mcp_servers.json for
-    // every single row it's called on).
-    let lookup = plugin_catalog::InstalledLookup::build(&all);
-    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref(), installed, &lookup);
-    let total = filtered.len();
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.unwrap_or(plugin_catalog::DEFAULT_CATALOG_LIMIT);
-    let rows: Vec<CatalogRow> = plugin_catalog::page(&filtered, offset, limit)
-        .into_iter()
-        .map(|plugin| {
-            let installed = lookup.is_installed(plugin);
-            CatalogRow { plugin: plugin.clone(), installed }
-        })
-        .collect();
-    Json(json!({"data": rows, "total": total})).into_response()
-}
+    let limit = params.limit.unwrap_or(plugin_catalog::DEFAULT_CATALOG_LIMIT).min(plugin_catalog::MAX_CATALOG_LIMIT);
 
-fn find_row(id: &str) -> Option<CloudPlugin> {
-    plugin_catalog::cached_plugins().into_iter().find(|p| p.id == id)
+    let client = match plugin_catalog::build_client() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+
+    match plugin_catalog::list_catalog_page(&client, &app.config.cloud.api_base_url, params.q.as_deref(), installed, offset, limit)
+        .await
+    {
+        Ok((rows, total)) => {
+            let rows: Vec<CatalogRow> =
+                rows.into_iter().map(|(plugin, installed)| CatalogRow { plugin, installed }).collect();
+            Json(json!({"data": rows, "total": total})).into_response()
+        }
+        // No cache to fall back to on this live path -- a real error,
+        // not a silent empty page.
+        Err(e) => err(StatusCode::BAD_GATEWAY, format!("plugin catalog unavailable: {e}")),
+    }
 }
 
 async fn install(State(app): State<SharedState>, Path(id): Path<String>) -> Response {
-    let Some(row) = find_row(&id) else {
-        return err(StatusCode::NOT_FOUND, format!("catalog entry '{id}' not found"));
+    let client = match plugin_catalog::build_client() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let row = match plugin_catalog::find_row(&client, &app.config.cloud.api_base_url, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return err(StatusCode::NOT_FOUND, format!("catalog entry '{id}' not found")),
+        Err(e) => return err(StatusCode::BAD_GATEWAY, format!("plugin catalog unavailable: {e}")),
     };
     let outcome = match plugin_catalog::install(&app.config.dsh.bin, &row).await {
         Ok(o) => o,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
+    plugin_catalog::mark_installed(&id);
     match outcome {
         CatalogInstallOutcome::Marketplace(o) => {
             for name in &o.mcp_servers {
@@ -110,13 +113,20 @@ async fn install(State(app): State<SharedState>, Path(id): Path<String>) -> Resp
 }
 
 async fn uninstall(State(app): State<SharedState>, Path(id): Path<String>) -> Response {
-    let Some(row) = find_row(&id) else {
-        return err(StatusCode::NOT_FOUND, format!("catalog entry '{id}' not found"));
+    let client = match plugin_catalog::build_client() {
+        Ok(c) => c,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let row = match plugin_catalog::find_row(&client, &app.config.cloud.api_base_url, &id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return err(StatusCode::NOT_FOUND, format!("catalog entry '{id}' not found")),
+        Err(e) => return err(StatusCode::BAD_GATEWAY, format!("plugin catalog unavailable: {e}")),
     };
     let outcome = match plugin_catalog::uninstall(&app.config.dsh.bin, &row).await {
         Ok(o) => o,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
+    plugin_catalog::mark_uninstalled(&id);
     match outcome {
         CatalogUninstallOutcome::Registry(o) => {
             for name in &o.mcp_servers {
