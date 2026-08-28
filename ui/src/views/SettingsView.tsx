@@ -50,7 +50,7 @@ export function SettingsView({
 }) {
   if (tab === "models") {
     return (
-      <div className="settings-wrap settings-wrap-flush">
+      <div className="settings-wrap">
         <div className="settings-tabs">
           <button type="button" className="settings-tab" onClick={() => onTabChange("general")}>
             General

@@ -628,14 +628,6 @@
   gap: 20px;
 }
 
-.settings-wrap-flush {
-  padding: 24px 0 0;
-}
-
-.settings-wrap-flush .settings-tabs {
-  padding: 0 32px;
-}
-
 .settings-tabs {
   display: flex;
   gap: 4px;
@@ -668,11 +660,9 @@
   border-bottom-color: var(--accent);
 }
 
+/* Nested inside .settings-wrap, which already centers/insets the box
+   -- its own max-width/padding would double up and drift apart. */
 .view {
-  max-width: 1080px;
-  margin: 0 auto;
-  width: 100%;
-  padding: 24px 32px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -710,6 +700,9 @@
 /* Buttons + inputs */
 
 .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-radius: var(--radius);
   border: 1px solid var(--border-strong);
   background: var(--bg-inset);
@@ -755,10 +748,15 @@
 .pull-form {
   display: flex;
   gap: 8px;
+  /* Nested flex row: without this, its own automatic min-content
+     (not the input's) is what blocks shrinking below it. */
+  min-width: 0;
 }
 
 .pull-input {
-  width: 320px;
+  flex: 1;
+  min-width: 0;
+  max-width: 320px;
   background: var(--bg-inset);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -2249,6 +2247,13 @@
 
 .plugins-sentinel {
   height: 1px;
+}
+
+/* Stale-while-revalidate: old rows stay put (dimmed) instead of
+   flashing to empty while a search/filter change re-fetches. */
+.plugins-list-revalidating {
+  opacity: 0.5;
+  transition: opacity 0.1s ease;
 }
 
 .switch-input-wrap {

@@ -10,6 +10,22 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+// Both numbers in one unit (the total's natural one), not each
+// independently -- otherwise e.g. used=900MB/total=16GB would each
+// pick their own unit and read as the nonsensical "900/16 GB".
+export function formatBytesPair(used: number, total: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = total;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  const scaled = used / 1024 ** i;
+  const digits = i === 0 ? 0 : 1;
+  return `${scaled.toFixed(digits)}/${n.toFixed(digits)} ${units[i]}`;
+}
+
 export function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);
   if (seconds < 1) return "<1s";

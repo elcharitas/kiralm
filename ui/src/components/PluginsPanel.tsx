@@ -46,6 +46,7 @@ export function PluginsPanel() {
   const [plugins, setPlugins] = useState<CatalogPlugin[]>(catalogCache?.items ?? []);
   const [total, setTotal] = useState(catalogCache?.total ?? 0);
   const [loading, setLoading] = useState(catalogCache === null);
+  const [revalidating, setRevalidating] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"install" | "uninstall" | null>(null);
@@ -61,7 +62,11 @@ export function PluginsPanel() {
   useEffect(() => {
     if (catalogCache !== null && catalogCache.query === query && catalogCache.installedFilter === installedFilter) return;
     let cancelled = false;
-    setLoading(true);
+    // Blank-slate loading only on the very first load ever -- a search
+    // or filter change keeps the current rows on screen (see
+    // `revalidating`) instead of flashing to empty and back.
+    if (catalogCache === null) setLoading(true);
+    else setRevalidating(true);
     api
       .listPluginCatalog({
         q: query || undefined,
@@ -77,7 +82,10 @@ export function PluginsPanel() {
       })
       .catch(() => {})
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setRevalidating(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -176,9 +184,11 @@ export function PluginsPanel() {
         {loading ? (
           <p className="settings-hint">Loading…</p>
         ) : plugins.length === 0 ? (
-          <p className="settings-hint">{query ? "No plugins match your search." : "No plugins available yet."}</p>
+          <p className="settings-hint">
+            {revalidating ? "Loading…" : query ? "No plugins match your search." : "No plugins available yet."}
+          </p>
         ) : (
-          <ul className="skills-list">
+          <ul className={revalidating ? "skills-list plugins-list-revalidating" : "skills-list"}>
             {plugins.map((p) => (
               <li key={p.id} className="skills-row plugins-row">
                 <div className="skills-row-main">

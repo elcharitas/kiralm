@@ -98,7 +98,7 @@ export function McpPanel() {
     <div className="skills-panel">
       <div className="skills-panel-actions">
         <button type="button" className="btn" onClick={() => setAdding((v) => !v)}>
-          <Plus size={14} /> Add server
+          <Plus size={14} />Add server
         </button>
       </div>
 
