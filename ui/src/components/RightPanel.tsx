@@ -3,7 +3,6 @@ import type { PointerEvent, ReactNode } from "react";
 import {
   Braces,
   ChevronRight,
-  Columns2,
   FileCode,
   FileCode2,
   GitBranch,
@@ -230,14 +229,6 @@ export function RightPanel({
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
             <PanelRightClose size={14} />
-          </button>
-          <button
-            type="button"
-            className={mode === "split" ? "right-panel-icon-btn right-panel-icon-btn-active" : "right-panel-icon-btn"}
-            title="Split view"
-            onClick={() => onModeChange("split")}
-          >
-            <Columns2 size={14} />
           </button>
           <button type="button" className="right-panel-icon-btn" title="Account">
             <User size={14} />
