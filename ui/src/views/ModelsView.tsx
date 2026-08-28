@@ -107,85 +107,89 @@ export function ModelsView({
         </form>
       </div>
 
-      <CloudLoginPanel onChange={refresh} />
+      <div className="view-fixed">
+        <CloudLoginPanel onChange={refresh} />
 
-      {pulling?.error && <div className="banner banner-bad">{pulling.error}</div>}
-      {pulling && !pulling.error && !models.some((m) => m.id === pulling.id) && (
-        <PullingRow
-          id={pulling.id}
-          onDone={async () => {
-            if (settings.default_hot_on_pull) {
-              await api.setHot(pulling.id, true).catch(() => {});
-            }
-            refresh();
-          }}
-        />
-      )}
-
-      <ul className="model-list">
-        {groupBySection(models, (m) => m.id).map((g) => (
-          <Fragment key={g.section}>
-            <li className="model-section-header">{g.section}</li>
-            {g.items.map((m) => (
-              <li key={m.id} className="model-row model-row-clickable" onClick={() => setSelected(m.id)}>
-                <span
-                  className={m.source === "cloud" ? "model-row-dot" : m.loaded ? "model-row-dot model-row-dot-on" : "model-row-dot"}
-                  title={m.source === "cloud" ? "Cloud" : m.loaded ? `Resident: ${formatBytes(m.rss_bytes)}` : "Not loaded"}
-                />
-                <span className="model-row-main">
-                  <span className="model-row-name">{modelName(m.id)}</span>
-                  <span className="model-row-size mono">{formatBytes(m.size_bytes)}</span>
-                </span>
-                <span className="model-row-actions">
-                  {m.source === "local" && (
-                    <>
-                      <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
-                      <button
-                        type="button"
-                        className="model-row-delete-btn"
-                        title="Delete"
-                        disabled={busy === m.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          remove(m);
-                        }}
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </>
-                  )}
-                </span>
-              </li>
-            ))}
-          </Fragment>
-        ))}
-        {models.length === 0 && <li className="model-list-empty">No models downloaded yet. Pull one below.</li>}
-        {catalog.length === 0 && (
-          <li className="model-list-empty">No pull suggestions synced yet.</li>
+        {pulling?.error && <div className="banner banner-bad">{pulling.error}</div>}
+        {pulling && !pulling.error && !models.some((m) => m.id === pulling.id) && (
+          <PullingRow
+            id={pulling.id}
+            onDone={async () => {
+              if (settings.default_hot_on_pull) {
+                await api.setHot(pulling.id, true).catch(() => {});
+              }
+              refresh();
+            }}
+          />
         )}
-        {groupBySection(
-          catalog.filter((c) => !models.some((m) => m.id === c.ref || m.aliases.includes(c.ref))),
-          (c) => c.ref,
-        ).map((g) => (
-          <Fragment key={g.section}>
-            <li className="model-section-header">{g.section}</li>
-            {g.items.map((c) => (
-              <li key={c.ref} className="model-row" title={c.description ?? undefined}>
-                <span className="model-row-dot" />
-                <span className="model-row-main">
-                  <span className="model-row-name">{c.name}</span>
-                  <span className="model-row-size mono">{formatBytes(c.size_bytes)}</span>
-                </span>
-                <span className="model-row-actions">
-                  <button type="button" className="btn btn-ghost" onClick={() => pull(c.ref)}>
-                    Pull
-                  </button>
-                </span>
-              </li>
-            ))}
-          </Fragment>
-        ))}
-      </ul>
+      </div>
+
+      <div className="model-list-scroll">
+        <ul className="model-list">
+          {groupBySection(models, (m) => m.id).map((g) => (
+            <Fragment key={g.section}>
+              <li className="model-section-header">{g.section}</li>
+              {g.items.map((m) => (
+                <li key={m.id} className="model-row model-row-clickable" onClick={() => setSelected(m.id)}>
+                  <span
+                    className={m.source === "cloud" ? "model-row-dot" : m.loaded ? "model-row-dot model-row-dot-on" : "model-row-dot"}
+                    title={m.source === "cloud" ? "Cloud" : m.loaded ? `Resident: ${formatBytes(m.rss_bytes)}` : "Not loaded"}
+                  />
+                  <span className="model-row-main">
+                    <span className="model-row-name">{modelName(m.id)}</span>
+                    <span className="model-row-size mono">{formatBytes(m.size_bytes)}</span>
+                  </span>
+                  <span className="model-row-actions">
+                    {m.source === "local" && (
+                      <>
+                        <HotToggle on={m.hot} disabled={busy === m.id} onChange={() => toggleHot(m)} />
+                        <button
+                          type="button"
+                          className="model-row-delete-btn"
+                          title="Delete"
+                          disabled={busy === m.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            remove(m);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </Fragment>
+          ))}
+          {models.length === 0 && <li className="model-list-empty">No models downloaded yet. Pull one below.</li>}
+          {catalog.length === 0 && (
+            <li className="model-list-empty">No pull suggestions synced yet.</li>
+          )}
+          {groupBySection(
+            catalog.filter((c) => !models.some((m) => m.id === c.ref || m.aliases.includes(c.ref))),
+            (c) => c.ref,
+          ).map((g) => (
+            <Fragment key={g.section}>
+              <li className="model-section-header">{g.section}</li>
+              {g.items.map((c) => (
+                <li key={c.ref} className="model-row" title={c.description ?? undefined}>
+                  <span className="model-row-dot" />
+                  <span className="model-row-main">
+                    <span className="model-row-name">{c.name}</span>
+                    <span className="model-row-size mono">{formatBytes(c.size_bytes)}</span>
+                  </span>
+                  <span className="model-row-actions">
+                    <button type="button" className="btn btn-ghost" onClick={() => pull(c.ref)}>
+                      Pull
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </Fragment>
+          ))}
+        </ul>
+      </div>
 
       {selected && <ModelDetailDrawer id={selected} onClose={() => setSelected(null)} />}
     </div>
