@@ -4,6 +4,7 @@
    panel fill, hairline border) with a 12px gap over the base gradient
    -- not a flush bordered grid. */
 .app {
+  position: relative;
   display: grid;
   grid-template-rows: 48px 1fr;
   height: 100%;
@@ -15,7 +16,30 @@
 }
 
 .tauri-macos .app {
-  padding-top: 40px;
+  padding-top: 36px;
+}
+
+.desktop-title-brand {
+  display: none;
+}
+
+.tauri-macos .desktop-title-brand {
+  position: absolute;
+  top: 7px;
+  left: 88px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  pointer-events: none;
+}
+
+.desktop-title-logo {
+  width: 16px;
+  height: 16px;
 }
 
 .sidebar,
