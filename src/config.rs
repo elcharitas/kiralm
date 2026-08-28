@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 /// `~/.kiralm`. Everything kiralm owns lives under here.
 pub fn kiralm_home() -> PathBuf {
+    if let Some(path) = std::env::var_os("KIRALM_HOME") {
+        return PathBuf::from(path);
+    }
     dirs::home_dir()
         .expect("no home directory found")
         .join(".kiralm")
@@ -225,17 +228,25 @@ impl Config {
         }
 
         let defaults = Config::default();
+        let unix_socket = std::env::var_os("KIRALM_UNIX_SOCKET")
+            .map(PathBuf::from)
+            .or(raw.unix_socket)
+            .unwrap_or(defaults.unix_socket);
+        let cloud_api_base_url = std::env::var("KIRALM_CLOUD_API_BASE_URL")
+            .ok()
+            .or(raw.cloud.api_base_url)
+            .unwrap_or(defaults.cloud.api_base_url);
         Ok(Config {
             ram_headroom_gb: raw.ram_headroom_gb,
             model_dir: raw.model_dir.unwrap_or(defaults.model_dir),
-            unix_socket: raw.unix_socket.unwrap_or(defaults.unix_socket),
+            unix_socket,
             http_listen: raw.http_listen.unwrap_or(defaults.http_listen),
             llama_server_bin: raw.llama_server_bin.unwrap_or(defaults.llama_server_bin),
             llama_server_port_range: raw
                 .llama_server_port_range
                 .unwrap_or(defaults.llama_server_port_range),
             cloud: CloudConfig {
-                api_base_url: raw.cloud.api_base_url.unwrap_or(defaults.cloud.api_base_url),
+                api_base_url: cloud_api_base_url,
                 client_id: raw.cloud.client_id.unwrap_or(defaults.cloud.client_id),
                 request_timeout_secs: raw
                     .cloud

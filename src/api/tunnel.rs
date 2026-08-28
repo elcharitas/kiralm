@@ -36,7 +36,6 @@ async fn enable(State(app): State<SharedState>) -> Response {
     if let Err(e) = tunnel::detect(&app.config.tunnel.cloudflared_bin) {
         return err(StatusCode::PRECONDITION_FAILED, e.to_string());
     }
-
     // A `disable` leaves the provisioned Cloudflare tunnel + its token
     // in place. Re-enabling reuses both rather than round-tripping
     // kiralm-web/Cloudflare again.
@@ -54,12 +53,6 @@ async fn enable(State(app): State<SharedState>) -> Response {
         },
     };
 
-    let child = match tunnel::spawn(&app.config.tunnel.cloudflared_bin, &cf_token).await {
-        Ok(c) => c,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    *app.tunnel_child.lock() = Some(child);
-
     if matches!(TunnelCredentials::load(), Ok(None)) {
         if let Err(e) = (TunnelCredentials {
             token: uuid::Uuid::new_v4().to_string(),
@@ -70,16 +63,34 @@ async fn enable(State(app): State<SharedState>) -> Response {
         }
     }
 
-    {
+    if let Err(e) = crate::start_tunnel_listener(&app).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    let child = match tunnel::spawn(&app.config.tunnel.cloudflared_bin, &cf_token).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.tunnel_listener.send(crate::TunnelListenerCommand::Stop).await;
+            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+    };
+    *app.tunnel_child.lock() = Some(child);
+
+    let save_error = {
         let mut state = app.state.write();
         state.tunnel = Some(TunnelState {
             enabled: true,
             hostname: hostname.clone(),
             cf_tunnel_id,
         });
-        if let Err(e) = state.save() {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        state.save().err()
+    };
+    if let Some(error) = save_error {
+        let child = app.tunnel_child.lock().take();
+        if let Some(child) = child {
+            engine::shutdown(child).await;
         }
+        let _ = app.tunnel_listener.send(crate::TunnelListenerCommand::Stop).await;
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
     Json(json!({"hostname": hostname})).into_response()
@@ -95,6 +106,7 @@ async fn disable(State(app): State<SharedState>) -> Response {
     if let Some(child) = child {
         engine::shutdown(child).await;
     }
+    let _ = app.tunnel_listener.send(crate::TunnelListenerCommand::Stop).await;
 
     let mut state = app.state.write();
     let Some(t) = state.tunnel.as_mut() else {
@@ -144,6 +156,10 @@ async fn status(State(app): State<SharedState>) -> Response {
 pub async fn respawn_if_enabled(app: &SharedState) {
     let enabled = app.state.read().tunnel.as_ref().is_some_and(|t| t.enabled);
     if !enabled {
+        return;
+    }
+    if let Err(e) = crate::start_tunnel_listener(app).await {
+        tracing::warn!("tunnel: {e}");
         return;
     }
     if let Err(e) = tunnel::detect(&app.config.tunnel.cloudflared_bin) {

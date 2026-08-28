@@ -1,9 +1,9 @@
 # kiralm UI
 
 Vite + React + TypeScript dashboard for the KiraLM daemon (see repo-root
-`SPEC.md` §9). Served embedded at `/` by the daemon in production; talks to
-`/api/*` (internal status/control) and `/v1/*` (OpenAI-compatible chat) on
-the same origin.
+`SPEC.md` §9). The desktop bundles it and routes `/api/*` and `/v1/*` through
+Tauri IPC. An explicit browser target serves the same build and routes on one
+HTTP origin.
 
 ## Views
 
@@ -21,5 +21,6 @@ npm run dev
 ```
 
 `vite.config.ts` proxies `/api` and `/v1` to `127.0.0.1:11535`, so run
-`kiralm serve` alongside `npm run dev` for a live backend. `npm run build`
-outputs `dist/`, which the Rust binary embeds via `rust-embed`.
+`kiralm serve --http 127.0.0.1:11535` alongside `npm run dev` for a live
+browser backend. `npm run build` outputs `dist/`, which the daemon's explicit
+browser target and the desktop bundle both consume.

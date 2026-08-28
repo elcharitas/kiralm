@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "../api";
+import { api, subscribeSse } from "../api";
 
 export interface PullProgress {
   status: "downloading" | "verifying" | "loading" | "done" | "error";
@@ -20,18 +20,17 @@ export function usePullProgress(id: string | null) {
       setProgress(null);
       return;
     }
-    const source = new EventSource(api.pullProgressUrl(id));
-    source.onmessage = (ev) => {
+    let close = () => {};
+    close = subscribeSse(api.pullProgressUrl(id), (raw) => {
       try {
-        const data = JSON.parse(ev.data) as PullProgress;
+        const data = JSON.parse(raw) as PullProgress;
         setProgress(data);
-        if (TERMINAL.includes(data.status)) source.close();
+        if (TERMINAL.includes(data.status)) close();
       } catch {
         // ignore malformed frame, next one carries fresh state
       }
-    };
-    source.onerror = () => source.close();
-    return () => source.close();
+    }, () => close());
+    return close;
   }, [id]);
 
   return progress;

@@ -34,10 +34,18 @@ Apple Silicon.
 kiralm serve
 ```
 
-Runs the daemon in the foreground, listening on `127.0.0.1:11535` (HTTP)
-and `~/.kiralm/kiralm.sock` (CLI control traffic). Every other subcommand
-below auto-spawns the daemon in the background if it isn't already
-running.
+Runs the daemon in the foreground on `~/.kiralm/kiralm.sock`. It does not
+open a TCP port. Every other subcommand below auto-spawns the daemon in the
+background if it isn't already running.
+
+Start an explicit browser test target when you need one:
+
+```
+kiralm serve --http 127.0.0.1:11535
+```
+
+`KIRALM_CLOUD_API_BASE_URL` overrides the `[cloud].api_base_url` config value.
+`KIRALM_HOME` and `KIRALM_UNIX_SOCKET` can isolate local test instances.
 
 ## Pull and run a model
 
