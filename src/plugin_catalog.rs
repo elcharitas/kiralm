@@ -1,15 +1,18 @@
-//! kiralm-web's plugin catalog: fetch/cache `GET /api/plugins`, and the
-//! install/uninstall dispatch that unifies marketplace.rs, agent_plugin.rs
-//! and dsh.rs behind one browsable list. Same fetch/cache shape as
-//! cloud.rs's `sync_cloud_models` -- see that module's doc comment.
+//! kiralm-web's plugin catalog: a live, per-request proxy to
+//! `GET /api/plugins`/`GET /api/plugins/:id`, and the install/uninstall
+//! dispatch that unifies marketplace.rs, agent_plugin.rs and dsh.rs
+//! behind one browsable list. No local cache of catalog content -- every
+//! browse is a real kiralm-web round trip. The one thing kept locally is
+//! `plugin_catalog_installed_ids.json`, the set of catalog ids installed
+//! through this flow -- local state, not a content cache, same footing
+//! as skills.json/mcp_servers.json.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::kiralm_home;
-use crate::{agent_plugin, dsh, marketplace, mcp, skills};
+use crate::{agent_plugin, dsh, marketplace};
 
 /// The single `dsh` profile every catalog-sourced plugin installs into.
 /// Profiles aren't plugins to browse, so a dedicated hand-managed one
@@ -30,187 +33,191 @@ pub struct CloudPlugin {
 }
 
 #[derive(Debug, Deserialize)]
-struct CloudPluginsResponse {
+struct CatalogPageResponse {
     data: Vec<CloudPlugin>,
-}
-
-fn cache_path() -> PathBuf {
-    kiralm_home().join("plugin_catalog_cache.json")
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedCatalog {
-    fetched_at: i64,
-    plugins: Vec<CloudPlugin>,
-}
-
-fn load_cache() -> Option<CachedCatalog> {
-    let raw = std::fs::read_to_string(cache_path()).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-fn save_cache(plugins: &[CloudPlugin]) -> anyhow::Result<()> {
-    let cache = CachedCatalog {
-        fetched_at: chrono::Utc::now().timestamp(),
-        plugins: plugins.to_vec(),
-    };
-    let path = cache_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&cache)?)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// The cached rows as of the last successful fetch, empty if there's
-/// never been one -- never triggers a network call itself.
-pub fn cached_plugins() -> Vec<CloudPlugin> {
-    load_cache().map(|c| c.plugins).unwrap_or_default()
+    total: usize,
 }
 
 pub const DEFAULT_CATALOG_LIMIT: usize = 50;
 pub const MAX_CATALOG_LIMIT: usize = 200;
 
-/// Case-insensitive substring match on name/description, plus an
-/// optional installed/uninstalled split -- both applied before paging
-/// so `total` reflects the actually-filtered count.
-pub fn filter_catalog<'a>(
-    plugins: &'a [CloudPlugin],
+// ---------------------------------------------------------------------
+// Locally-installed catalog id set
+// ---------------------------------------------------------------------
+
+fn installed_ids_path() -> PathBuf {
+    kiralm_home().join("plugin_catalog_installed_ids.json")
+}
+
+fn installed_ids() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(installed_ids_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_installed_ids(ids: &std::collections::HashSet<String>) -> anyhow::Result<()> {
+    let path = installed_ids_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(ids)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Called by `POST /api/plugins/catalog/:id/install` once dispatch
+/// actually succeeds.
+pub fn mark_installed(id: &str) {
+    let mut ids = installed_ids();
+    if ids.insert(id.to_string()) {
+        if let Err(e) = save_installed_ids(&ids) {
+            tracing::warn!("plugin catalog: failed to persist installed id: {e}");
+        }
+    }
+}
+
+/// Called by `DELETE /api/plugins/catalog/:id` once dispatch actually
+/// succeeds.
+pub fn mark_uninstalled(id: &str) {
+    let mut ids = installed_ids();
+    if ids.remove(id) {
+        if let Err(e) = save_installed_ids(&ids) {
+            tracing::warn!("plugin catalog: failed to persist uninstalled id: {e}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Live kiralm-web proxy
+// ---------------------------------------------------------------------
+
+/// A request may chain a few backfill round trips (see
+/// `list_catalog_page`), so this is a little longer than the old
+/// background sync's fixed 3s.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub fn build_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().map_err(|e| e.to_string())
+}
+
+/// One live `GET {api_base_url}/api/plugins` call, `q`/`offset`/`limit`
+/// forwarded as-is.
+async fn fetch_page(
+    client: &reqwest::Client,
+    api_base_url: &str,
+    q: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<CloudPlugin>, usize), String> {
+    let url = format!("{}/api/plugins", api_base_url.trim_end_matches('/'));
+    let mut req = client.get(&url).query(&[("offset", offset.to_string()), ("limit", limit.to_string())]);
+    if let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.query(&[("q", q)]);
+    }
+    let resp = req.send().await.map_err(|e| format!("kiralm-web unreachable: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GET /api/plugins returned {}", resp.status()));
+    }
+    let parsed: CatalogPageResponse =
+        resp.json().await.map_err(|e| format!("kiralm-web returned an unexpected shape: {e}"))?;
+    Ok((parsed.data, parsed.total))
+}
+
+/// One live `GET {api_base_url}/api/plugins?ids=...` call -- the
+/// canonical display data for a known, locally-tracked set of installed
+/// ids, one round trip no matter how many ids.
+async fn fetch_by_ids(
+    client: &reqwest::Client,
+    api_base_url: &str,
+    ids: &std::collections::HashSet<String>,
+    q: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<CloudPlugin>, usize), String> {
+    let url = format!("{}/api/plugins", api_base_url.trim_end_matches('/'));
+    let ids_param = ids.iter().cloned().collect::<Vec<_>>().join(",");
+    let mut req =
+        client.get(&url).query(&[("ids", ids_param), ("offset", offset.to_string()), ("limit", limit.to_string())]);
+    if let Some(q) = q.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.query(&[("q", q)]);
+    }
+    let resp = req.send().await.map_err(|e| format!("kiralm-web unreachable: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GET /api/plugins?ids=... returned {}", resp.status()));
+    }
+    let parsed: CatalogPageResponse =
+        resp.json().await.map_err(|e| format!("kiralm-web returned an unexpected shape: {e}"))?;
+    Ok((parsed.data, parsed.total))
+}
+
+/// A request can't spiral into fetching the whole catalog just to fill
+/// one short page.
+const MAX_BACKFILL_ROUNDS: usize = 3;
+
+/// `GET /api/plugins/catalog`'s live dispatch. `installed == Some(true)`
+/// makes at most one kiralm-web call, scoped to the locally-tracked
+/// installed id set (none at all if that set is empty) -- kiralm-web
+/// never sees a per-row lookup for this branch. Everything else forwards
+/// `q`/`offset`/`limit` to kiralm-web's own SQL-backed search/paging;
+/// `installed == Some(false)` additionally backfills later pages when
+/// local filtering drops a page short.
+pub async fn list_catalog_page(
+    client: &reqwest::Client,
+    api_base_url: &str,
     q: Option<&str>,
     installed: Option<bool>,
-    lookup: &InstalledLookup,
-) -> Vec<&'a CloudPlugin> {
-    let needle = q.map(str::trim).filter(|s| !s.is_empty()).map(str::to_lowercase);
-    plugins
-        .iter()
-        .filter(|p| match &needle {
-            None => true,
-            Some(needle) => {
-                p.name.to_lowercase().contains(needle)
-                    || p.description.as_deref().unwrap_or("").to_lowercase().contains(needle)
-            }
-        })
-        .filter(|p| installed.is_none_or(|want| lookup.is_installed(p) == want))
-        .collect()
-}
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<(CloudPlugin, bool)>, usize), String> {
+    let ids = installed_ids();
 
-/// Slices an already-filtered list; an out-of-range offset yields an
-/// empty page rather than an error, same as a normal slice split.
-pub fn page<'a>(filtered: &[&'a CloudPlugin], offset: usize, limit: usize) -> Vec<&'a CloudPlugin> {
-    let limit = limit.min(MAX_CATALOG_LIMIT);
-    filtered.iter().skip(offset).take(limit).copied().collect()
-}
-
-static LAST_FETCH_FAILED: AtomicBool = AtomicBool::new(false);
-static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Fetches `GET {api_base_url}/api/plugins` and caches it to disk. Never
-/// blocks or breaks anything on a network failure -- same posture as
-/// `cloud::sync_cloud_models`. Meant to be run inside `tokio::spawn`.
-pub async fn sync_cloud_plugins(api_base_url: &str) {
-    if SYNC_IN_FLIGHT.swap(true, Ordering::Relaxed) {
-        return;
+    if installed == Some(true) {
+        if ids.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let (page, total) = fetch_by_ids(client, api_base_url, &ids, q, offset, limit).await?;
+        return Ok((page.into_iter().map(|p| (p, true)).collect(), total));
     }
-    sync_cloud_plugins_inner(api_base_url).await;
-    SYNC_IN_FLIGHT.store(false, Ordering::Relaxed);
-}
 
-async fn sync_cloud_plugins_inner(api_base_url: &str) {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!("plugin catalog sync: failed to build http client: {e}");
-            return;
+    let mut collected: Vec<(CloudPlugin, bool)> = Vec::new();
+    let mut cursor = offset;
+    let mut rounds = 0usize;
+    let total = loop {
+        let (page, page_total) = fetch_page(client, api_base_url, q, cursor, limit).await?;
+        let page_len = page.len();
+        cursor += page_len;
+        rounds += 1;
+
+        for p in page {
+            let is_installed = ids.contains(&p.id);
+            if installed == Some(false) && is_installed {
+                continue;
+            }
+            collected.push((p, is_installed));
+        }
+
+        let short = installed == Some(false) && collected.len() < limit;
+        if !short || page_len == 0 || cursor >= page_total || rounds >= MAX_BACKFILL_ROUNDS {
+            break page_total;
         }
     };
-
-    let url = format!("{}/api/plugins", api_base_url.trim_end_matches('/'));
-    let result = async {
-        let resp = client.get(&url).send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("GET /api/plugins returned {}", resp.status());
-        }
-        let parsed: CloudPluginsResponse = resp.json().await?;
-        Ok::<_, anyhow::Error>(parsed.data)
-    }
-    .await;
-
-    match result {
-        Ok(plugins) => {
-            if LAST_FETCH_FAILED.swap(false, Ordering::Relaxed) {
-                tracing::warn!("plugin catalog sync recovered");
-            }
-            if let Err(e) = save_cache(&plugins) {
-                tracing::debug!("plugin catalog sync: failed to write cache: {e}");
-            }
-        }
-        Err(e) => {
-            if !LAST_FETCH_FAILED.swap(true, Ordering::Relaxed) {
-                tracing::warn!("plugin catalog sync: backend unreachable: {e}");
-            } else {
-                tracing::debug!("plugin catalog sync: backend unreachable: {e}");
-            }
-            // Keep serving whatever's already cached, same as the model
-            // catalog sync.
-        }
-    }
+    collected.truncate(limit);
+    Ok((collected, total))
 }
 
-/// Re-derives the same identifiers the three adapters (marketplace.rs,
-/// agent_plugin.rs, dsh.rs) already use for their own install state,
-/// but each backing store (skills.json, mcp_servers.json, each distinct
-/// marketplace.json, the agent_plugin registry, the dsh default
-/// profile) is read exactly once per `build()`, not once per catalog
-/// row -- a naive per-row version would re-read the same multi-MB
-/// marketplace.json thousands of times across the real ~2300-row
-/// catalog, most of which share one marketplace.
-pub struct InstalledLookup {
-    tagged: std::collections::HashSet<(String, String)>,
-    marketplace_known: std::collections::HashMap<String, bool>,
-    agent_plugin_sources: std::collections::HashSet<String>,
-    dsh_packages: std::collections::HashSet<String>,
-}
-
-impl InstalledLookup {
-    pub fn build(plugins: &[CloudPlugin]) -> Self {
-        let tagged: std::collections::HashSet<(String, String)> = skills::list()
-            .into_iter()
-            .filter_map(|s| s.installed_by)
-            .chain(mcp::load_configs().into_iter().filter_map(|c| c.installed_by))
-            .map(|r| (r.marketplace, r.plugin))
-            .collect();
-
-        let mut marketplace_known = std::collections::HashMap::new();
-        for row in plugins.iter().filter(|p| p.source_kind == "claude_marketplace") {
-            let Ok(slug) = marketplace::slug_from_url(&row.source) else { continue };
-            marketplace_known.entry(slug.clone()).or_insert_with(|| marketplace::get(&slug).is_ok());
-        }
-
-        let agent_plugin_sources =
-            agent_plugin::list_installed().into_iter().map(|p| p.source).collect();
-        let dsh_packages = dsh::list_plugins(DSH_DEFAULT_PROFILE).unwrap_or_default().into_iter().collect();
-
-        InstalledLookup { tagged, marketplace_known, agent_plugin_sources, dsh_packages }
+/// Resolves a catalog row by id for install/uninstall dispatch.
+pub async fn find_row(client: &reqwest::Client, api_base_url: &str, id: &str) -> Result<Option<CloudPlugin>, String> {
+    let url = format!("{}/api/plugins/{}", api_base_url.trim_end_matches('/'), id);
+    let resp = client.get(&url).send().await.map_err(|e| format!("kiralm-web unreachable: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
     }
-
-    pub fn is_installed(&self, row: &CloudPlugin) -> bool {
-        match row.source_kind.as_str() {
-            "claude_marketplace" => {
-                let Some(plugin_name) = &row.plugin_name else { return false };
-                let Ok(slug) = marketplace::slug_from_url(&row.source) else { return false };
-                self.marketplace_known.get(&slug).copied().unwrap_or(false)
-                    && self.tagged.contains(&(slug, plugin_name.clone()))
-            }
-            "agent_plugin" => self.agent_plugin_sources.contains(&row.source),
-            "dsh" => self.dsh_packages.contains(&row.source),
-            _ => false,
-        }
+    if !resp.status().is_success() {
+        return Err(format!("GET /api/plugins/{id} returned {}", resp.status()));
     }
+    resp.json::<CloudPlugin>().await.map(Some).map_err(|e| format!("kiralm-web returned an unexpected shape: {e}"))
 }
 
 fn ensure_default_dsh_profile() -> Result<(), String> {
@@ -296,17 +303,12 @@ pub async fn uninstall(dsh_bin: &str, row: &CloudPlugin) -> Result<CatalogUninst
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Single-row convenience wrapper over `InstalledLookup` for tests
-    /// that only care about one row at a time.
-    fn is_installed(row: &CloudPlugin) -> bool {
-        InstalledLookup::build(std::slice::from_ref(row)).is_installed(row)
-    }
+    use std::path::PathBuf as TestPathBuf;
 
     struct TempHome {
         _guard: std::sync::MutexGuard<'static, ()>,
         prev: Option<String>,
-        dir: PathBuf,
+        dir: TestPathBuf,
     }
 
     impl TempHome {
@@ -343,99 +345,39 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cache_write_read_round_trips() {
-        let _home = TempHome::new();
-        assert!(cached_plugins().is_empty());
-
-        let plugins = vec![row("p1", "dsh", "some-pkg", None)];
-        save_cache(&plugins).unwrap();
-
-        let loaded = cached_plugins();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "p1");
-        assert_eq!(loaded[0].source, "some-pkg");
-    }
-
-    #[tokio::test]
-    async fn network_failure_never_crashes_and_keeps_prior_cache() {
-        let _home = TempHome::new();
-        save_cache(&[row("p1", "dsh", "some-pkg", None)]).unwrap();
-
-        // Nothing listens on this port -- a real, immediate connection
-        // failure, not a mock.
-        sync_cloud_plugins("http://127.0.0.1:1").await;
-
-        // The stale cache survives a failed sync untouched.
-        let loaded = cached_plugins();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "p1");
+    fn plugin_json(id: &str, source_kind: &str, source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "name": id, "description": null,
+            "source_kind": source_kind, "source": source,
+            "plugin_name": null, "enabled": true, "sort_order": 0,
+        })
     }
 
     #[test]
     fn deserializes_get_plugins_shape() {
         let raw = r#"{"data":[{"id":"a","name":"A","description":null,
             "source_kind":"claude_marketplace","source":"https://github.com/org/repo",
-            "plugin_name":"plug","enabled":true,"sort_order":0}]}"#;
-        let parsed: CloudPluginsResponse = serde_json::from_str(raw).unwrap();
-        assert_eq!(parsed.data.len(), 1);
+            "plugin_name":"plug","enabled":true,"sort_order":0}],"total":1}"#;
+        let parsed: CatalogPageResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.total, 1);
         assert_eq!(parsed.data[0].plugin_name.as_deref(), Some("plug"));
     }
 
-    #[tokio::test]
-    async fn claude_marketplace_installed_state_matches_real_marketplace_and_skill() {
-        let _home = TempHome::new();
-        let slug = "repo";
-        let dir = marketplace::marketplaces_dir().join(slug);
-        std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
-        std::fs::write(
-            dir.join(".claude-plugin").join("marketplace.json"),
-            r#"{"name":"Demo","plugins":[{"name":"plug","source":"./plug"}]}"#,
-        )
-        .unwrap();
-        let skill_dir = dir.join("plug").join("skills").join("one");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: one\ndescription: test skill.\n---\nBody\n",
-        )
-        .unwrap();
-
-        let r = row("c1", "claude_marketplace", "https://github.com/org/repo", Some("plug"));
-        assert!(!is_installed(&r), "not installed until install_plugin runs");
-
-        marketplace::install_plugin(slug, "plug").await.unwrap();
-        assert!(is_installed(&r));
-    }
-
-    #[tokio::test]
-    async fn agent_plugin_installed_state_matches_by_literal_source() {
-        let _home = TempHome::new();
-        let src = std::env::temp_dir().join(format!("kiralm-catalog-agent-plugin-src-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(
-            src.join("plugin.json"),
-            r#"{"$schema":"https://agent-plugins.org/schema/v1.json","name":"demo-plugin"}"#,
-        )
-        .unwrap();
-
-        let r = row("a1", "agent_plugin", src.to_str().unwrap(), None);
-        assert!(!is_installed(&r));
-
-        agent_plugin::install(src.to_str().unwrap()).await.unwrap();
-        assert!(is_installed(&r));
-
-        let _ = std::fs::remove_dir_all(&src);
-    }
-
     #[test]
-    fn dsh_installed_state_checks_default_profile_dependencies() {
+    fn mark_installed_and_uninstalled_round_trip() {
         let _home = TempHome::new();
-        let r = row("d1", "dsh", "some-npm-pkg", None);
-        assert!(!is_installed(&r), "no default profile yet -> not installed");
+        assert!(installed_ids().is_empty());
 
-        ensure_default_dsh_profile().unwrap();
-        assert!(!is_installed(&r), "profile exists but package not added yet");
+        mark_installed("p1");
+        mark_installed("p2");
+        let ids = installed_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("p1") && ids.contains("p2"));
+
+        mark_uninstalled("p1");
+        let ids = installed_ids();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("p2"));
     }
 
     #[tokio::test]
@@ -465,97 +407,129 @@ mod tests {
         assert!(err.contains("plugin_name"));
     }
 
-    fn described(id: &str, name: &str, description: &str) -> CloudPlugin {
-        let mut p = row(id, "dsh", id, None);
-        p.name = name.to_string();
-        p.description = Some(description.to_string());
-        p
-    }
+    #[tokio::test]
+    async fn find_row_resolves_via_live_kiralm_web_lookup() {
+        let upstream = axum::Router::new().route(
+            "/api/plugins/:id",
+            axum::routing::get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
+                use axum::response::IntoResponse;
+                if id == "real1" {
+                    (axum::http::StatusCode::OK, axum::Json(plugin_json("real1", "dsh", "pkg-x"))).into_response()
+                } else {
+                    axum::http::StatusCode::NOT_FOUND.into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let api_base_url = format!("http://127.0.0.1:{port}");
+        let client = build_client().unwrap();
 
-    #[test]
-    fn filter_catalog_matches_name_or_description_case_insensitively() {
-        let _home = TempHome::new();
-        let plugins =
-            vec![described("a", "Alpha Tools", "linting"), described("b", "Beta", "ALPHA-flavored helper")];
-        let lookup = InstalledLookup::build(&plugins);
-        let hits = filter_catalog(&plugins, Some("alpha"), None, &lookup);
-        assert_eq!(hits.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
-    }
+        let found = find_row(&client, &api_base_url, "real1").await.unwrap();
+        assert_eq!(found.unwrap().id, "real1");
 
-    #[test]
-    fn filter_catalog_empty_query_returns_everything() {
-        let _home = TempHome::new();
-        let plugins = vec![described("a", "Alpha", "x"), described("b", "Beta", "y")];
-        let lookup = InstalledLookup::build(&plugins);
-        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
-        assert_eq!(filter_catalog(&plugins, Some("  "), None, &lookup).len(), 2);
+        let missing = find_row(&client, &api_base_url, "nope").await.unwrap();
+        assert!(missing.is_none());
     }
 
     #[tokio::test]
-    async fn filter_catalog_installed_param_filters_before_paging_and_combines_with_q() {
+    async fn list_catalog_page_installed_true_with_empty_set_never_calls_kiralm_web() {
         let _home = TempHome::new();
-        let src = std::env::temp_dir().join(format!("kiralm-catalog-installed-filter-src-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(
-            src.join("plugin.json"),
-            r#"{"$schema":"https://agent-plugins.org/schema/v1.json","name":"demo-plugin"}"#,
-        )
-        .unwrap();
-
-        let mut installed_row = row("i1", "agent_plugin", src.to_str().unwrap(), None);
-        installed_row.name = "Alpha Installed".to_string();
-        let uninstalled_row = described("u1", "Alpha Uninstalled", "not installed yet");
-        let plugins = vec![installed_row, uninstalled_row];
-
-        let lookup = InstalledLookup::build(&plugins);
-        assert!(filter_catalog(&plugins, None, Some(true), &lookup).is_empty());
-        assert_eq!(filter_catalog(&plugins, None, Some(false), &lookup).len(), 2);
-        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
-
-        agent_plugin::install(src.to_str().unwrap()).await.unwrap();
-        // Rebuilt, same as a fresh request would -- InstalledLookup is a
-        // one-time snapshot, not a live view.
-        let lookup = InstalledLookup::build(&plugins);
-
-        assert_eq!(
-            filter_catalog(&plugins, None, Some(true), &lookup).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["i1"]
-        );
-        assert_eq!(
-            filter_catalog(&plugins, None, Some(false), &lookup).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
-            vec!["u1"]
-        );
-        assert_eq!(filter_catalog(&plugins, None, None, &lookup).len(), 2);
-        assert_eq!(
-            filter_catalog(&plugins, Some("alpha"), Some(true), &lookup)
-                .iter()
-                .map(|p| p.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["i1"]
-        );
-
-        let _ = std::fs::remove_dir_all(&src);
+        let client = build_client().unwrap();
+        // Nothing listens here -- a real error if this branch dialed out.
+        let (rows, total) = list_catalog_page(&client, "http://127.0.0.1:1", None, Some(true), 0, 10).await.unwrap();
+        assert_eq!(rows.len(), 0);
+        assert_eq!(total, 0);
     }
 
-    #[test]
-    fn page_slices_by_offset_and_limit() {
-        let plugins: Vec<_> = (0..5).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
-        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
-        let got = page(&filtered, 1, 2);
-        assert_eq!(got.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["1", "2"]);
+    #[tokio::test]
+    async fn list_catalog_page_installed_true_makes_one_batched_ids_call() {
+        let _home = TempHome::new();
+        mark_installed("i1");
+        mark_installed("i2");
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_handler = calls.clone();
+        let upstream = axum::Router::new().route(
+            "/api/plugins",
+            axum::routing::get(
+                move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let calls = calls_for_handler.clone();
+                    async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let ids_param = params.get("ids").cloned().unwrap_or_default();
+                        let mut ids: Vec<&str> = ids_param.split(',').collect();
+                        ids.sort();
+                        let page: Vec<_> = ids.iter().map(|id| plugin_json(id, "dsh", id)).collect();
+                        axum::Json(serde_json::json!({"data": page, "total": page.len()}))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let api_base_url = format!("http://127.0.0.1:{port}");
+        let client = build_client().unwrap();
+
+        let (rows, total) = list_catalog_page(&client, &api_base_url, None, Some(true), 0, 10).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(rows.iter().map(|(p, _)| p.id.as_str()).collect::<Vec<_>>(), vec!["i1", "i2"]);
+        assert!(rows.iter().all(|(_, installed)| *installed));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "exactly one batched call, not one per id");
     }
 
-    #[test]
-    fn page_offset_past_end_is_empty_not_an_error() {
-        let plugins: Vec<_> = (0..3).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
-        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
-        assert!(page(&filtered, 100, 10).is_empty());
+    #[tokio::test]
+    async fn list_catalog_page_uninstalled_backfills_a_short_page() {
+        let _home = TempHome::new();
+        mark_installed("a1");
+
+        let upstream = axum::Router::new().route(
+            "/api/plugins",
+            axum::routing::get(
+                move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    let offset: usize = params.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let page = if offset == 0 {
+                        vec![
+                            plugin_json("a1", "agent_plugin", "src-a1"),
+                            plugin_json("u1", "dsh", "pkg-1"),
+                            plugin_json("u2", "dsh", "pkg-2"),
+                        ]
+                    } else {
+                        vec![
+                            plugin_json("u3", "dsh", "pkg-3"),
+                            plugin_json("u4", "dsh", "pkg-4"),
+                            plugin_json("a2", "agent_plugin", "src-a2"),
+                        ]
+                    };
+                    axum::Json(serde_json::json!({"data": page, "total": 6}))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+
+        let client = build_client().unwrap();
+        let api_base_url = format!("http://127.0.0.1:{port}");
+        let (rows, total) = list_catalog_page(&client, &api_base_url, None, Some(false), 0, 3).await.unwrap();
+
+        assert_eq!(total, 6);
+        assert_eq!(rows.iter().map(|(p, _)| p.id.as_str()).collect::<Vec<_>>(), vec!["u1", "u2", "u3"]);
+        assert!(rows.iter().all(|(_, installed)| !installed));
     }
 
-    #[test]
-    fn page_caps_limit_at_the_server_side_max() {
-        let plugins: Vec<_> = (0..(MAX_CATALOG_LIMIT + 10)).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
-        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
-        assert_eq!(page(&filtered, 0, MAX_CATALOG_LIMIT + 10).len(), MAX_CATALOG_LIMIT);
+    #[tokio::test]
+    async fn list_catalog_page_upstream_failure_is_a_real_error_not_empty() {
+        let client = build_client().unwrap();
+        let err = list_catalog_page(&client, "http://127.0.0.1:1", None, None, 0, 10).await.unwrap_err();
+        assert!(err.contains("unreachable"));
     }
 }
