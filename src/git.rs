@@ -125,3 +125,161 @@ pub async fn status(root: &Path) -> GitStatus {
     GitStatus { is_repo: true, branch, dirty, files }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub author: String,
+    /// Strict ISO 8601 (`git log --pretty=%aI`), so the UI can just
+    /// `new Date()` it without a custom parser.
+    pub date: String,
+}
+
+/// `\x1f` (unit separator) between fields -- never appears in a commit
+/// message/author, so no escaping is needed to split the log back apart.
+const LOG_SEP: &str = "\x1f";
+
+/// Most recent `limit` commits on the current branch, newest first.
+/// Never errors -- a non-repo or a repo with no commits yet just comes
+/// back empty.
+pub async fn log(root: &Path, limit: usize) -> Vec<LogEntry> {
+    if !is_repo(root).await {
+        return vec![];
+    }
+    let format = format!("--pretty=format:%H{LOG_SEP}%h{LOG_SEP}%s{LOG_SEP}%an{LOG_SEP}%aI");
+    let n = format!("-{limit}");
+    let out = run(root, &["log", &n, &format]).await.unwrap_or_default();
+    out.lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split(LOG_SEP).collect();
+            let [hash, short_hash, message, author, date] = parts.as_slice() else { return None };
+            Some(LogEntry {
+                hash: hash.to_string(),
+                short_hash: short_hash.to_string(),
+                message: message.to_string(),
+                author: author.to_string(),
+                date: date.to_string(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitResult {
+    pub hash: String,
+    pub short_hash: String,
+    pub summary: String,
+}
+
+/// `git add -A` then `git commit -m <message>` against `root`. Rejects a
+/// blank message and a clean working tree with a clear error rather than
+/// letting either hit git and pass its raw failure through.
+pub async fn commit(root: &Path, message: &str) -> Result<CommitResult, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("commit message is required".to_string());
+    }
+    if !is_repo(root).await {
+        return Err(format!("{} is not a git repository", root.display()));
+    }
+    run(root, &["add", "-A"]).await?;
+    let porcelain = run(root, &["status", "--porcelain=v1"]).await.unwrap_or_default();
+    if porcelain.trim().is_empty() {
+        return Err("nothing to commit".to_string());
+    }
+    run(root, &["commit", "-m", message]).await?;
+    let hash = run(root, &["rev-parse", "HEAD"]).await?;
+    let short_hash = run(root, &["rev-parse", "--short", "HEAD"]).await?;
+    Ok(CommitResult { hash, short_hash, summary: message.to_string() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kiralm-git-test-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn init_repo(dir: &Path) {
+        run(dir, &["init", "--quiet"]).await.unwrap();
+        run(dir, &["config", "user.email", "test@example.com"]).await.unwrap();
+        run(dir, &["config", "user.name", "Test"]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn log_is_empty_for_a_non_repo() {
+        let dir = temp_dir("log-non-repo");
+        assert!(log(&dir, 50).await.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn log_returns_real_commits_newest_first() {
+        let dir = temp_dir("log-real");
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        run(&dir, &["add", "-A"]).await.unwrap();
+        run(&dir, &["commit", "-m", "first commit"]).await.unwrap();
+        std::fs::write(dir.join("a.txt"), "two").unwrap();
+        run(&dir, &["add", "-A"]).await.unwrap();
+        run(&dir, &["commit", "-m", "second commit"]).await.unwrap();
+
+        let entries = log(&dir, 50).await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "second commit");
+        assert_eq!(entries[1].message, "first commit");
+        assert!(!entries[0].hash.is_empty());
+        assert!(!entries[0].short_hash.is_empty());
+        assert_eq!(entries[0].author, "Test");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_empty_message() {
+        let dir = temp_dir("commit-empty-msg");
+        init_repo(&dir).await;
+        let err = commit(&dir, "   ").await.unwrap_err();
+        assert!(err.contains("message is required"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_clean_tree() {
+        let dir = temp_dir("commit-clean");
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        run(&dir, &["add", "-A"]).await.unwrap();
+        run(&dir, &["commit", "-m", "seed"]).await.unwrap();
+
+        let err = commit(&dir, "no changes").await.unwrap_err();
+        assert!(err.contains("nothing to commit"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_creates_a_real_commit_visible_in_log() {
+        let dir = temp_dir("commit-real");
+        init_repo(&dir).await;
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        run(&dir, &["add", "-A"]).await.unwrap();
+        run(&dir, &["commit", "-m", "seed"]).await.unwrap();
+
+        std::fs::write(dir.join("b.txt"), "two").unwrap();
+        let result = commit(&dir, "add b.txt").await.unwrap();
+        assert_eq!(result.summary, "add b.txt");
+        assert!(!result.hash.is_empty());
+        assert!(result.hash.starts_with(&result.short_hash));
+
+        let entries = log(&dir, 50).await;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "add b.txt");
+        assert_eq!(entries[0].hash, result.hash);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

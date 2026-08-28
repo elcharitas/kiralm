@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import type { PointerEvent, ReactNode } from "react";
 import {
   Braces,
   ChevronRight,
   Columns2,
   FileCode,
   FileCode2,
-  FileDiff,
+  GitBranch,
   File as FileIcon,
   Image,
   MemoryStick,
@@ -22,10 +23,55 @@ import type { StatusResponse } from "../api";
 import type { ChatSession } from "../sessions";
 import { turnFileDiffsOf, type DiffLine, type TurnFileDiff } from "../diff";
 import { formatBytes } from "../format";
+import { GitPanel } from "./GitPanel";
 import { McpPanel } from "./McpPanel";
 import { PluginsPanel } from "./PluginsPanel";
 import { Select } from "./Select";
 import { SkillsPanel } from "./SkillsPanel";
+
+// Min height (px) either half of the Source tab's split can be dragged
+// to, so the handle can't collapse a section to zero/negative.
+const SPLIT_MIN_SECTION = 96;
+const SPLIT_HANDLE_HEIGHT = 22;
+
+// Pointer-driven vertical split for the Source tab: git panel on top,
+// diff view below, resized by dragging the handle between them.
+function SourceSplit({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [topHeight, setTopHeight] = useState(220);
+  const dragging = useRef(false);
+
+  const onDown = (e: PointerEvent<HTMLDivElement>) => {
+    dragging.current = true;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e: PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current || !containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const max = rect.height - SPLIT_MIN_SECTION - SPLIT_HANDLE_HEIGHT;
+    const next = Math.min(max, Math.max(SPLIT_MIN_SECTION, e.clientY - rect.top));
+    setTopHeight(next);
+  };
+  const onUp = (e: PointerEvent<HTMLDivElement>) => {
+    dragging.current = false;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <div className="git-source-split" ref={containerRef}>
+      <div className="git-source-split-top" style={{ height: topHeight }}>
+        {top}
+      </div>
+      <div
+        className="git-source-split-handle"
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+      />
+      <div className="git-source-split-bottom">{bottom}</div>
+    </div>
+  );
+}
 
 export type RightPanelMode = "split" | "collapsed";
 
@@ -96,11 +142,11 @@ export function RightPanel({
   const activeTurn = turns[Math.min(turnIdx, turns.length - 1)];
   const files = turnFileDiffsOf(activeTurn?.steps);
 
-  const [tab, setTab] = useState<string>("diff");
+  const [tab, setTab] = useState<string>("plugins");
   const activeTab =
     tab === "skills" || tab === "mcp" || tab === "plugins" || files.some((f) => f.filename === tab)
       ? tab
-      : "diff";
+      : "source";
   const [open, setOpen] = useState<Record<string, boolean>>({});
 
   // Collapsed = a slim rail with just the reopen control, same pattern
@@ -172,14 +218,14 @@ export function RightPanel({
         <button
           type="button"
           className={
-            activeTab === "diff"
+            activeTab === "source"
               ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
               : "right-panel-tab right-panel-tab-diff"
           }
-          onClick={() => setTab("diff")}
-          title="Diff"
+          onClick={() => setTab("source")}
+          title="Source"
         >
-          <FileDiff size={14} /> <span className="right-panel-tab-label">Diff</span>
+          <GitBranch size={14} /> <span className="right-panel-tab-label">Source</span>
         </button>
         <div className="right-panel-tab-actions">
           <button type="button" className="right-panel-icon-btn" title="Collapse" onClick={() => onModeChange("collapsed")}>
@@ -223,32 +269,39 @@ export function RightPanel({
           <McpPanel />
         ) : activeTab === "plugins" ? (
           <PluginsPanel />
-        ) : files.length === 0 ? (
-          <p className="settings-hint">No changed files in this turn.</p>
-        ) : activeTab === "diff" ? (
-          <ul className="file-list">
-            {files.map((f) => (
-              <FileRow
-                key={f.filename}
-                f={f}
-                open={!!open[f.filename]}
-                onToggle={() => setOpen((o) => ({ ...o, [f.filename]: !o[f.filename] }))}
-              />
-            ))}
-          </ul>
         ) : (
-          (() => {
-            const f = files.find((x) => x.filename === activeTab)!;
-            return (
-              <>
-                <div className="file-stats file-stats-standalone">
-                  <span className="stat-add">+{f.added}</span>
-                  <span className="stat-del">-{f.removed}</span>
-                </div>
-                <DiffBody lines={f.lines} />
-              </>
-            );
-          })()
+          <SourceSplit
+            top={<GitPanel projectId={session?.projectId} />}
+            bottom={
+              files.length === 0 ? (
+                <p className="settings-hint">No changed files in this turn.</p>
+              ) : activeTab === "source" ? (
+                <ul className="file-list">
+                  {files.map((f) => (
+                    <FileRow
+                      key={f.filename}
+                      f={f}
+                      open={!!open[f.filename]}
+                      onToggle={() => setOpen((o) => ({ ...o, [f.filename]: !o[f.filename] }))}
+                    />
+                  ))}
+                </ul>
+              ) : (
+                (() => {
+                  const f = files.find((x) => x.filename === activeTab)!;
+                  return (
+                    <>
+                      <div className="file-stats file-stats-standalone">
+                        <span className="stat-add">+{f.added}</span>
+                        <span className="stat-del">-{f.removed}</span>
+                      </div>
+                      <DiffBody lines={f.lines} />
+                    </>
+                  );
+                })()
+              )
+            }
+          />
         )}
       </div>
 

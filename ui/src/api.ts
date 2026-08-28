@@ -123,6 +123,21 @@ export interface GitStatus {
   files: GitFileStatus[];
 }
 
+export interface GitLogEntry {
+  hash: string;
+  short_hash: string;
+  message: string;
+  author: string;
+  // Strict ISO 8601 (git's %aI), parseable with plain `new Date()`.
+  date: string;
+}
+
+export interface GitCommitResult {
+  hash: string;
+  short_hash: string;
+  summary: string;
+}
+
 // `~/.kiralm/skills/<name>/SKILL.md`'s wire shape -- global, no
 // per-workspace scoping. `enabled` is KiraLM's own state (skills.json),
 // not part of the SKILL.md format itself.
@@ -365,6 +380,22 @@ export const api = {
   // for a project that isn't a git checkout, not an error.
   gitStatus: (projectId: string) =>
     fetch(`/api/projects/${encodeURIComponent(projectId)}/git/status`).then((r) => asJson<GitStatus>(r)),
+
+  // Real `git log` for a project's directory, most recent 50 commits.
+  // Empty list for a project that isn't a git checkout, not an error.
+  gitLog: (projectId: string) =>
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/git/log`).then((r) =>
+      asJson<{ commits: GitLogEntry[] }>(r),
+    ),
+
+  // Real `git add -A` + `git commit -m` against a project's directory.
+  // Throws with the real git error (e.g. "nothing to commit").
+  gitCommit: (projectId: string, message: string) =>
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/git/commit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message }),
+    }).then((r) => asJson<GitCommitResult>(r)),
 
   // Server-side generation state for a chat session: buffered-so-far
   // text + whether it's still running,
