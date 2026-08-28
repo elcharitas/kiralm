@@ -26,10 +26,8 @@ pub fn detect(cloudflared_bin: &str) -> anyhow::Result<()> {
         .arg("--version")
         .output()
         .map_err(|_| {
-            anyhow::anyhow!(
-                "cloudflared not found at {cloudflared_bin}. Install it via 'brew install cloudflared', \
-                 or set tunnel.cloudflared_bin"
-            )
+            tracing::warn!("cloudflared not found at {cloudflared_bin}");
+            anyhow::anyhow!("remote access needs cloudflared installed. run 'brew install cloudflared', then try again")
         })?;
     Ok(())
 }
@@ -109,10 +107,12 @@ pub async fn provision(config: &Config) -> anyhow::Result<Provisioned> {
         .post(format!("{}/api/account/tunnel", config.cloud.api_base_url))
         .bearer_auth(token)
         .send()
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!(crate::api::upstream_unreachable("tunnel provisioning", &e)))?;
     if !resp.status().is_success() {
+        let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("tunnel provisioning failed: {body}");
+        anyhow::bail!(crate::api::upstream_error("tunnel provisioning", status, &body));
     }
     Ok(resp.json().await?)
 }
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn detect_reports_missing_binary_cleanly() {
         let err = detect("/definitely/not/a/real/path/cloudflared").unwrap_err();
-        assert!(err.to_string().contains("cloudflared not found"));
+        assert!(err.to_string().contains("cloudflared installed"));
     }
 
     /// Guards the provisioning response shape against kiralm-web drift.

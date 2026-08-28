@@ -195,7 +195,7 @@ async fn chat_completions(
             return openai_err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
-                e.to_string(),
+                super::upstream_unreachable("chat completion", &e),
                 None,
             )
         }
@@ -233,7 +233,7 @@ async fn chat_completions(
                 return openai_err(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "api_error",
-                    e.to_string(),
+                    super::upstream_malformed("chat completion", &e),
                     None,
                 )
             }

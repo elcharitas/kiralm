@@ -30,6 +30,32 @@ use crate::residency;
 use crate::settings::Settings;
 use crate::state::{ModelManifest, State};
 
+// ---------------------------------------------------------------------
+// Upstream error sanitizing: a failed call to another service (a local
+// llama-server child, kiralm-web, cloudflared's provisioning API) must
+// never have its raw body or error Display forwarded verbatim into a
+// user-facing message -- that body is arbitrary content from a third
+// party. Log the real detail for diagnosis, return a short safe reason.
+// ---------------------------------------------------------------------
+
+/// A response came back but wasn't a success status.
+pub fn upstream_error(context: &str, status: reqwest::StatusCode, body: &str) -> String {
+    tracing::warn!("{context}: upstream returned {status}: {body}");
+    format!("{context} failed (upstream returned {status})")
+}
+
+/// The request never got a response at all (refused, timed out, DNS).
+pub fn upstream_unreachable(context: &str, e: &reqwest::Error) -> String {
+    tracing::warn!("{context}: {e}");
+    format!("{context} failed: could not reach upstream")
+}
+
+/// A response came back but couldn't be parsed as expected.
+pub fn upstream_malformed(context: &str, e: &impl std::fmt::Display) -> String {
+    tracing::warn!("{context}: malformed upstream response: {e}");
+    format!("{context} failed: upstream returned an unexpected response")
+}
+
 /// A chat session's server-side generation record: written by the
 /// background task draining the upstream stream (openai.rs), read by
 /// both the live response (via `tap`, while still running) and the

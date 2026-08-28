@@ -453,7 +453,7 @@ async fn non_stream_messages(
             return anthropic_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
-                format!("upstream request failed: {e}"),
+                super::upstream_unreachable("message", &e),
             )
         }
     };
@@ -468,7 +468,7 @@ async fn non_stream_messages(
         return anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
-            format!("upstream returned {status}: {body}"),
+            super::upstream_error("message", status, &body),
         );
     }
     let parsed: ChatCompletionResponse = match resp.json().await {
@@ -477,7 +477,7 @@ async fn non_stream_messages(
             return anthropic_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
-                format!("upstream returned malformed response: {e}"),
+                super::upstream_malformed("message", &e),
             )
         }
     };
@@ -530,7 +530,7 @@ async fn stream_messages(
             return anthropic_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
-                format!("upstream request failed: {e}"),
+                super::upstream_unreachable("message", &e),
             )
         }
     };
@@ -545,7 +545,7 @@ async fn stream_messages(
         return anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
-            format!("upstream returned {status}: {body}"),
+            super::upstream_error("message", status, &body),
         );
     }
 
@@ -599,9 +599,10 @@ fn translate_stream(
             let chunk = match byte_stream.next().await {
                 Some(Ok(bytes)) => bytes,
                 Some(Err(e)) => {
+                    tracing::warn!("message stream: upstream stream error: {e}");
                     yield Ok(sse_json("error", json!({
                         "type": "error",
-                        "error": { "type": "api_error", "message": format!("upstream stream error: {e}") },
+                        "error": { "type": "api_error", "message": "message failed: upstream stream error" },
                     })));
                     errored = true;
                     break 'read;
