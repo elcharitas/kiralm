@@ -628,14 +628,6 @@
   gap: 20px;
 }
 
-.settings-wrap-flush {
-  padding: 24px 0 0;
-}
-
-.settings-wrap-flush .settings-tabs {
-  padding: 0 32px;
-}
-
 .settings-tabs {
   display: flex;
   gap: 4px;
@@ -668,11 +660,9 @@
   border-bottom-color: var(--accent);
 }
 
+/* Nested inside .settings-wrap, which already centers/insets the box
+   -- its own max-width/padding would double up and drift apart. */
 .view {
-  max-width: 1080px;
-  margin: 0 auto;
-  width: 100%;
-  padding: 24px 32px;
   display: flex;
   flex-direction: column;
   gap: 20px;
