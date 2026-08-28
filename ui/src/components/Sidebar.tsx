@@ -14,7 +14,6 @@ import {
   RotateCw,
   Search,
   Settings,
-  Sparkles,
   SquarePen,
   Trash2,
   UnfoldVertical,
@@ -94,7 +93,9 @@ export function Sidebar({
     const collapsed_workspaces = Object.entries(next)
       .filter(([, v]) => v)
       .map(([id]) => id);
-    saveSettings({ ...settings, collapsed_workspaces });
+    saveSettings({ ...settings, collapsed_workspaces }).catch((e) =>
+      toast(e instanceof Error ? e.message : String(e), "error"),
+    );
   };
 
   const [tunnelEnabled, setTunnelEnabled] = useState(false);
@@ -195,9 +196,6 @@ export function Sidebar({
           </div>
           <div className="session-row-bottom">
             <span className="session-preview truncate">{previewOf(s)}</span>
-            <span className="session-row-flare">
-              <Sparkles size={12} />
-            </span>
           </div>
         </button>
       </li>

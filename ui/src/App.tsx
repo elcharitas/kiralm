@@ -12,6 +12,7 @@ import { useProjects } from "./hooks/useProjects";
 import { useRunningGenerations } from "./hooks/useRunningGenerations";
 import { useGitStatus } from "./hooks/useGitStatus";
 import { useSettings } from "./settings";
+import { useDialogs } from "./components/Dialogs";
 import type { Project } from "./api";
 
 type View = "thread" | "settings" | "home";
@@ -24,10 +25,14 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [rightPanelMode, setRightPanelMode] = useState<"split" | "collapsed">("split");
   const { settings, save: saveSettings } = useSettings();
+  const { toast } = useDialogs();
   // Persisted server-side (settings.json), not local state -- collapse
   // should survive a reload/relaunch, not just this tab's lifetime.
   const sidebarCollapsed = settings.sidebar_collapsed;
-  const setSidebarCollapsed = (next: boolean) => saveSettings({ ...settings, sidebar_collapsed: next });
+  const setSidebarCollapsed = (next: boolean) =>
+    saveSettings({ ...settings, sidebar_collapsed: next }).catch((e) =>
+      toast(e instanceof Error ? e.message : String(e), "error"),
+    );
   const { status, error, refresh } = useStatus();
   const {
     sessions,

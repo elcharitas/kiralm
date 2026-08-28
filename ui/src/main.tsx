@@ -10,8 +10,10 @@ import { DialogsProvider } from "./components/Dialogs";
 import { SettingsProvider, DEFAULT_SETTINGS } from "./settings";
 import { api } from "./api";
 import { installDesktopTransport } from "./desktopTransport";
+import { installScrollbarAutoHide } from "./scrollbarAutoHide";
 
 installDesktopTransport();
+installScrollbarAutoHide();
 
 // Settings are fetched once, before the first render, so every
 // consumer (ChatView, useSessions, ...) can read them synchronously

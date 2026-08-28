@@ -28,6 +28,7 @@
   --verdict-bad-bg: #2a1216;
 
   --gap: 0.75rem;
+  --list-gap: 6px;
   --radius-sm: 0.25rem;
   --radius: 0.5rem;
   --radius-lg: 1rem;
@@ -92,17 +93,26 @@ button {
 }
 
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 3px;
+  height: 3px;
 }
 
+/* Thumb length is already proportional to visible/total content by
+   default -- a barely-overflowing area gets a long thumb, a long one
+   a short thumb, with no extra CSS needed. Invisible at rest; revealed
+   only while `.is-scrolling` is set (see scrollbarAutoHide.ts) so it
+   never shows on an idle, merely-hovered container. */
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
+  background: transparent;
   border-radius: 2px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.3);
+.is-scrolling::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.is-scrolling::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
 }
 
 ::-webkit-scrollbar-track {

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { Download, Trash2 } from "lucide-react";
 import { api, type CatalogPlugin } from "../api";
+import { Dial } from "./Dial";
 import { useDialogs } from "./Dialogs";
 import { Select } from "./Select";
 
@@ -199,14 +201,24 @@ export function PluginsPanel() {
                   <span className="settings-hint skills-row-desc truncate">{p.description ?? p.source}</span>
                 </div>
                 {pendingId === p.id ? (
-                  <div className="plugins-progress" title={pendingAction === "install" ? "Installing…" : "Uninstalling…"} />
+                  <Dial title={pendingAction === "install" ? "Installing…" : "Uninstalling…"} />
                 ) : p.installed ? (
-                  <button type="button" className="btn plugins-btn" onClick={() => uninstall(p)}>
-                    Uninstall
+                  <button
+                    type="button"
+                    className="right-panel-icon-btn plugins-icon-btn-uninstall"
+                    title="Uninstall"
+                    onClick={() => uninstall(p)}
+                  >
+                    <Trash2 size={14} />
                   </button>
                 ) : (
-                  <button type="button" className="btn btn-accent plugins-btn" onClick={() => install(p)}>
-                    Install
+                  <button
+                    type="button"
+                    className="right-panel-icon-btn plugins-icon-btn-install"
+                    title="Install"
+                    onClick={() => install(p)}
+                  >
+                    <Download size={14} />
                   </button>
                 )}
               </li>
