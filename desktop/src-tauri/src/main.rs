@@ -78,6 +78,7 @@ fn main() {
             let url = format!("http://{addr}");
             WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
                 .title("KiraLM")
+                .decorations(false)
                 .inner_size(1100.0, 760.0)
                 .build()?;
 

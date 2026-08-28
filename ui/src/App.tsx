@@ -109,7 +109,7 @@ export default function App() {
   ].join(" ");
 
   return (
-    <div className="app" style={{ gridTemplateColumns }}>
+    <div className="app" style={{ gridTemplateColumns }} data-tauri-drag-region>
       <Sidebar
         sessions={sessions}
         projects={projects}
