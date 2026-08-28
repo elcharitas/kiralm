@@ -204,28 +204,60 @@ fn send_sigterm(_pid: u32) {
     // 5s-timeout SIGKILL fallback still applies. macOS-first.
 }
 
+/// A failed load-verification pass. `permanent` is the caller's signal
+/// for whether this is real evidence the architecture is unsupported
+/// (worth caching forever) or just a transient hiccup -- a slow first
+/// load, a busy port -- that says nothing about the model itself.
+pub struct LoadFailure {
+    pub message: String,
+    pub permanent: bool,
+}
+
 /// Runs the full one-shot load-verification pass used by `pull`:
 /// spawn, wait healthy, send a tiny completion, always shut down.
-/// Returns `Err` with the captured log tail on any failure.
 pub async fn verify_load(
     llama_bin: &str,
     gguf_path: &Path,
     canonical_id: &str,
     port_range: (u16, u16),
-) -> Result<(), String> {
-    let port = allocate_port(port_range).map_err(|e| e.to_string())?;
-    let child = spawn(llama_bin, gguf_path, canonical_id, port, &[])
+) -> Result<(), LoadFailure> {
+    let port = allocate_port(port_range).map_err(|e| LoadFailure {
+        message: e.to_string(),
+        permanent: false,
+    })?;
+    let mut child = spawn(llama_bin, gguf_path, canonical_id, port, &[])
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| LoadFailure {
+            message: e.to_string(),
+            permanent: false,
+        })?;
 
     let health = wait_healthy(port, Duration::from_secs(30)).await;
+    // A health-check timeout with the child still alive just means it
+    // was slow to load (big model, cold disk cache) -- not architecture
+    // evidence. An already-exited child, or a completion request that
+    // fails after health passed, is a real functional break.
+    let crashed = matches!(child.try_wait(), Ok(Some(_)));
     let result = match health {
-        Ok(()) => send_tiny_completion(port).await.map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
+        Ok(()) => send_tiny_completion(port)
+            .await
+            .map_err(|e| (e.to_string(), true)),
+        Err(e) => Err((e.to_string(), crashed)),
     };
 
     // Always tear the probe child down, whether or not it succeeded.
     shutdown(child).await;
 
-    result.map_err(|_| tail_log(canonical_id, 50)).map(|_| ())
+    result.map_err(|(_, permanent)| LoadFailure {
+        message: if permanent {
+            format!(
+                "llama-server failed while loading this model, see {}",
+                log_path_for(canonical_id).display()
+            )
+        } else {
+            "load check timed out (server was still starting) -- not treated as unsupported"
+                .to_string()
+        },
+        permanent,
+    })
 }
