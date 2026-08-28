@@ -1981,6 +1981,91 @@
   grid-template-columns: 80px 1fr;
 }
 
+.git-source-split {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.git-source-split-top {
+  flex-shrink: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.git-source-split-handle {
+  flex-shrink: 0;
+  height: 6px;
+  margin: 8px 0;
+  border-radius: 3px;
+  background: var(--border);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.git-source-split-handle:hover,
+.git-source-split-handle:active {
+  background: var(--border-strong);
+}
+
+.git-source-split-bottom {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.git-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.git-panel-commit-form {
+  display: flex;
+  gap: 8px;
+}
+
+.git-panel-commit-form .mcp-field {
+  flex: 1;
+}
+
+.git-log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.git-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+
+.git-log-row:hover {
+  background: var(--bg-inset);
+}
+
+.git-log-hash {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.git-log-message {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-log-meta {
+  flex-shrink: 0;
+}
+
 .skills-panel {
   display: flex;
   flex-direction: column;
