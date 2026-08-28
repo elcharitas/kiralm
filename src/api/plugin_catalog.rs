@@ -4,12 +4,12 @@
 //! live-mcp-registry wiring api/marketplace.rs and api/agent_plugin.rs
 //! do for their own installs.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::SharedState;
@@ -34,15 +34,27 @@ struct CatalogRow {
     installed: bool,
 }
 
-async fn list_catalog(State(_app): State<SharedState>) -> Response {
-    let rows: Vec<CatalogRow> = plugin_catalog::cached_plugins()
+#[derive(Deserialize)]
+struct ListCatalogQuery {
+    q: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+async fn list_catalog(State(_app): State<SharedState>, Query(params): Query<ListCatalogQuery>) -> Response {
+    let all = plugin_catalog::cached_plugins();
+    let filtered = plugin_catalog::filter_catalog(&all, params.q.as_deref());
+    let total = filtered.len();
+    let offset = params.offset.unwrap_or(0);
+    let limit = params.limit.unwrap_or(plugin_catalog::DEFAULT_CATALOG_LIMIT);
+    let rows: Vec<CatalogRow> = plugin_catalog::page(&filtered, offset, limit)
         .into_iter()
         .map(|plugin| {
-            let installed = plugin_catalog::is_installed(&plugin);
-            CatalogRow { plugin, installed }
+            let installed = plugin_catalog::is_installed(plugin);
+            CatalogRow { plugin: plugin.clone(), installed }
         })
         .collect();
-    Json(json!({"data": rows})).into_response()
+    Json(json!({"data": rows, "total": total})).into_response()
 }
 
 fn find_row(id: &str) -> Option<CloudPlugin> {

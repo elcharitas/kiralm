@@ -70,6 +70,32 @@ pub fn cached_plugins() -> Vec<CloudPlugin> {
     load_cache().map(|c| c.plugins).unwrap_or_default()
 }
 
+pub const DEFAULT_CATALOG_LIMIT: usize = 50;
+pub const MAX_CATALOG_LIMIT: usize = 200;
+
+/// Case-insensitive substring match on name/description, kept as
+/// borrows so `is_installed` only runs on the page actually returned.
+pub fn filter_catalog<'a>(plugins: &'a [CloudPlugin], q: Option<&str>) -> Vec<&'a CloudPlugin> {
+    let needle = q.map(str::trim).filter(|s| !s.is_empty()).map(str::to_lowercase);
+    match needle {
+        None => plugins.iter().collect(),
+        Some(needle) => plugins
+            .iter()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&needle)
+                    || p.description.as_deref().unwrap_or("").to_lowercase().contains(&needle)
+            })
+            .collect(),
+    }
+}
+
+/// Slices an already-filtered list; an out-of-range offset yields an
+/// empty page rather than an error, same as a normal slice split.
+pub fn page<'a>(filtered: &[&'a CloudPlugin], offset: usize, limit: usize) -> Vec<&'a CloudPlugin> {
+    let limit = limit.min(MAX_CATALOG_LIMIT);
+    filtered.iter().skip(offset).take(limit).copied().collect()
+}
+
 static LAST_FETCH_FAILED: AtomicBool = AtomicBool::new(false);
 static SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
@@ -393,5 +419,49 @@ mod tests {
         let r = row("c1", "claude_marketplace", "https://github.com/org/repo", None);
         let Err(err) = install("dsh", &r).await else { panic!("expected an error") };
         assert!(err.contains("plugin_name"));
+    }
+
+    fn described(id: &str, name: &str, description: &str) -> CloudPlugin {
+        let mut p = row(id, "dsh", id, None);
+        p.name = name.to_string();
+        p.description = Some(description.to_string());
+        p
+    }
+
+    #[test]
+    fn filter_catalog_matches_name_or_description_case_insensitively() {
+        let plugins =
+            vec![described("a", "Alpha Tools", "linting"), described("b", "Beta", "ALPHA-flavored helper")];
+        let hits = filter_catalog(&plugins, Some("alpha"));
+        assert_eq!(hits.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn filter_catalog_empty_query_returns_everything() {
+        let plugins = vec![described("a", "Alpha", "x"), described("b", "Beta", "y")];
+        assert_eq!(filter_catalog(&plugins, None).len(), 2);
+        assert_eq!(filter_catalog(&plugins, Some("  ")).len(), 2);
+    }
+
+    #[test]
+    fn page_slices_by_offset_and_limit() {
+        let plugins: Vec<_> = (0..5).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
+        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
+        let got = page(&filtered, 1, 2);
+        assert_eq!(got.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["1", "2"]);
+    }
+
+    #[test]
+    fn page_offset_past_end_is_empty_not_an_error() {
+        let plugins: Vec<_> = (0..3).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
+        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
+        assert!(page(&filtered, 100, 10).is_empty());
+    }
+
+    #[test]
+    fn page_caps_limit_at_the_server_side_max() {
+        let plugins: Vec<_> = (0..(MAX_CATALOG_LIMIT + 10)).map(|i| described(&i.to_string(), &i.to_string(), "")).collect();
+        let filtered: Vec<&CloudPlugin> = plugins.iter().collect();
+        assert_eq!(page(&filtered, 0, MAX_CATALOG_LIMIT + 10).len(), MAX_CATALOG_LIMIT);
     }
 }
