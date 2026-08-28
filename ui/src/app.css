@@ -748,10 +748,15 @@
 .pull-form {
   display: flex;
   gap: 8px;
+  /* Nested flex row: without this, its own automatic min-content
+     (not the input's) is what blocks shrinking below it. */
+  min-width: 0;
 }
 
 .pull-input {
-  width: 320px;
+  flex: 1;
+  min-width: 0;
+  max-width: 320px;
   background: var(--bg-inset);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
