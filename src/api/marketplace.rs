@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::SharedState;
-use crate::marketplace::{self, Marketplace};
+use crate::marketplace::{self, Marketplace, PluginSource};
 use crate::mcp;
 
 pub fn routes() -> Router<SharedState> {
@@ -62,7 +62,7 @@ async fn refresh_marketplace(State(_app): State<SharedState>, Path(slug): Path<S
 #[derive(Serialize)]
 struct PluginView {
     name: String,
-    source: String,
+    source: PluginSource,
     description: Option<String>,
     installed: bool,
 }
@@ -86,7 +86,7 @@ async fn list_plugins(State(_app): State<SharedState>, Path(slug): Path<String>)
 }
 
 async fn install_plugin(State(app): State<SharedState>, Path((slug, name)): Path<(String, String)>) -> Response {
-    let outcome = match marketplace::install_plugin(&slug, &name) {
+    let outcome = match marketplace::install_plugin(&slug, &name).await {
         Ok(o) => o,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
