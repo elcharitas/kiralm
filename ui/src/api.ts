@@ -264,8 +264,14 @@ export interface CloudLoginStart {
 async function asJson<T>(res: Response): Promise<T> {
   const body = await res.json().catch(() => null);
   if (!res.ok) {
+    // Two real shapes in the wild: the daemon's own routes return a bare
+    // `{error: "..."}` string, kiralm-web/OpenAI-style routes return the
+    // richer `{error: {message: "..."}}`.
+    const rawError = (body as { error?: unknown } | null)?.error;
     const message =
-      (body as ApiError | null)?.error?.message ?? `${res.status} ${res.statusText}`;
+      typeof rawError === "string"
+        ? rawError
+        : (rawError as { message?: string } | undefined)?.message ?? `${res.status} ${res.statusText}`;
     throw new Error(message);
   }
   return body as T;
