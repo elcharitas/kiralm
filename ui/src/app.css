@@ -2254,6 +2254,13 @@
   height: 1px;
 }
 
+/* Stale-while-revalidate: old rows stay put (dimmed) instead of
+   flashing to empty while a search/filter change re-fetches. */
+.plugins-list-revalidating {
+  opacity: 0.5;
+  transition: opacity 0.1s ease;
+}
+
 .switch-input-wrap {
   flex-shrink: 0;
   display: flex;
