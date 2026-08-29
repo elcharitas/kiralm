@@ -254,6 +254,7 @@ async fn download_with_resume(
 
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
+        .read(true)
         .write(true)
         .truncate(false) // resuming appends; the non-resume branch below truncates explicitly
         .open(dest_partial)
@@ -501,6 +502,52 @@ async fn download_and_verify_leader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resumed_download_hashes_existing_partial() {
+        use axum::http::{header, HeaderMap, StatusCode};
+        use axum::routing::get;
+        use axum::Router;
+
+        let app = Router::new().route(
+            "/model.gguf",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers.get(header::RANGE).unwrap(), "bytes=3-");
+                (
+                    StatusCode::PARTIAL_CONTENT,
+                    [(header::CONTENT_LENGTH, "3")],
+                    "def",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let partial = std::env::temp_dir().join(format!(
+            "kiralm-resume-test-{}.gguf.partial",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::write(&partial, b"abc").await.unwrap();
+
+        let hash = download_with_resume(
+            &reqwest::Client::new(),
+            &format!("http://{address}/model.gguf"),
+            &partial,
+            "test/model:Q4_K_M",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(hash, hex::encode(Sha256::digest(b"abcdef")));
+        assert_eq!(tokio::fs::read(&partial).await.unwrap(), b"abcdef");
+        server.abort();
+        let _ = tokio::fs::remove_file(partial).await;
+    }
 
     #[test]
     fn parses_org_repo_quant() {
