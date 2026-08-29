@@ -27,6 +27,7 @@ mod storage;
 mod tools;
 mod tunnel;
 mod tunnel_auth;
+mod workspace_presets;
 
 use std::sync::Arc;
 
