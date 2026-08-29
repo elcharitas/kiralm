@@ -25,6 +25,7 @@ import {
   type PermissionMode,
   type StatusResponse,
   type ToolStep,
+  type WorkspacePresetList,
 } from "../api";
 import { compactMessages, shouldAutoCompact } from "../compact";
 import { formatContextLength, formatDuration, groupBySection, modelName } from "../format";
@@ -81,6 +82,7 @@ export function ChatView({
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
+  const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -263,6 +265,10 @@ export function ChatView({
     };
   }, []);
 
+  useEffect(() => {
+    api.listWorkspacePresets().then(setPresetState, () => {});
+  }, [session?.projectId]);
+
   const toggleKnowledgeIndex = async () => {
     setError(null);
     try {
@@ -272,6 +278,26 @@ export function ChatView({
         await api.startKnowledgeIndex();
       }
       setKnowledgeStatus(await api.knowledgeStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const applyWorkspacePreset = async (presetId: string) => {
+    if (!presetId || !presetState) return;
+    const preset = presetState.presets.find((item) => item.id === presetId);
+    if (!preset) return;
+    const target = session ?? (await onEnsureSession());
+    setError(null);
+    try {
+      await api.applyWorkspacePreset(
+        preset.id,
+        preset.revision,
+        target.projectId,
+      );
+      onSetPermission(target.id, preset.permission);
+      if (preset.preferred_model) setModel(preset.preferred_model);
+      setPresetState(await api.listWorkspacePresets());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -288,6 +314,16 @@ export function ChatView({
 
   const isStreamingThisSession = sending && streamingSessionId === session?.id;
   const messages = session?.messages ?? [];
+  const presetBinding = session
+    ? presetState?.bindings[session.projectId]
+    : undefined;
+  const activePresetId = presetState?.presets.some(
+    (preset) =>
+      preset.id === presetBinding?.preset_id &&
+      preset.revision === presetBinding.preset_revision,
+  )
+    ? presetBinding?.preset_id ?? ""
+    : "";
 
   // Everything except the model picker: collapses into the "..."
   // overflow menu on a narrow composer instead of wrapping/overflowing
@@ -330,6 +366,20 @@ export function ChatView({
         <Database size={12} />
         {knowledgeStatus?.running ? "Cancel indexing" : "Index knowledge"}
       </button>
+      {presetState && presetState.presets.length > 0 && (
+        <Select
+          triggerClassName="chip-select"
+          value={activePresetId}
+          onChange={(value) => void applyWorkspacePreset(value)}
+          options={[
+            { value: "", label: "Workspace preset" },
+            ...presetState.presets.map((preset) => ({
+              value: preset.id,
+              label: preset.name,
+            })),
+          ]}
+        />
+      )}
       <Select
         triggerClassName={
           session?.permission === "full-access"

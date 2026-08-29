@@ -104,6 +104,34 @@ export interface KnowledgeHit {
   };
 }
 
+export interface WorkspacePresetInput {
+  name: string;
+  project_id: string | null;
+  preferred_model: string | null;
+  permission: PermissionMode;
+  optimization_profile: StatusResponse["config"]["optimization_profile"];
+  knowledge_roots: string[];
+  hot_model_ids: string[];
+  enabled_mcp_servers: string[];
+  instruction_text: string;
+}
+
+export interface WorkspacePreset extends WorkspacePresetInput {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+}
+
+export interface WorkspacePresetList {
+  revision: number;
+  presets: WorkspacePreset[];
+  bindings: Record<
+    string,
+    { preset_id: string; preset_revision: number }
+  >;
+}
+
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
 // see sessions.ts's ChatSession for the app-side camelCase shape).
 // `messages` is opaque here -- the daemon stores/returns it verbatim.
@@ -446,6 +474,92 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ project_id: projectId, query, limit }),
     }).then((r) => asJson<{ hits: KnowledgeHit[] }>(r)),
+
+  listWorkspacePresets: () =>
+    fetch("/api/workspace-presets").then((r) =>
+      asJson<WorkspacePresetList>(r),
+    ),
+
+  createWorkspacePreset: (preset: WorkspacePresetInput) =>
+    fetch("/api/workspace-presets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(preset),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  updateWorkspacePreset: (preset: WorkspacePreset) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(preset.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: preset.revision,
+        preset: {
+          name: preset.name,
+          project_id: preset.project_id,
+          preferred_model: preset.preferred_model,
+          permission: preset.permission,
+          optimization_profile: preset.optimization_profile,
+          knowledge_roots: preset.knowledge_roots,
+          hot_model_ids: preset.hot_model_ids,
+          enabled_mcp_servers: preset.enabled_mcp_servers,
+          instruction_text: preset.instruction_text,
+        },
+      }),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  deleteWorkspacePreset: (id: string, revision: number) =>
+    fetch(
+      `/api/workspace-presets/${encodeURIComponent(id)}?revision=${revision}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<WorkspacePreset>(r)),
+
+  duplicateWorkspacePreset: (
+    id: string,
+    revision: number,
+    name: string,
+  ) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(id)}/duplicate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: revision, name }),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  applyWorkspacePreset: (
+    id: string,
+    revision: number,
+    projectId: string,
+  ) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(id)}/apply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project_id: projectId,
+        expected_revision: revision,
+      }),
+    }).then((r) =>
+      asJson<{ preset: WorkspacePreset; project_id: string }>(r),
+    ),
+
+  exportWorkspacePresets: () =>
+    fetch("/api/workspace-presets/export").then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+      return r.text();
+    }),
+
+  importWorkspacePresets: (
+    json: string,
+    mode: "merge" | "replace",
+    expectedStoreRevision: number,
+  ) =>
+    fetch("/api/workspace-presets/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        json,
+        mode,
+        expected_store_revision: expectedStoreRevision,
+      }),
+    }).then((r) => asJson<{ presets: WorkspacePreset[] }>(r)),
 
   listProjects: () => fetch("/api/projects").then((r) => asJson<{ projects: Project[] }>(r)),
 

@@ -189,7 +189,8 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         knowledge::DeterministicEmbedder::default(),
         knowledge::IndexLimits::default(),
     )?);
-    let app_state = Arc::new(AppState::new_with_knowledge(
+    let workspace_presets = Arc::new(workspace_presets::WorkspacePresetStore::load()?);
+    let app_state = Arc::new(AppState::new_with_services(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
@@ -198,9 +199,34 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         tunnel_listener,
         engine_capabilities,
         knowledge,
+        workspace_presets,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
+    }
+    let bindings = app_state.state.read().workspace_preset_bindings.clone();
+    for binding in bindings.values() {
+        let Some(preset) = app_state.workspace_presets.get(&binding.preset_id)
+        else {
+            continue;
+        };
+        if preset.revision != binding.preset_revision {
+            continue;
+        }
+        let Some(profile) = engine::optimization::OptimizationProfile::parse(
+            preset.optimization_profile.as_str(),
+        ) else {
+            continue;
+        };
+        let mut models = preset.hot_model_ids;
+        if let Some(model) = preset.preferred_model {
+            models.push(model);
+        }
+        for model in models {
+            let _ = app_state
+                .supervisor
+                .set_optimization_profile(&model, profile);
+        }
     }
     if let Err(error) = api::prune_artifact_cache(&app_state) {
         tracing::warn!("failed to enforce artifact cache quota: {error}");

@@ -2615,3 +2615,47 @@
   display: flex;
   gap: 8px;
 }
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.preset-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.preset-row > div:first-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preset-row strong {
+  font-size: 12px;
+}
+
+.preset-row span {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.preset-import {
+  position: relative;
+  overflow: hidden;
+}
+
+.preset-import input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}

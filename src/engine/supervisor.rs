@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
@@ -388,6 +388,7 @@ struct SupervisorInner {
     options: SupervisorOptions,
     engines: RwLock<HashMap<String, Arc<Mutex<ManagedEngine>>>>,
     model_locks: SyncMutex<HashMap<String, Arc<Mutex<()>>>>,
+    profile_overrides: SyncRwLock<HashMap<String, OptimizationProfile>>,
     admission_lock: Mutex<()>,
 }
 
@@ -411,6 +412,7 @@ impl EngineSupervisor {
                 options,
                 engines: RwLock::new(HashMap::new()),
                 model_locks: SyncMutex::new(HashMap::new()),
+                profile_overrides: SyncRwLock::new(HashMap::new()),
                 admission_lock: Mutex::new(()),
             }),
         }
@@ -491,6 +493,24 @@ impl EngineSupervisor {
             canonical_id,
             "hot_changed",
             serde_json::json!({"hot": hot}),
+        );
+        Ok(())
+    }
+
+    pub fn set_optimization_profile(
+        &self,
+        canonical_id: &str,
+        profile: OptimizationProfile,
+    ) -> Result<(), SupervisorError> {
+        self.model(canonical_id)?;
+        self.inner
+            .profile_overrides
+            .write()
+            .insert(canonical_id.to_string(), profile);
+        self.publish(
+            canonical_id,
+            "optimization_profile_changed",
+            serde_json::json!({"profile": profile.as_str()}),
         );
         Ok(())
     }
@@ -743,8 +763,15 @@ impl EngineSupervisor {
             return args;
         };
         let ram = self.inner.backend.ram_info();
+        let profile = self
+            .inner
+            .profile_overrides
+            .read()
+            .get(canonical_id)
+            .copied()
+            .unwrap_or(self.inner.options.optimization_profile);
         let request = OptimizationRequest {
-            profile: self.inner.options.optimization_profile,
+            profile,
             hardware: hardware_profile(ram),
             model: ModelOptimizationMetadata::from_gguf(
                 &metadata,
@@ -1367,6 +1394,35 @@ mod tests {
         let snapshot = supervisor.snapshot("model-a").await.unwrap();
         assert_eq!(snapshot.lifecycle, LifecycleState::Ready);
         assert_eq!(snapshot.active_requests, 0);
+    }
+
+    #[test]
+    fn model_profile_overrides_are_scoped_and_validated() {
+        let registry = Arc::new(ModelRegistry::new());
+        registry.insert(model("model-a", 100, false));
+        let backend = Arc::new(FakeEngineBackend::new(10_000));
+        let supervisor = supervisor(registry, backend, RestartPolicy::default());
+
+        supervisor
+            .set_optimization_profile("model-a", OptimizationProfile::Latency)
+            .unwrap();
+
+        assert_eq!(
+            supervisor
+                .inner
+                .profile_overrides
+                .read()
+                .get("model-a")
+                .copied(),
+            Some(OptimizationProfile::Latency)
+        );
+        assert!(matches!(
+            supervisor.set_optimization_profile(
+                "missing",
+                OptimizationProfile::Memory
+            ),
+            Err(SupervisorError::UnknownModel(_))
+        ));
     }
 
     #[test]

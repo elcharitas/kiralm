@@ -35,13 +35,24 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
 }
 
 async fn start_index(State(app): State<SharedState>) -> Response {
-    let roots: Vec<_> = app
+    let projects: Vec<_> = app
         .state
         .read()
         .projects
-        .values()
-        .map(|project| std::path::PathBuf::from(&project.path))
+        .iter()
+        .map(|(id, project)| {
+            (id.clone(), std::path::PathBuf::from(&project.path))
+        })
         .collect();
+    let mut roots = Vec::new();
+    for (project_id, root) in projects {
+        roots.push(root);
+        if let Some(preset) = app.workspace_preset_for(&project_id) {
+            roots.extend(preset.knowledge_roots);
+        }
+    }
+    roots.sort();
+    roots.dedup();
     if roots.is_empty() {
         return error(StatusCode::BAD_REQUEST, "no workspaces are registered");
     }
@@ -127,9 +138,13 @@ async fn search(State(app): State<SharedState>, Json(body): Json<SearchRequest>)
     let Some(root) = root else {
         return error(StatusCode::NOT_FOUND, "workspace not found");
     };
+    let mut roots = vec![root];
+    if let Some(preset) = app.workspace_preset_for(&body.project_id) {
+        roots.extend(preset.knowledge_roots);
+    }
     match app
         .knowledge
-        .search_roots(&body.query, &[root], body.limit.unwrap_or(8).clamp(1, 20))
+        .search_roots(&body.query, &roots, body.limit.unwrap_or(8).clamp(1, 20))
     {
         Ok(hits) => Json(json!({"hits": hits})).into_response(),
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),

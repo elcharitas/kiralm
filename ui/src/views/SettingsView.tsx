@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { api, type AppSettings, type StatusResponse, type TunnelStatus } from "../api";
+import {
+  api,
+  type AppSettings,
+  type PermissionMode,
+  type Project,
+  type StatusResponse,
+  type TunnelStatus,
+  type WorkspacePreset,
+  type WorkspacePresetInput,
+} from "../api";
 import { ModelsView } from "./ModelsView";
 import { useDialogs } from "../components/Dialogs";
 import { Select } from "../components/Select";
@@ -77,6 +86,7 @@ export function SettingsView({
 
       <div className="settings-scroll">
         <GeneralSettingsForm status={status} />
+        <WorkspacePresetsSection status={status} />
         <RemoteAccessSection />
         <DataSection />
       </div>
@@ -327,6 +337,352 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
         </div>
       </section>
     </>
+  );
+}
+
+function emptyPreset(): WorkspacePresetInput {
+  return {
+    name: "",
+    project_id: null,
+    preferred_model: null,
+    permission: "read-only",
+    optimization_profile: "balanced",
+    knowledge_roots: [],
+    hot_model_ids: [],
+    enabled_mcp_servers: [],
+    instruction_text: "",
+  };
+}
+
+function splitValues(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function WorkspacePresetsSection({ status }: { status: StatusResponse | null }) {
+  const { confirm, toast } = useDialogs();
+  const [presets, setPresets] = useState<WorkspacePreset[]>([]);
+  const [storeRevision, setStoreRevision] = useState(0);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [editing, setEditing] = useState<WorkspacePreset | null>(null);
+  const [draft, setDraft] = useState<WorkspacePresetInput>(emptyPreset);
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => {
+    const [presetResult, projectResult] = await Promise.all([
+      api.listWorkspacePresets(),
+      api.listProjects(),
+    ]);
+    setPresets(presetResult.presets);
+    setStoreRevision(presetResult.revision);
+    setProjects(projectResult.projects);
+  };
+
+  useEffect(() => {
+    reload().catch(() => {});
+  }, []);
+
+  const patchDraft = (patch: Partial<WorkspacePresetInput>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const reset = () => {
+    setEditing(null);
+    setDraft(emptyPreset());
+  };
+
+  const savePreset = async () => {
+    setBusy(true);
+    try {
+      if (editing) {
+        await api.updateWorkspacePreset({ ...editing, ...draft });
+        toast("Workspace preset updated", "success");
+      } else {
+        await api.createWorkspacePreset(draft);
+        toast("Workspace preset created", "success");
+      }
+      reset();
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removePreset = async (preset: WorkspacePreset) => {
+    const approved = await confirm({
+      title: "Delete workspace preset",
+      message: `Delete “${preset.name}”?`,
+      confirmLabel: "Delete preset",
+      danger: true,
+    });
+    if (!approved) return;
+    try {
+      await api.deleteWorkspacePreset(preset.id, preset.revision);
+      if (editing?.id === preset.id) reset();
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const duplicatePreset = async (preset: WorkspacePreset) => {
+    try {
+      await api.duplicateWorkspacePreset(
+        preset.id,
+        preset.revision,
+        `${preset.name} copy`,
+      );
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const exportPresets = async () => {
+    try {
+      const body = await api.exportWorkspacePresets();
+      const url = URL.createObjectURL(
+        new Blob([body], { type: "application/json" }),
+      );
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "kiralm-workspace-presets.json";
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const importPresets = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      await api.importWorkspacePresets(
+        await file.text(),
+        "merge",
+        storeRevision,
+      );
+      await reload();
+      toast("Workspace presets imported", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  return (
+    <section className="settings-section">
+      <h3>Workspace presets</h3>
+      <p className="settings-hint">
+        Reuse model, access, optimization, knowledge, MCP, and instruction
+        settings across workspaces.
+      </p>
+      {presets.length > 0 && (
+        <div className="preset-list">
+          {presets.map((preset) => (
+            <div className="preset-row" key={preset.id}>
+              <div>
+                <strong>{preset.name}</strong>
+                <span>
+                  {projects.find((project) => project.id === preset.project_id)
+                    ?.name ?? "Any workspace"}
+                </span>
+              </div>
+              <div className="settings-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setEditing(preset);
+                    setDraft({
+                      name: preset.name,
+                      project_id: preset.project_id,
+                      preferred_model: preset.preferred_model,
+                      permission: preset.permission,
+                      optimization_profile: preset.optimization_profile,
+                      knowledge_roots: preset.knowledge_roots,
+                      hot_model_ids: preset.hot_model_ids,
+                      enabled_mcp_servers: preset.enabled_mcp_servers,
+                      instruction_text: preset.instruction_text,
+                    });
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void duplicatePreset(preset)}
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger-solid"
+                  onClick={() => void removePreset(preset)}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="settings-field">
+        <label htmlFor="preset-name">Name</label>
+        <input
+          id="preset-name"
+          className="settings-input"
+          value={draft.name}
+          onChange={(event) => patchDraft({ name: event.target.value })}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Workspace</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.project_id ?? ""}
+          onChange={(value) => patchDraft({ project_id: value || null })}
+          options={[
+            { value: "", label: "Any workspace" },
+            ...projects.map((project) => ({
+              value: project.id,
+              label: project.name,
+            })),
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Preferred model</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.preferred_model ?? ""}
+          onChange={(value) => patchDraft({ preferred_model: value || null })}
+          options={[
+            { value: "", label: "Automatic" },
+            ...(status?.models ?? []).map((model) => ({
+              value: model.id,
+              label: model.id,
+            })),
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Tool access</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.permission}
+          onChange={(value) =>
+            patchDraft({ permission: value as PermissionMode })
+          }
+          options={[
+            { value: "read-only", label: "Read only" },
+            { value: "ask", label: "Ask before changes" },
+            { value: "full-access", label: "Full access" },
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Runtime optimization</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.optimization_profile}
+          onChange={(value) =>
+            patchDraft({
+              optimization_profile:
+                value as WorkspacePresetInput["optimization_profile"],
+            })
+          }
+          options={[
+            { value: "balanced", label: "Balanced" },
+            { value: "throughput", label: "Throughput" },
+            { value: "latency", label: "Low latency" },
+            { value: "memory", label: "Memory saver" },
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-roots">Extra knowledge roots</label>
+        <input
+          id="preset-roots"
+          className="settings-input mono"
+          placeholder="Comma-separated absolute paths"
+          value={draft.knowledge_roots.join(", ")}
+          onChange={(event) =>
+            patchDraft({ knowledge_roots: splitValues(event.target.value) })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-hot-models">Hot model IDs</label>
+        <input
+          id="preset-hot-models"
+          className="settings-input mono"
+          placeholder="Comma-separated model IDs"
+          value={draft.hot_model_ids.join(", ")}
+          onChange={(event) =>
+            patchDraft({ hot_model_ids: splitValues(event.target.value) })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-mcp">Enabled MCP servers</label>
+        <input
+          id="preset-mcp"
+          className="settings-input mono"
+          placeholder="Comma-separated server names"
+          value={draft.enabled_mcp_servers.join(", ")}
+          onChange={(event) =>
+            patchDraft({
+              enabled_mcp_servers: splitValues(event.target.value),
+            })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-instructions">Workspace instructions</label>
+        <textarea
+          id="preset-instructions"
+          className="settings-input"
+          rows={4}
+          value={draft.instruction_text}
+          onChange={(event) =>
+            patchDraft({ instruction_text: event.target.value })
+          }
+        />
+      </div>
+      <div className="settings-actions">
+        <button
+          type="button"
+          className="btn btn-accent"
+          disabled={busy || !draft.name.trim()}
+          onClick={() => void savePreset()}
+        >
+          {editing ? "Update preset" : "Create preset"}
+        </button>
+        {editing && (
+          <button type="button" className="btn" onClick={reset}>
+            Cancel edit
+          </button>
+        )}
+        <button type="button" className="btn" onClick={exportPresets}>
+          Export
+        </button>
+        <label className="btn preset-import">
+          Import
+          <input
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) =>
+              void importPresets(event.target.files?.[0])
+            }
+          />
+        </label>
+      </div>
+    </section>
   );
 }
 

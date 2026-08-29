@@ -119,6 +119,12 @@ pub struct Project {
     pub last_active_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePresetBinding {
+    pub preset_id: String,
+    pub preset_revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
     pub models: HashMap<String, ModelEntry>,
@@ -127,6 +133,8 @@ pub struct State {
     pub tunnel: Option<TunnelState>,
     #[serde(default)]
     pub projects: HashMap<String, Project>,
+    #[serde(default)]
+    pub workspace_preset_bindings: HashMap<String, WorkspacePresetBinding>,
 }
 
 impl State {

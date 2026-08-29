@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod openai;
 pub mod plugin_catalog;
 pub mod tunnel;
+pub mod workspace_presets;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -136,6 +137,7 @@ pub struct AppState {
     pub supervisor: EngineSupervisor,
     pub knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
     pub knowledge_job: parking_lot::Mutex<Option<IndexCancellation>>,
+    pub workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
 }
 
 impl AppState {
@@ -179,7 +181,15 @@ impl AppState {
             )
             .expect("temporary knowledge index must open"),
         );
-        Self::new_with_knowledge(
+        let preset_path = std::env::temp_dir().join(format!(
+            "kiralm-workspace-presets-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_presets = Arc::new(
+            crate::workspace_presets::WorkspacePresetStore::open(preset_path)
+                .expect("temporary workspace preset store must open"),
+        );
+        Self::new_with_services(
             config,
             registry,
             state,
@@ -188,6 +198,7 @@ impl AppState {
             tunnel_listener,
             engine_capabilities,
             knowledge,
+            workspace_presets,
         )
     }
 
@@ -201,6 +212,39 @@ impl AppState {
         tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
         engine_capabilities: EngineCapabilities,
         knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+    ) -> AppState {
+        let preset_path = std::env::temp_dir().join(format!(
+            "kiralm-workspace-presets-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_presets = Arc::new(
+            crate::workspace_presets::WorkspacePresetStore::open(preset_path)
+                .expect("temporary workspace preset store must open"),
+        );
+        Self::new_with_services(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_services(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
     ) -> AppState {
         let events = Arc::new(EventBus::default());
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
@@ -237,7 +281,23 @@ impl AppState {
             supervisor,
             knowledge,
             knowledge_job: parking_lot::Mutex::new(None),
+            workspace_presets,
         }
+    }
+
+    pub fn workspace_preset_for(
+        &self,
+        project_id: &str,
+    ) -> Option<crate::workspace_presets::WorkspacePreset> {
+        let binding = self
+            .state
+            .read()
+            .workspace_preset_bindings
+            .get(project_id)
+            .cloned()?;
+        self.workspace_presets
+            .get(&binding.preset_id)
+            .filter(|preset| preset.revision == binding.preset_revision)
     }
 
     /// Starts a fresh generation record for `session_id`, replacing any
@@ -382,6 +442,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(anthropic::routes())
         .merge(internal::routes())
         .merge(knowledge::routes())
+        .merge(workspace_presets::routes())
         .merge(tunnel::routes())
         .merge(mcp::routes())
         .merge(marketplace::routes())
