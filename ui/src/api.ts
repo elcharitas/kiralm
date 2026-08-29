@@ -15,6 +15,7 @@ export interface ModelStatus {
   size_bytes: number;
   quant: string;
   hot: boolean;
+  vision_capable: boolean;
   context_length: number | null;
   loaded: boolean;
   rss_bytes: number | null;
@@ -102,6 +103,15 @@ export interface KnowledgeHit {
     start_line: number;
     end_line: number;
   };
+}
+
+export interface AttachmentDescriptor {
+  id: string;
+  sha256: string;
+  media_type: string;
+  kind: "image" | "document" | "text";
+  size_bytes: number;
+  filename: string;
 }
 
 export interface WorkspacePresetInput {
@@ -468,6 +478,32 @@ export const api = {
       asJson<void>(r),
     ),
 
+  uploadAttachment: (
+    reference: string,
+    filename: string,
+    dataUrl: string,
+  ) =>
+    fetch("/api/attachments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reference, filename, data_url: dataUrl }),
+    }).then((r) => asJson<AttachmentDescriptor>(r)),
+
+  attachmentUrl: (id: string) =>
+    `/api/attachments/${encodeURIComponent(id)}`,
+
+  releaseAttachmentReference: (reference: string) =>
+    fetch(
+      `/api/attachment-references/${encodeURIComponent(reference)}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<void>(r)),
+
+  releaseOneAttachment: (id: string, reference: string) =>
+    fetch(
+      `/api/attachments/${encodeURIComponent(id)}/references/${encodeURIComponent(reference)}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<void>(r)),
+
   searchKnowledge: (projectId: string, query: string, limit = 8) =>
     fetch("/api/knowledge/search", {
       method: "POST",
@@ -804,7 +840,12 @@ export interface GenerationState {
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content:
+    | string
+    | Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      >;
 }
 
 // One real tool call the daemon made while producing a turn -- the

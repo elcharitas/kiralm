@@ -192,7 +192,9 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         knowledge::IndexLimits::default(),
     )?);
     let workspace_presets = Arc::new(workspace_presets::WorkspacePresetStore::load()?);
-    let app_state = Arc::new(AppState::new_with_services(
+    let attachments = Arc::new(attachments::AttachmentStore::from_home(&home)?);
+    attachments.cleanup_stale_partials(std::time::Duration::from_secs(86_400))?;
+    let app_state = Arc::new(AppState::new_with_stores(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
@@ -202,6 +204,7 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         engine_capabilities,
         knowledge,
         workspace_presets,
+        attachments,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);

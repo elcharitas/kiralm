@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod agent_plugin;
 pub mod anthropic;
+pub mod attachments;
 pub mod dsh;
 pub mod internal;
 pub mod knowledge;
@@ -138,6 +139,7 @@ pub struct AppState {
     pub knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
     pub knowledge_job: parking_lot::Mutex<Option<IndexCancellation>>,
     pub workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+    pub attachments: Arc<crate::attachments::AttachmentStore>,
 }
 
 impl AppState {
@@ -246,6 +248,44 @@ impl AppState {
         knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
         workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
     ) -> AppState {
+        let attachment_path = std::env::temp_dir().join(format!(
+            "kiralm-attachments-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let attachments = Arc::new(
+            crate::attachments::AttachmentStore::open(
+                attachment_path,
+                crate::attachments::AttachmentLimits::default(),
+            )
+            .expect("temporary attachment store must open"),
+        );
+        Self::new_with_stores(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+            attachments,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_stores(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+    ) -> AppState {
         let events = Arc::new(EventBus::default());
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
         let supervisor = EngineSupervisor::production(
@@ -282,6 +322,7 @@ impl AppState {
             knowledge,
             knowledge_job: parking_lot::Mutex::new(None),
             workspace_presets,
+            attachments,
         }
     }
 
@@ -440,6 +481,7 @@ pub fn build_router(state: SharedState) -> Router {
     Router::new()
         .merge(openai::routes())
         .merge(anthropic::routes())
+        .merge(attachments::routes())
         .merge(internal::routes())
         .merge(knowledge::routes())
         .merge(workspace_presets::routes())

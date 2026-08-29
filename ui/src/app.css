@@ -2659,3 +2659,60 @@
   opacity: 0;
   cursor: pointer;
 }
+
+.composer-attachments,
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.composer-attachments {
+  padding: 8px 10px 0;
+}
+
+.message-attachments {
+  margin-top: 8px;
+}
+
+.message-attachments img {
+  display: block;
+  max-width: min(360px, 100%);
+  max-height: 260px;
+  border-radius: var(--radius);
+  object-fit: contain;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.attachment-chip button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-attach {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.composer-attach input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}

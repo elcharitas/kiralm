@@ -126,6 +126,7 @@ pub struct ModelState {
     /// From the GGUF's trained context window (manifest sidecar).
     /// `None` for cloud entries, whose catalog doesn't carry it.
     pub context_length: Option<u64>,
+    pub vision_capable: bool,
     pub size_bytes: u64,
     pub hot: bool,
     pub status: ModelStatus,
@@ -161,6 +162,7 @@ impl ModelState {
                 .as_ref()
                 .map(|e| (e.active, e.total)),
             context_length: Some(m.context_length_trained),
+            vision_capable: m.vision_capable,
             size_bytes: m.size_bytes,
             hot,
             status: ModelStatus::Unloaded,
@@ -203,6 +205,7 @@ impl ModelState {
             is_moe: false,
             expert_count: None,
             context_length: None,
+            vision_capable: false,
             size_bytes: m.size_bytes.unwrap_or(0),
             hot: false,
             status: ModelStatus::Loaded,

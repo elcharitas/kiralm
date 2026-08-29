@@ -9,6 +9,7 @@ import {
   GitBranch,
   Lock,
   MoreHorizontal,
+  Paperclip,
   Pencil,
   ShieldQuestion,
   Sparkles,
@@ -18,7 +19,9 @@ import {
 import {
   api,
   streamChat,
+  type AttachmentDescriptor,
   type ApprovalDecision,
+  type ChatMessage,
   type GitStatus,
   type KnowledgeStatus,
   type PendingApproval,
@@ -34,6 +37,45 @@ import type { ChatSession, StoredMessage } from "../sessions";
 import { useSettings } from "../settings";
 import { Select } from "../components/Select";
 import { Markdown } from "../components/Markdown";
+
+function blobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("File read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function messageForInference(message: StoredMessage): Promise<ChatMessage> {
+  if (!message.attachments?.length) {
+    return { role: message.role, content: message.content };
+  }
+  let text = message.content;
+  const images: Array<{
+    type: "image_url";
+    image_url: { url: string };
+  }> = [];
+  for (const attachment of message.attachments) {
+    const response = await fetch(api.attachmentUrl(attachment.id));
+    if (!response.ok) throw new Error(`Could not read ${attachment.filename}`);
+    if (attachment.kind === "image") {
+      images.push({
+        type: "image_url",
+        image_url: { url: await blobAsDataUrl(await response.blob()) },
+      });
+    } else if (attachment.kind === "text") {
+      const content = (await response.text()).slice(0, 100_000);
+      text += `\n\n[Attached text: ${attachment.filename}]\n${content}`;
+    } else {
+      text += `\n\n[Attached document: ${attachment.filename}]`;
+    }
+  }
+  return {
+    role: message.role,
+    content: [{ type: "text", text }, ...images],
+  };
+}
 
 function openRaw(text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
@@ -83,6 +125,9 @@ export function ChatView({
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
+  const [attachments, setAttachments] = useState<AttachmentDescriptor[]>([]);
+  const [attachmentReference, setAttachmentReference] = useState<string | null>(null);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -110,7 +155,14 @@ export function ChatView({
 
   const send = async () => {
     const text = input.trim();
-    if (!text || !effectiveModel || sending) return;
+    if ((!text && attachments.length === 0) || !effectiveModel || sending) return;
+    if (
+      attachments.some((attachment) => attachment.kind === "image") &&
+      !effectiveModelObj?.vision_capable
+    ) {
+      setError("The selected model does not support image attachments");
+      return;
+    }
     if (text.toLowerCase() === "/compact") {
       await compact();
       return;
@@ -129,8 +181,17 @@ export function ChatView({
         // Best-effort: send the uncompacted history rather than block the turn over it.
       }
     }
-    const startMessages: StoredMessage[] = [...baseMessages, { role: "user", content: text }];
+    const startMessages: StoredMessage[] = [
+      ...baseMessages,
+      {
+        role: "user",
+        content: text || "Please analyze the attached files.",
+        attachments,
+      },
+    ];
     onUpdateMessages(target.id, startMessages);
+    setAttachments([]);
+    setAttachmentReference(null);
 
     setSending(true);
     setStreamingSessionId(target.id);
@@ -141,9 +202,12 @@ export function ChatView({
     let assistantText = "";
     liveStepsRef.current = [];
     try {
+      const inferenceMessages = await Promise.all(
+        startMessages.map(messageForInference),
+      );
       await streamChat(
         effectiveModel,
-        startMessages.map(({ role, content }) => ({ role, content })),
+        inferenceMessages,
         target.id,
         (token) => {
           assistantText += token;
@@ -179,6 +243,44 @@ export function ChatView({
     // Generation itself is server-side now (decoupled from this
     // connection) -- actually stop it too, not just look away.
     if (streamingSessionId) api.stopGeneration(streamingSessionId).catch(() => {});
+  };
+
+  const uploadAttachments = async (files: FileList | null) => {
+    if (!files?.length || uploadingAttachment) return;
+    if (attachments.length + files.length > 8) {
+      setError("A message can contain at most 8 attachments");
+      return;
+    }
+    const target = session ?? (await onEnsureSession());
+    const reference = `chat:${target.id}`;
+    setAttachmentReference(reference);
+    setUploadingAttachment(true);
+    setError(null);
+    try {
+      for (const file of Array.from(files)) {
+        const descriptor = await api.uploadAttachment(
+          reference,
+          file.name,
+          await blobAsDataUrl(file),
+        );
+        setAttachments((current) => [...current, descriptor]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+
+  const removeAttachment = (attachment: AttachmentDescriptor) => {
+    setAttachments((current) =>
+      current.filter((item) => item.id !== attachment.id),
+    );
+    if (attachmentReference) {
+      api
+        .releaseOneAttachment(attachment.id, attachmentReference)
+        .catch(() => {});
+    }
   };
 
   // Catches this session up with the daemon's server-side generation
@@ -268,6 +370,18 @@ export function ChatView({
   useEffect(() => {
     api.listWorkspacePresets().then(setPresetState, () => {});
   }, [session?.projectId]);
+
+  useEffect(() => {
+    const currentReference = session ? `chat:${session.id}` : null;
+    if (!attachmentReference || attachmentReference === currentReference) return;
+    for (const attachment of attachments) {
+      api
+        .releaseOneAttachment(attachment.id, attachmentReference)
+        .catch(() => {});
+    }
+    setAttachments([]);
+    setAttachmentReference(null);
+  }, [session?.id]);
 
   const toggleKnowledgeIndex = async () => {
     setError(null);
@@ -417,6 +531,23 @@ export function ChatView({
             <div key={i} className="turn-user">
               <div className="chat-bubble chat-bubble-user">
                 <Markdown>{m.content}</Markdown>
+                {m.attachments && m.attachments.length > 0 && (
+                  <div className="message-attachments">
+                    {m.attachments.map((attachment) =>
+                      attachment.kind === "image" ? (
+                        <img
+                          key={attachment.id}
+                          src={api.attachmentUrl(attachment.id)}
+                          alt={attachment.filename}
+                        />
+                      ) : (
+                        <span className="attachment-chip" key={attachment.id}>
+                          {attachment.filename}
+                        </span>
+                      ),
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -585,6 +716,22 @@ export function ChatView({
               </button>
             </div>
           )}
+          {attachments.length > 0 && (
+            <div className="composer-attachments">
+              {attachments.map((attachment) => (
+                <span className="attachment-chip" key={attachment.id}>
+                  {attachment.filename}
+                  <button
+                    type="button"
+                    title={`Remove ${attachment.filename}`}
+                    onClick={() => removeAttachment(attachment)}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           {previewing ? (
             <Markdown className="composer-input composer-preview">
               {input || "Nothing to preview yet."}
@@ -617,6 +764,23 @@ export function ChatView({
           )}
           <div className="composer-toolbar">
             <div className="composer-chips">
+              <label
+                className="chip-select composer-attach"
+                title="Attach an image, PDF, or text file"
+              >
+                <Paperclip size={12} />
+                {uploadingAttachment ? "Uploading…" : "Attach"}
+                <input
+                  type="file"
+                  multiple
+                  disabled={uploadingAttachment}
+                  accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,application/json"
+                  onChange={(event) => {
+                    void uploadAttachments(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
               <button
                 type="button"
                 className="chip-select composer-preview-toggle"

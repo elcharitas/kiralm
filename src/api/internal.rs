@@ -261,6 +261,7 @@ fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
         "quant": m.canonical_id.rsplit(':').next().unwrap_or(""),
         "hot": m.hot,
         "context_length": m.context_length,
+        "vision_capable": m.vision_capable,
         "loaded": matches!(m.status, ModelStatus::Loaded),
         "rss_bytes": m.pid.and_then(residency::read_rss_bytes),
         "verdict": m.verdict.as_ref().map(|v| v.tier.as_str()),
@@ -683,8 +684,20 @@ async fn delete_project(State(app): State<SharedState>, Path(id): Path<String>) 
     // Its chats go with it -- an orphaned chat pointing at a deleted
     // project would just 404 on every subsequent touch/git-status call.
     let mut chats = app.chats.write();
+    let removed_chat_ids: Vec<_> = chats
+        .chats
+        .iter()
+        .filter(|chat| chat.project_id == id)
+        .map(|chat| chat.id.clone())
+        .collect();
     chats.chats.retain(|c| c.project_id != id);
     let _ = chats.save();
+    drop(chats);
+    for chat_id in removed_chat_ids {
+        let _ = app
+            .attachments
+            .release_reference(&format!("chat:{chat_id}"));
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -764,6 +777,9 @@ async fn delete_chat(State(app): State<SharedState>, Path(id): Path<String>) -> 
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
     app.approvals.forget_chat(&id);
+    let _ = app
+        .attachments
+        .release_reference(&format!("chat:{id}"));
     StatusCode::NO_CONTENT.into_response()
 }
 

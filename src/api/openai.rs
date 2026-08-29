@@ -313,10 +313,14 @@ async fn run_tool_loop(
         .and_then(|v| v.as_array())
         .into_iter()
         .flatten()
-        .map(|m| {
-            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
-            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            ChatMessage::text(role, content)
+        .map(|message| {
+            serde_json::from_value::<ChatMessage>(message.clone()).unwrap_or_else(|_| {
+                let role = message
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("user");
+                ChatMessage::text(role, "")
+            })
         })
         .collect();
 
@@ -340,6 +344,12 @@ async fn run_tool_loop(
         .rev()
         .find_map(|message| match (message.role.as_str(), &message.content) {
             ("user", Some(ChatContent::Text(text))) => Some(text.as_str()),
+            ("user", Some(ChatContent::Parts(parts))) => parts.iter().find_map(
+                |part| match part {
+                    ChatContentPart::Text { text } => Some(text.as_str()),
+                    ChatContentPart::ImageUrl { .. } => None,
+                },
+            ),
             _ => None,
         })
         .unwrap_or_default();
@@ -611,26 +621,26 @@ fn append_delta(state: &parking_lot::RwLock<GenerationState>, line: &str) {
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ChatContent {
     Text(String),
     Parts(Vec<ChatContentPart>),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrl },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 pub struct ImageUrl {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]

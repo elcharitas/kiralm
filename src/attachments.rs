@@ -497,6 +497,26 @@ impl AttachmentStore {
         Ok(removed)
     }
 
+    pub fn release_attachment_reference(
+        &self,
+        sha256: &str,
+        reference: &str,
+    ) -> anyhow::Result<bool> {
+        let sha256 = normalize_sha256(sha256)?;
+        validate_reference(reference)?;
+        let mut metadata = self.metadata.lock();
+        let mut next = metadata.clone();
+        let removed = next
+            .attachments
+            .get_mut(&sha256)
+            .is_some_and(|entry| entry.references.remove(reference));
+        if removed {
+            save_metadata(&self.root, &next)?;
+            *metadata = next;
+        }
+        Ok(removed)
+    }
+
     fn release_hash_references(
         &self,
         reference: &str,
@@ -1397,7 +1417,9 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(blob_files, 1);
-        assert_eq!(store.release_reference("chat-a").unwrap(), 1);
+        assert!(store
+            .release_attachment_reference(&first.sha256, "chat-a")
+            .unwrap());
         assert!(store.delete(&first.sha256).is_err());
         assert_eq!(store.release_reference("chat-b").unwrap(), 1);
         assert!(store.delete(&first.sha256).unwrap());
