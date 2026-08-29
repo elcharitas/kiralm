@@ -13,6 +13,7 @@ mod engine;
 mod events;
 mod gguf;
 mod git;
+mod git_workflows;
 mod knowledge;
 mod marketplace;
 mod mcp;
