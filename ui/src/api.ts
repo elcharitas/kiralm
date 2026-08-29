@@ -70,7 +70,7 @@ export interface CloudStatus {
 }
 
 export interface AppSettings {
-  default_permission: "read-only" | "full-access";
+  default_permission: PermissionMode;
   send_on_enter: boolean;
   notify_on_finish: boolean;
   default_hot_on_pull: boolean;
@@ -97,6 +97,28 @@ export interface ChatDto {
   permission: string;
   messages: unknown;
 }
+
+export type PermissionMode = "read-only" | "ask" | "full-access";
+
+export interface PendingApproval {
+  id: string;
+  chat_id: string;
+  tool_name: string;
+  risk:
+    | "read"
+    | "write"
+    | "process_execution"
+    | "network_access"
+    | "git_mutation"
+    | "destructive_filesystem"
+    | "external_mcp";
+  target: string;
+  arguments: unknown;
+  requested_at: string;
+  expires_at: string;
+}
+
+export type ApprovalDecision = "allow_once" | "allow_for_chat" | "deny";
 
 export interface TunnelStatus {
   enabled: boolean;
@@ -474,6 +496,18 @@ export const api = {
       (r) => asJson<void>(r),
     ),
 
+  listApprovals: (chatId?: string) =>
+    fetch(`/api/approvals${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`).then((r) =>
+      asJson<{ approvals: PendingApproval[] }>(r),
+    ),
+
+  resolveApproval: (id: string, decision: ApprovalDecision) =>
+    fetch(`/api/approvals/${encodeURIComponent(id)}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision }),
+    }).then((r) => asJson<void>(r)),
+
   listSkills: () => fetch("/api/skills").then((r) => asJson<{ skills: Skill[] }>(r)),
 
   createSkillFromMarkdown: (markdown: string) =>
@@ -622,6 +656,16 @@ export interface ToolStep {
   // src/tools.rs's FileEdit), present only on that step -- what the
   // Diff tab's real per-turn diff is built from.
   file_edit?: { path: string; before: string | null; after: string } | null;
+  checkpoint?: {
+    operation: string;
+    entries: {
+      path: string;
+      kind: string;
+      content?: number[];
+      link_target?: string;
+      unix_mode?: number;
+    }[];
+  } | null;
 }
 
 // Streams an OpenAI-shaped SSE response, calling onToken per delta. The
@@ -638,7 +682,7 @@ export async function streamChat(
   onToken: (text: string) => void,
   signal?: AbortSignal,
   projectId?: string,
-  permission?: "read-only" | "full-access",
+  permission?: PermissionMode,
   onSteps?: (steps: ToolStep[]) => void,
   // llama-server-specific: "thinking" (a Qwen3-style hidden <think>
   // pass before the real answer) is off by default so tool-loop turns

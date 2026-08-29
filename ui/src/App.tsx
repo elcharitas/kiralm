@@ -172,9 +172,7 @@ export default function App() {
             onUpdateMessages={setMessages}
             onEnsureSession={newChat}
             onStreamingChange={setStreamingId}
-            onTogglePermission={(id) =>
-              setPermission(id, sessions.find((s) => s.id === id)?.permission === "full-access" ? "read-only" : "full-access")
-            }
+            onSetPermission={setPermission}
           />
         )}
       </main>

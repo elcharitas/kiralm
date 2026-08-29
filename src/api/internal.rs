@@ -80,6 +80,8 @@ pub fn routes() -> Router<SharedState> {
             get(get_generation).delete(stop_generation),
         )
         .route("/api/generations", get(list_generations))
+        .route("/api/approvals", get(list_approvals))
+        .route("/api/approvals/:id/resolve", post(resolve_approval))
         .route("/api/chats", get(list_chats).post(create_chat))
         .route(
             "/api/chats/:id",
@@ -671,7 +673,9 @@ async fn create_chat(State(app): State<SharedState>, Json(body): Json<CreateChat
         created_at: now.clone(),
         updated_at: now,
         project_id: body.project_id,
-        permission: body.permission,
+        permission: crate::tools::Permission::parse(&body.permission)
+            .as_str()
+            .to_string(),
         messages: json!([]),
     };
     let mut chats = app.chats.write();
@@ -698,7 +702,9 @@ async fn update_chat(State(app): State<SharedState>, Path(id): Path<String>, Jso
         chat.title = title;
     }
     if let Some(permission) = body.permission {
-        chat.permission = permission;
+        chat.permission = crate::tools::Permission::parse(&permission)
+            .as_str()
+            .to_string();
     }
     if let Some(messages) = body.messages {
         chat.messages = messages;
@@ -721,6 +727,7 @@ async fn delete_chat(State(app): State<SharedState>, Path(id): Path<String>) -> 
     if let Err(e) = chats.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    app.approvals.forget_chat(&id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -750,6 +757,36 @@ async fn stop_generation(State(app): State<SharedState>, Path(id): Path<String>)
 /// regardless of which session is focused.
 async fn list_generations(State(app): State<SharedState>) -> Json<serde_json::Value> {
     Json(json!({"running": app.running_generation_ids()}))
+}
+
+#[derive(Deserialize)]
+struct ApprovalQuery {
+    chat_id: Option<String>,
+}
+
+async fn list_approvals(
+    State(app): State<SharedState>,
+    Query(query): Query<ApprovalQuery>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "approvals": app.approvals.list(query.chat_id.as_deref()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ResolveApprovalRequest {
+    decision: crate::approvals::ApprovalDecision,
+}
+
+async fn resolve_approval(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveApprovalRequest>,
+) -> Response {
+    match app.approvals.resolve(&id, body.decision) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => err(StatusCode::NOT_FOUND, message),
+    }
 }
 
 /// Looks up a registered project's real directory by id, 404ing if it

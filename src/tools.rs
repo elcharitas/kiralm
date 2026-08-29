@@ -14,15 +14,32 @@ use serde_json::json;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
     ReadOnly,
+    Ask,
     FullAccess,
 }
 
 impl Permission {
     pub fn parse(s: &str) -> Permission {
-        if s.eq_ignore_ascii_case("full-access") {
-            Permission::FullAccess
-        } else {
-            Permission::ReadOnly
+        match s.to_ascii_lowercase().as_str() {
+            "ask" | "ask-before-changes" => Permission::Ask,
+            "full-access" | "full_access" | "fullaccess" => Permission::FullAccess,
+            _ => Permission::ReadOnly,
+        }
+    }
+
+    pub fn permits(self, requested: Permission) -> Permission {
+        match (self, requested) {
+            (Permission::ReadOnly, _) => Permission::ReadOnly,
+            (Permission::Ask, Permission::FullAccess) => Permission::Ask,
+            (_, requested) => requested,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Permission::ReadOnly => "read-only",
+            Permission::Ask => "ask",
+            Permission::FullAccess => "full-access",
         }
     }
 }
@@ -41,6 +58,8 @@ pub struct ToolStep {
     /// every other tool, or a write that was rejected/failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_edit: Option<FileEdit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<MutationCheckpoint>,
 }
 
 /// A real file mutation from one `write_file` call: `before` is the
@@ -56,6 +75,24 @@ pub struct FileEdit {
     pub path: String,
     pub before: Option<String>,
     pub after: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MutationCheckpoint {
+    pub operation: String,
+    pub entries: Vec<PathSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathSnapshot {
+    pub path: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unix_mode: Option<u32>,
 }
 
 const MAX_OUTPUT_CHARS: usize = 8_000;
@@ -105,12 +142,10 @@ fn load_skill_def() -> serde_json::Value {
 /// The tool definitions sent to the model, OpenAI function-calling shape.
 /// `read_file`/`list_directory`/`load_skill` are always offered (all
 /// read-only, like the sandboxed filesystem tools);
-/// `write_file`/`run_command` only in full-access, so a read-only session
-/// never even sees them as an option, on top of the server-side reject
-/// below (defense in depth: a model can name a tool it wasn't offered).
+/// Ask and full-access chats see mutating tools; read-only does not.
+/// The execution gate still rejects forged tool names as a backstop.
 /// Connected MCP servers' tools (`mcp__<server>__<tool>`) are always
-/// appended too -- they're whatever access the user configured that
-/// server with, not gated by this session's own permission mode.
+/// appended too, but unknown side effects require authorization.
 /// `run_dsh_profile` only shows up once there's actually a profile to
 /// run and a real `dsh` binary to run it with -- the one adapter where
 /// "not present" is the common, expected case.
@@ -179,7 +214,7 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
         }),
         load_skill_def(),
     ];
-    if permission == Permission::FullAccess {
+    if permission != Permission::ReadOnly {
         defs.push(json!({
             "type": "function",
             "function": {
@@ -276,7 +311,10 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
             }
         }));
     }
-    if !crate::dsh::list_profiles().is_empty() && crate::dsh::detect(dsh_bin).is_ok() {
+    if permission != Permission::ReadOnly
+        && !crate::dsh::list_profiles().is_empty()
+        && crate::dsh::detect(dsh_bin).is_ok()
+    {
         defs.push(json!({
             "type": "function",
             "function": {
@@ -297,15 +335,6 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
     defs
 }
 
-/// Resolves `rel` against `root`, purely lexically (no filesystem
-/// access, so it works for paths that don't exist yet, e.g. a
-/// `write_file` target). Rejects anything that normalizes outside
-/// `root`, whether via `../` or a bare absolute path elsewhere.
-///
-/// Lexical only, not symlink-resistant -- a symlink inside
-/// root pointing outside it would still be followed by the actual
-/// read/write syscall. Add a canonicalize-and-recheck-after-resolve if
-/// that ever matters for this threat model.
 fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     // Canonicalize root *before* joining (e.g. macOS's /var -> /private/var
     // symlink), so a legitimate in-root path doesn't get lexically
@@ -334,6 +363,25 @@ fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     if normalized != root_canon && !normalized.starts_with(&root_canon) {
         return Err(format!("path '{rel}' escapes the project root"));
     }
+
+    let mut existing = normalized.clone();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !existing.pop() {
+                    return Err(format!("failed to resolve '{rel}'"));
+                }
+            }
+            Err(e) => return Err(format!("failed to inspect '{rel}': {e}")),
+        }
+    }
+    let existing_canon = existing
+        .canonicalize()
+        .map_err(|e| format!("failed to resolve '{rel}': {e}"))?;
+    if existing_canon != root_canon && !existing_canon.starts_with(&root_canon) {
+        return Err(format!("path '{rel}' escapes the project root through a symlink"));
+    }
     Ok(normalized)
 }
 
@@ -351,6 +399,9 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with('.') || SKIP_DIR_NAMES.contains(&name.as_ref()) {
@@ -417,6 +468,112 @@ fn strip_html_tags(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn mutation_checkpoint(
+    name: &str,
+    args: &serde_json::Value,
+    root: &Path,
+) -> Result<Option<MutationCheckpoint>, String> {
+    let paths: Vec<&str> = match name {
+        "write_file" | "edit_file" | "delete_file" => {
+            let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
+                return Ok(None);
+            };
+            vec![path]
+        }
+        "move_file" => {
+            let Some(from) = args.get("from").and_then(|value| value.as_str()) else {
+                return Ok(None);
+            };
+            let Some(to) = args.get("to").and_then(|value| value.as_str()) else {
+                return Ok(None);
+            };
+            vec![from, to]
+        }
+        _ => return Ok(None),
+    };
+    let mut entries = Vec::new();
+    for path in paths {
+        let resolved = resolve_in_root(root, path)?;
+        snapshot_path(root, &resolved, &mut entries)?;
+    }
+    Ok(Some(MutationCheckpoint {
+        operation: name.to_string(),
+        entries,
+    }))
+}
+
+fn snapshot_path(root: &Path, path: &Path, entries: &mut Vec<PathSnapshot>) -> Result<(), String> {
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let display = path
+        .strip_prefix(&root_canon)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            entries.push(PathSnapshot {
+                path: display,
+                kind: "missing".to_string(),
+                content: None,
+                link_target: None,
+                unix_mode: None,
+            });
+            return Ok(());
+        }
+        Err(error) => return Err(format!("failed to checkpoint '{}': {error}", path.display())),
+    };
+    #[cfg(unix)]
+    let unix_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(metadata.permissions().mode())
+    };
+    #[cfg(not(unix))]
+    let unix_mode = None;
+
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(path)
+            .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?;
+        entries.push(PathSnapshot {
+            path: display,
+            kind: "symlink".to_string(),
+            content: None,
+            link_target: Some(target.display().to_string()),
+            unix_mode,
+        });
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        entries.push(PathSnapshot {
+            path: display,
+            kind: "directory".to_string(),
+            content: None,
+            link_target: None,
+            unix_mode,
+        });
+        let mut children: Vec<_> = std::fs::read_dir(path)
+            .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        for child in children {
+            snapshot_path(root, &child, entries)?;
+        }
+        return Ok(());
+    }
+    let content = std::fs::read(path)
+        .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?;
+    entries.push(PathSnapshot {
+        path: display,
+        kind: "file".to_string(),
+        content: Some(content),
+        link_target: None,
+        unix_mode,
+    });
+    Ok(())
+}
+
 /// Executes one tool call for real. Returns the content fed back to the
 /// model plus a `ToolStep` for logging/UI, on both success and failure --
 /// a rejected call is a normal tool result (the model gets told why),
@@ -431,6 +588,14 @@ pub async fn execute(
 ) -> (String, ToolStep) {
     let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or(json!({}));
     let mut file_edit = None;
+    let checkpoint = if permission == Permission::FullAccess {
+        match mutation_checkpoint(name, &args, root) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return denied_step(name, args_json, &error),
+        }
+    } else {
+        None
+    };
     let (ok, content, summary) = match name {
         "read_file" => read_file(&args, root),
         "list_directory" => list_directory(&args, root),
@@ -453,8 +618,8 @@ pub async fn execute(
         "git_commit" => git_commit_tool(&args, root, permission).await,
         "web_fetch" => web_fetch(&args, permission).await,
         "run_command" => run_command(&args, root, permission).await,
-        "run_dsh_profile" => run_dsh_profile(&args, dsh_bin).await,
-        other if other.starts_with("mcp__") => match mcp.dispatch(other, args_json).await {
+        "run_dsh_profile" => run_dsh_profile(&args, permission, dsh_bin).await,
+        other if other.starts_with("mcp__") && permission == Permission::FullAccess => match mcp.dispatch(other, args_json).await {
             Some((ok, content, summary)) => (ok, truncate(content), summary),
             None => (
                 false,
@@ -462,6 +627,9 @@ pub async fn execute(
                 format!("unknown tool '{other}'"),
             ),
         },
+        other if other.starts_with("mcp__") => {
+            err(&format!("{other} requires approval or full-access permission"))
+        }
         other => (
             false,
             format!("Error: unknown tool '{other}'"),
@@ -474,8 +642,23 @@ pub async fn execute(
         result_summary: summary,
         ok,
         file_edit,
+        checkpoint,
     };
     (content, step)
+}
+
+pub fn denied_step(name: &str, args_json: &str, reason: &str) -> (String, ToolStep) {
+    (
+        format!("Error: {reason}"),
+        ToolStep {
+            name: name.to_string(),
+            args_summary: truncate(args_json.to_string()),
+            result_summary: reason.to_string(),
+            ok: false,
+            file_edit: None,
+            checkpoint: None,
+        },
+    )
 }
 
 fn read_file(args: &serde_json::Value, root: &Path) -> (bool, String, String) {
@@ -830,7 +1013,14 @@ async fn run_command(args: &serde_json::Value, root: &Path, permission: Permissi
     }
 }
 
-async fn run_dsh_profile(args: &serde_json::Value, dsh_bin: &str) -> (bool, String, String) {
+async fn run_dsh_profile(
+    args: &serde_json::Value,
+    permission: Permission,
+    dsh_bin: &str,
+) -> (bool, String, String) {
+    if permission != Permission::FullAccess {
+        return err("run_dsh_profile requires approval or full-access permission");
+    }
     let Some(profile) = args.get("profile").and_then(|v| v.as_str()) else {
         return err("run_dsh_profile requires a 'profile' argument");
     };
@@ -877,6 +1067,72 @@ mod tests {
     fn resolve_in_root_rejects_absolute_outside() {
         let root = tmp_root();
         assert!(resolve_in_root(&root, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn permission_parser_keeps_legacy_values_compatible() {
+        assert_eq!(Permission::parse("read-only"), Permission::ReadOnly);
+        assert_eq!(Permission::parse("full-access"), Permission::FullAccess);
+        assert_eq!(Permission::parse("FullAccess"), Permission::FullAccess);
+        assert_eq!(Permission::parse("ask"), Permission::Ask);
+        assert_eq!(
+            Permission::ReadOnly.permits(Permission::FullAccess),
+            Permission::ReadOnly
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_escapes_fail_for_read_write_move_and_delete() {
+        use std::os::unix::fs::symlink;
+
+        let root = tmp_root();
+        let outside = tmp_root();
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, root.join("outside")).unwrap();
+        let mcp = crate::mcp::McpRegistry::new();
+
+        for (name, args) in [
+            ("read_file", r#"{"path":"outside/secret.txt"}"#),
+            (
+                "write_file",
+                r#"{"path":"outside/secret.txt","content":"changed"}"#,
+            ),
+            ("delete_file", r#"{"path":"outside/secret.txt"}"#),
+            (
+                "move_file",
+                r#"{"from":"outside/secret.txt","to":"moved.txt"}"#,
+            ),
+        ] {
+            let (content, step) =
+                execute(name, args, &root, Permission::FullAccess, &mcp, "dsh").await;
+            assert!(!step.ok, "{name} unexpectedly succeeded: {content}");
+            assert!(content.contains("symlink"), "{content}");
+        }
+        assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "secret");
+        assert!(!root.join("moved.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_captures_reversible_before_state() {
+        let root = tmp_root();
+        std::fs::create_dir(root.join("folder")).unwrap();
+        std::fs::write(root.join("folder/note.txt"), "keep me").unwrap();
+        let (_, step) = execute(
+            "delete_file",
+            r#"{"path":"folder"}"#,
+            &root,
+            Permission::FullAccess,
+            &crate::mcp::McpRegistry::new(),
+            "dsh",
+        )
+        .await;
+        let checkpoint = step.checkpoint.unwrap();
+        assert_eq!(checkpoint.operation, "delete_file");
+        assert!(checkpoint.entries.iter().any(|entry| {
+            entry.path == "folder/note.txt"
+                && entry.content.as_deref() == Some(b"keep me".as_slice())
+        }));
     }
 
     #[tokio::test]
@@ -945,7 +1201,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_prefixed_calls_route_to_the_mcp_registry_not_unknown_tool() {
         let root = tmp_root();
-        let (content, step) = execute("mcp__nope__echo", "{}", &root, Permission::ReadOnly, &crate::mcp::McpRegistry::new(), "dsh").await;
+        let (content, step) = execute("mcp__nope__echo", "{}", &root, Permission::FullAccess, &crate::mcp::McpRegistry::new(), "dsh").await;
         // Dispatched to the registry (real "no such server" error), not
         // this module's own generic "unknown tool" fallback.
         assert!(!step.ok);
@@ -1248,6 +1504,15 @@ mod tests {
         }
         for readable in ["read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill"] {
             assert!(names.contains(&readable), "'{readable}' should always be offered");
+        }
+    }
+
+    #[test]
+    fn ask_sessions_are_offered_mutating_tools() {
+        let defs = tool_defs(Permission::Ask, &mcp(), "dsh");
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
+            assert!(names.contains(&mutating), "ask session should see '{mutating}'");
         }
     }
 }

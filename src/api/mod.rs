@@ -74,7 +74,7 @@ pub struct SessionGeneration {
     /// just a dropped response) can actually cancel the upstream
     /// connection -- aborting it is what tells llama-server to stop
     /// generating, same as dropping the connection always did before.
-    pub task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub task: parking_lot::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -122,7 +122,8 @@ pub struct AppState {
     /// only, `mcp_servers.json` is the on-disk record of what *should*
     /// be connected.
     pub mcp: crate::mcp::McpRegistry,
-    pub events: EventBus,
+    pub events: Arc<EventBus>,
+    pub approvals: Arc<crate::approvals::ApprovalManager>,
     pub engine_capabilities: EngineCapabilities,
 }
 
@@ -155,6 +156,8 @@ impl AppState {
         tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
         engine_capabilities: EngineCapabilities,
     ) -> AppState {
+        let events = Arc::new(EventBus::default());
+        let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
         AppState {
             config,
             registry,
@@ -167,7 +170,8 @@ impl AppState {
             tunnel_listener,
             generations: RwLock::new(HashMap::new()),
             mcp: crate::mcp::McpRegistry::new(),
-            events: EventBus::default(),
+            events,
+            approvals,
             engine_capabilities,
         }
     }
@@ -182,6 +186,7 @@ impl AppState {
         session_id: &str,
         model: &str,
     ) -> (Arc<SessionGeneration>, broadcast::Receiver<Bytes>) {
+        self.stop_generation(session_id);
         let (tx, rx) = broadcast::channel(256);
         let sg = Arc::new(SessionGeneration {
             state: RwLock::new(GenerationState {
@@ -208,6 +213,7 @@ impl AppState {
         let Some(sg) = self.generations.read().get(session_id).cloned() else {
             return false;
         };
+        self.approvals.cancel_chat(session_id);
         if let Some(handle) = sg.task.lock().take() {
             handle.abort();
         }

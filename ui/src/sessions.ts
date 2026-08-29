@@ -1,6 +1,6 @@
 // Chat session shape + small helpers. Persistence itself lives
 // server-side (~/.kiralm/chats.json, see useSessions.ts), not here.
-import type { ChatMessage, ToolStep } from "./api";
+import type { ChatMessage, PermissionMode, ToolStep } from "./api";
 
 export interface StoredMessage extends ChatMessage {
   // Real elapsed generation time for an assistant turn, set once
@@ -10,8 +10,6 @@ export interface StoredMessage extends ChatMessage {
   // order -- what "Worked for Xm Ys" expands to.
   steps?: ToolStep[];
 }
-
-export type PermissionMode = "read-only" | "full-access";
 
 export interface ChatSession {
   id: string;
