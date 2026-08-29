@@ -1,12 +1,6 @@
-//! Admission control, headroom math, RSS watcher.
-//!
-//! STUB NOTE: LRU eviction and the 5s-tick background RSS watcher are
-//! not implemented here. This worktree only needed the pre-spawn
-//! admission check for the pull load-verification pass and for `serve`
-//! to wire something real at startup. Whichever agent owns the
-//! full residency manager should replace `AdmissionState` with the real
-//! `ModelRegistry`-driven accounting and add the watcher task.
+//! Admission control, headroom math, and eviction policy.
 
+use std::time::Instant;
 use sysinfo::System;
 
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +67,31 @@ pub fn check_admission(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidencyCandidate {
+    pub canonical_id: String,
+    pub hot: bool,
+    pub active_requests: usize,
+    pub ready: bool,
+    pub last_used: Instant,
+}
+
+/// Returns cold, idle, ready models from least to most recent use.
+pub fn lru_eviction_order(
+    candidates: impl IntoIterator<Item = ResidencyCandidate>,
+) -> Vec<ResidencyCandidate> {
+    let mut eligible: Vec<_> = candidates
+        .into_iter()
+        .filter(|item| item.ready && !item.hot && item.active_requests == 0)
+        .collect();
+    eligible.sort_by(|left, right| {
+        left.last_used
+            .cmp(&right.last_used)
+            .then_with(|| left.canonical_id.cmp(&right.canonical_id))
+    });
+    eligible
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +116,31 @@ mod tests {
         let headroom = headroom_bytes(total, None);
         assert!(check_admission(0, 5 * gb, total, headroom).is_ok());
         assert!(check_admission(0, 7 * gb, total, headroom).is_err());
+    }
+
+    #[test]
+    fn lru_excludes_hot_active_and_non_ready_models() {
+        let now = Instant::now();
+        let candidate = |id: &str, age: u64, hot, active_requests, ready| ResidencyCandidate {
+            canonical_id: id.to_string(),
+            hot,
+            active_requests,
+            ready,
+            last_used: now - std::time::Duration::from_secs(age),
+        };
+
+        let order = lru_eviction_order([
+            candidate("recent", 10, false, 0, true),
+            candidate("oldest", 30, false, 0, true),
+            candidate("hot", 40, true, 0, true),
+            candidate("active", 50, false, 1, true),
+            candidate("loading", 60, false, 0, false),
+        ]);
+
+        let ids: Vec<_> = order
+            .iter()
+            .map(|item| item.canonical_id.as_str())
+            .collect();
+        assert_eq!(ids, ["oldest", "recent"]);
     }
 }

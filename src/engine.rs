@@ -1,14 +1,7 @@
-//! `llama-server` spawn/health-check/kill, flag selection, port
-//! allocation, log piping.
-//!
-//! STUB NOTE: this worktree only needed enough of the engine to run the
-//! pull load-verification pass and to give `serve` something real to
-//! construct. The full automatic-flag matrix (MoE expert offload, KV
-//! cache quant tiering, context-size-vs-remaining-RAM sizing, `-md`
-//! draft pairing) and the steady-state health/RSS watcher (while
-//! loaded) belong to whichever agent owns residency's runtime loop;
-//! only the always-on flags and the one-shot health+completion check
-//! used at pull time are implemented here.
+//! `llama-server` process management and capability discovery.
+
+#[allow(dead_code)]
+pub mod supervisor;
 
 use std::collections::BTreeSet;
 use std::io::Read;
@@ -174,9 +167,7 @@ pub fn allocate_port(range: (u16, u16)) -> anyhow::Result<u16> {
     )
 }
 
-/// Always-on flags. The RAM/MoE/hot-conditional flags (offload,
-/// ctx sizing, ctk/ctv, --mlock, -md) are the fuller residency manager's
-/// job. See module STUB NOTE.
+/// Always-on flags. Planned options arrive through `extra_args`.
 fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
     vec![
         "-m".to_string(),
