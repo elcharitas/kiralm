@@ -4,13 +4,15 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::config::Config;
 use crate::engine;
 use crate::gguf;
 use crate::state::{ExpertCount, ModelManifest, State, VerdictCache};
+
+pub mod cache;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PullProgress {
@@ -105,6 +107,30 @@ pub struct Resolved {
     repo: String,
     ref_str: String,
     expected_sha256: Option<String>,
+}
+
+impl Resolved {
+    pub fn artifact_key(&self) -> String {
+        self.expected_sha256
+            .as_ref()
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_else(|| hex::encode(Sha256::digest(self.download_url().as_bytes())))
+    }
+
+    pub fn pull_key(&self) -> String {
+        format!("{}:{}", self.canonical_id, self.artifact_key())
+    }
+
+    fn download_url(&self) -> String {
+        format!(
+            "https://huggingface.co/{}/{}/resolve/main/{}",
+            self.org, self.repo, self.filename
+        )
+    }
+}
+
+pub fn artifact_cache() -> anyhow::Result<cache::ArtifactCache> {
+    cache::ArtifactCache::from_home(crate::config::kiralm_home())
 }
 
 /// Resolves `<ref>` against the HF repo's file listing. Fast (one HF
@@ -204,7 +230,7 @@ fn quant_from_filename(filename: &str) -> String {
 async fn download_with_resume(
     client: &reqwest::Client,
     url: &str,
-    dest_partial: &PathBuf,
+    dest_partial: &Path,
     canonical_id: &str,
     progress: Option<&ProgressTx>,
 ) -> anyhow::Result<String> {
@@ -295,24 +321,72 @@ pub async fn download_and_verify(
     state: &parking_lot::RwLock<State>,
     progress: Option<ProgressTx>,
 ) -> anyhow::Result<()> {
+    let cache = artifact_cache()?;
+    match cache.begin_pull(&resolved.pull_key())? {
+        cache::PullFlight::Join(follower) => follower
+            .wait()
+            .await
+            .map_err(|error| anyhow::anyhow!(error)),
+        cache::PullFlight::Start(leader) => {
+            let result =
+                download_and_verify_leader(resolved, config, state, progress, &cache).await;
+            leader.finish(
+                result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+            );
+            result
+        }
+    }
+}
+
+async fn download_and_verify_leader(
+    resolved: &Resolved,
+    config: &Config,
+    state: &parking_lot::RwLock<State>,
+    progress: Option<ProgressTx>,
+    cache: &cache::ArtifactCache,
+) -> anyhow::Result<()> {
     let canonical_id = &resolved.canonical_id;
     let client = reqwest::Client::builder().user_agent("kiralm/0.1").build()?;
 
     std::fs::create_dir_all(&config.model_dir)?;
     let final_path = config.model_dir.join(&resolved.filename);
-    let partial_path = config.model_dir.join(format!("{}.partial", resolved.filename));
-
-    let download_url = format!(
-        "https://huggingface.co/{}/{}/resolve/main/{}",
-        resolved.org, resolved.repo, resolved.filename
-    );
-
-    let actual_sha256 = download_with_resume(
-        &client,
-        &download_url,
-        &partial_path,
-        canonical_id,
-        progress.as_ref(),
+    let legacy_partial = config.model_dir.join(format!("{}.partial", resolved.filename));
+    let download_url = resolved.download_url();
+    let source = cache::ArtifactSource {
+        url: download_url.clone(),
+        etag: None,
+    };
+    let client_for_fetch = client.clone();
+    let canonical_for_fetch = canonical_id.clone();
+    let progress_for_fetch = progress.clone();
+    let artifact_key = resolved.artifact_key();
+    let fetched = cache::obtain_artifact(
+        cache,
+        &artifact_key,
+        resolved.expected_sha256.as_deref(),
+        &source,
+        move |partial_path| async move {
+            if !partial_path.exists() && legacy_partial.exists() {
+                match tokio::fs::rename(&legacy_partial, &partial_path).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        tokio::fs::copy(&legacy_partial, &partial_path).await?;
+                        tokio::fs::remove_file(&legacy_partial).await?;
+                    }
+                }
+            }
+            download_with_resume(
+                &client_for_fetch,
+                &download_url,
+                &partial_path,
+                &canonical_for_fetch,
+                progress_for_fetch.as_ref(),
+            )
+            .await
+        },
     )
     .await?;
 
@@ -325,18 +399,9 @@ pub async fn download_and_verify(
             message: None,
         });
     }
-    if let Some(expected) = &resolved.expected_sha256 {
-        if expected != &actual_sha256 {
-            anyhow::bail!(
-                "sha256 mismatch for {}: expected {expected}, got {actual_sha256}",
-                resolved.filename
-            );
-        }
-    }
+    cache.materialize(&fetched.artifact, &final_path)?;
 
-    tokio::fs::rename(&partial_path, &final_path).await?;
-
-    let size_bytes = tokio::fs::metadata(&final_path).await?.len();
+    let size_bytes = fetched.artifact.size_bytes;
     let gguf_meta = gguf::read_metadata(&final_path)?;
 
     let expert_count = match (gguf_meta.expert_count_total, gguf_meta.expert_count_active) {
@@ -351,7 +416,7 @@ pub async fn download_and_verify(
     let manifest = ModelManifest {
         canonical_id: canonical_id.clone(),
         filename: resolved.filename.clone(),
-        sha256: actual_sha256,
+        sha256: fetched.artifact.sha256,
         size_bytes,
         architecture: gguf_meta.architecture,
         is_moe,
