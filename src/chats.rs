@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::kiralm_home;
 
+const SCHEMA_VERSION: u32 = 1;
+
 pub fn chats_path() -> PathBuf {
     kiralm_home().join("chats.json")
 }
@@ -30,15 +32,12 @@ pub struct Chats {
 }
 
 impl Chats {
-    pub fn load() -> Chats {
+    pub fn load() -> anyhow::Result<Chats> {
         Self::load_from(&chats_path())
     }
 
-    pub fn load_from(path: &Path) -> Chats {
-        match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Chats::default(),
-        }
+    pub fn load_from(path: &Path) -> anyhow::Result<Chats> {
+        Ok(crate::storage::load_versioned(path, SCHEMA_VERSION, migrate)?.unwrap_or_default())
     }
 
     /// Atomic rewrite, same posture as state.rs's `State::save`.
@@ -47,12 +46,13 @@ impl Chats {
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        crate::storage::save_versioned(path, SCHEMA_VERSION, self)
+    }
+}
+
+fn migrate(version: u32, value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    match version {
+        0 => Ok(value),
+        _ => anyhow::bail!("no chats migration from schema version {version}"),
     }
 }

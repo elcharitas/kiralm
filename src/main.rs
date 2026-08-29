@@ -9,6 +9,7 @@ mod cloud;
 mod config;
 mod dsh;
 mod engine;
+mod events;
 mod gguf;
 mod git;
 mod marketplace;
@@ -20,6 +21,7 @@ mod residency;
 mod settings;
 mod skills;
 mod state;
+mod storage;
 mod tools;
 mod tunnel;
 mod tunnel_auth;
@@ -171,13 +173,15 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     // a model is loadable identically whether it was there at boot or
     // just finished downloading.
     let (tunnel_listener, tunnel_commands) = tokio::sync::mpsc::channel(2);
-    let app_state = Arc::new(AppState::new(
+    let engine_capabilities = engine::EngineCapabilities::probe(&config.llama_server_bin);
+    let app_state = Arc::new(AppState::new_with_engine_capabilities(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
-        settings::Settings::load(),
-        chats::Chats::load(),
+        settings::Settings::load()?,
+        chats::Chats::load()?,
         tunnel_listener,
+        engine_capabilities,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);

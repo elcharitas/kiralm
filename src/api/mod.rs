@@ -23,8 +23,9 @@ use tokio::sync::broadcast;
 use crate::chats::Chats;
 use crate::cloud::LoginProgressTx;
 use crate::config::Config;
-use crate::engine;
-use crate::pull::{PullProgress, ProgressTx};
+use crate::engine::{self, EngineCapabilities};
+use crate::events::EventBus;
+use crate::pull::{ProgressTx, PullProgress};
 use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource, ModelStatus};
 use crate::residency;
 use crate::settings::Settings;
@@ -121,6 +122,8 @@ pub struct AppState {
     /// only, `mcp_servers.json` is the on-disk record of what *should*
     /// be connected.
     pub mcp: crate::mcp::McpRegistry,
+    pub events: EventBus,
+    pub engine_capabilities: EngineCapabilities,
 }
 
 impl AppState {
@@ -131,6 +134,26 @@ impl AppState {
         settings: Settings,
         chats: Chats,
         tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+    ) -> AppState {
+        Self::new_with_engine_capabilities(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            EngineCapabilities::default(),
+        )
+    }
+
+    pub fn new_with_engine_capabilities(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
     ) -> AppState {
         AppState {
             config,
@@ -144,6 +167,8 @@ impl AppState {
             tunnel_listener,
             generations: RwLock::new(HashMap::new()),
             mcp: crate::mcp::McpRegistry::new(),
+            events: EventBus::default(),
+            engine_capabilities,
         }
     }
 

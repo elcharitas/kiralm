@@ -10,6 +10,8 @@
 //! only the always-on flags and the one-shot health+completion check
 //! used at pull time are implemented here.
 
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -20,16 +22,133 @@ use tokio::time::Instant;
 
 use crate::config::kiralm_home;
 
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+const KNOWN_FLAGS: [&str; 19] = [
+    "--batch-size",
+    "--cache-prompt",
+    "--cache-ram",
+    "--cache-reuse",
+    "--cache-type-k",
+    "--cache-type-v",
+    "--cpu-moe",
+    "--ctx-size",
+    "--flash-attn",
+    "--metrics",
+    "--mlock",
+    "--mmap",
+    "--model-draft",
+    "--n-cpu-moe",
+    "--n-gpu-layers",
+    "--parallel",
+    "--slot-save-path",
+    "--slots",
+    "--ubatch-size",
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineCapabilities {
+    pub version: String,
+    pub flags: BTreeSet<String>,
+}
+
+impl EngineCapabilities {
+    pub fn probe(llama_bin: &str) -> EngineCapabilities {
+        let version_bin = llama_bin.to_string();
+        let version_probe = std::thread::spawn(move || detect_version(&version_bin));
+        let help = run_bounded(llama_bin, &["--help"], PROBE_TIMEOUT);
+        let version = version_probe
+            .join()
+            .unwrap_or_else(|_| "unknown".to_string());
+        let flags = if help.timed_out {
+            BTreeSet::new()
+        } else {
+            KNOWN_FLAGS
+                .iter()
+                .filter(|flag| help.text.contains(**flag))
+                .map(|flag| (*flag).to_string())
+                .collect()
+        };
+        EngineCapabilities { version, flags }
+    }
+
+    pub fn supports(&self, flag: &str) -> bool {
+        self.flags.contains(flag)
+    }
+}
+
+struct BoundedOutput {
+    text: String,
+    timed_out: bool,
+}
+
 /// `llama-server --version`'s output, used to key the verdict cache so
 /// an engine upgrade invalidates stale `unsupported` tags.
 pub fn detect_version(llama_bin: &str) -> String {
-    std::process::Command::new(llama_bin)
-        .arg("--version")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
+    let output = run_bounded(llama_bin, &["--version"], PROBE_TIMEOUT);
+    if output.timed_out {
+        return "unknown".to_string();
+    }
+    output
+        .text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn run_bounded(program: &str, args: &[&str], timeout: Duration) -> BoundedOutput {
+    let mut child = match std::process::Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return BoundedOutput {
+                text: String::new(),
+                timed_out: false,
+            };
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || read_pipe(stdout));
+    let stderr_reader = std::thread::spawn(move || read_pipe(stderr));
+    let deadline = std::time::Instant::now() + timeout;
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            Err(_) => break false,
+        }
+    };
+
+    let mut bytes = stdout_reader.join().unwrap_or_default();
+    bytes.extend(stderr_reader.join().unwrap_or_default());
+    BoundedOutput {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        timed_out,
+    }
+}
+
+fn read_pipe(pipe: Option<impl Read>) -> Vec<u8> {
+    let Some(mut pipe) = pipe else {
+        return Vec::new();
+    };
+    let mut bytes = Vec::new();
+    let _ = pipe.read_to_end(&mut bytes);
+    bytes
 }
 
 pub fn log_path_for(canonical_id: &str) -> PathBuf {
@@ -263,4 +382,61 @@ pub async fn verify_load(
         },
         permanent,
     })
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    fn script(body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path =
+            std::env::temp_dir().join(format!("kiralm-engine-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capability_probe_finds_supported_flags() {
+        let path = script(
+            r#"if [ "$1" = "--version" ]; then
+  echo "llama.cpp build 123"
+else
+  echo "--cache-prompt --cache-reuse --parallel --metrics"
+fi"#,
+        );
+
+        let capabilities = EngineCapabilities::probe(path.to_str().unwrap());
+        assert_eq!(capabilities.version, "llama.cpp build 123");
+        assert!(capabilities.supports("--cache-prompt"));
+        assert!(capabilities.supports("--cache-reuse"));
+        assert!(capabilities.supports("--parallel"));
+        assert!(capabilities.supports("--metrics"));
+        assert!(!capabilities.supports("--model-draft"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_times_out_and_stops_the_child() {
+        let path = script("sleep 10");
+        let started = std::time::Instant::now();
+        let output = run_bounded(
+            path.to_str().unwrap(),
+            &["--version"],
+            Duration::from_millis(50),
+        );
+
+        assert!(output.timed_out);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let _ = std::fs::remove_file(path);
+    }
 }
