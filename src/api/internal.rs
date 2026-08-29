@@ -75,6 +75,38 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/projects/:id/git/log", get(git_log))
         .route("/api/projects/:id/git/commit", post(git_commit))
         .route(
+            "/api/projects/:id/git/workflow/state",
+            get(git_workflow_state),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/diff",
+            post(git_workflow_diff),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/branches",
+            get(git_workflow_branches).post(git_workflow_create_branch),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/branches/switch",
+            post(git_workflow_switch_branch),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/stage",
+            post(git_workflow_stage),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/unstage",
+            post(git_workflow_unstage),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/commit",
+            post(git_workflow_commit),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/audit",
+            get(git_workflow_audit),
+        )
+        .route(
             "/api/sessions/:id/generation",
             get(get_generation).delete(stop_generation),
         )
@@ -698,6 +730,7 @@ async fn delete_project(State(app): State<SharedState>, Path(id): Path<String>) 
             .attachments
             .release_reference(&format!("chat:{chat_id}"));
     }
+    app.git_workflows.write().remove(&id);
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -894,6 +927,240 @@ async fn git_commit(
         Ok(result) => Json(result).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
+}
+
+async fn git_workflow_service(
+    app: &SharedState,
+    id: &str,
+) -> Result<std::sync::Arc<crate::git_workflows::GitWorkflowService>, Response> {
+    if let Some(service) = app.git_workflows.read().get(id).cloned() {
+        return Ok(service);
+    }
+    let root = project_path(app, id)?;
+    let service = crate::git_workflows::GitWorkflowService::open(
+        root,
+        crate::git_workflows::GitWorkflowLimits::default(),
+    )
+    .await
+    .map_err(git_workflow_error)?;
+    let service = std::sync::Arc::new(service);
+    let mut services = app.git_workflows.write();
+    Ok(services
+        .entry(id.to_string())
+        .or_insert_with(|| service.clone())
+        .clone())
+}
+
+fn git_workflow_error(error: crate::git_workflows::GitWorkflowError) -> Response {
+    use crate::git_workflows::GitWorkflowError;
+
+    let status = match &error {
+        GitWorkflowError::InvalidConfiguration
+        | GitWorkflowError::InvalidPath { .. }
+        | GitWorkflowError::PathEscape { .. }
+        | GitWorkflowError::SymlinkEscape { .. }
+        | GitWorkflowError::InvalidBranch { .. }
+        | GitWorkflowError::InvalidCommitMessage { .. }
+        | GitWorkflowError::NotRepository => StatusCode::BAD_REQUEST,
+        GitWorkflowError::RepositoryChanged
+        | GitWorkflowError::BranchExists { .. }
+        | GitWorkflowError::BranchNotFound { .. }
+        | GitWorkflowError::DirtyWorktree
+        | GitWorkflowError::Conflicts { .. }
+        | GitWorkflowError::NothingToCommit => StatusCode::CONFLICT,
+        GitWorkflowError::Busy => StatusCode::TOO_MANY_REQUESTS,
+        GitWorkflowError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        GitWorkflowError::OutputLimitExceeded
+        | GitWorkflowError::Io { .. }
+        | GitWorkflowError::Git { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let code = error.code().to_string();
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": error.to_string(),
+                "code": code,
+                "detail": error,
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn git_workflow_state(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.repository_state().await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitPathsRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct GitDiffRequest {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+async fn git_workflow_diff(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitDiffRequest>,
+) -> Response {
+    let scope = match body.scope.as_deref().unwrap_or("all") {
+        "all" => crate::git_workflows::DiffScope::All,
+        "staged" => crate::git_workflows::DiffScope::Staged,
+        "unstaged" => crate::git_workflows::DiffScope::Unstaged,
+        _ => return err(StatusCode::BAD_REQUEST, "invalid diff scope"),
+    };
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.diff_preview(scope, &body.paths).await {
+        Ok(preview) => Json(preview).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_branches(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.list_branches().await {
+        Ok(branches) => Json(json!({"branches": branches})).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitBranchRequest {
+    name: String,
+}
+
+async fn git_workflow_create_branch(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitBranchRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.create_branch(&body.name).await {
+        Ok(branch) => (StatusCode::CREATED, Json(branch)).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_switch_branch(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitBranchRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.switch_branch(&body.name).await {
+        Ok(branch) => Json(branch).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_stage(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitPathsRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.stage_paths(&body.paths).await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_unstage(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitPathsRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.unstage_paths(&body.paths).await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitWorkflowCommitRequest {
+    message: String,
+}
+
+async fn git_workflow_commit(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitWorkflowCommitRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.commit(&body.message).await {
+        Ok(commit) => Json(commit).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitAuditQuery {
+    #[serde(default)]
+    after_sequence: u64,
+    #[serde(default = "default_git_audit_limit")]
+    limit: usize,
+}
+
+fn default_git_audit_limit() -> usize {
+    50
+}
+
+async fn git_workflow_audit(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Query(query): Query<GitAuditQuery>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    Json(json!({
+        "records": service.audit_records(query.after_sequence, query.limit),
+    }))
+    .into_response()
 }
 
 async fn list_skills(State(_app): State<SharedState>) -> Json<serde_json::Value> {

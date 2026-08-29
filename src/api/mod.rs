@@ -143,6 +143,8 @@ pub struct AppState {
     pub attachments: Arc<crate::attachments::AttachmentStore>,
     pub eval_store: Arc<crate::evals::EvalStore>,
     pub eval_jobs: RwLock<HashMap<String, crate::evals::EvalCancellation>>,
+    pub git_workflows:
+        RwLock<HashMap<String, Arc<crate::git_workflows::GitWorkflowService>>>,
 }
 
 impl AppState {
@@ -359,6 +361,7 @@ impl AppState {
             attachments,
             eval_store,
             eval_jobs: RwLock::new(HashMap::new()),
+            git_workflows: RwLock::new(HashMap::new()),
         }
     }
 

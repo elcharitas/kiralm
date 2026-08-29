@@ -274,6 +274,38 @@ export interface GitCommitResult {
   summary: string;
 }
 
+export interface GitWorkingTreeEntry {
+  path: string;
+  original_path: string | null;
+  index_status: string | null;
+  worktree_status: string | null;
+  conflicted: boolean;
+}
+
+export interface GitRepositoryState {
+  repository: string;
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+  conflicted: boolean;
+  files: GitWorkingTreeEntry[];
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+  commit: string;
+  upstream: string | null;
+  tracking: string | null;
+}
+
+export interface GitDiffPreview {
+  scope: "all" | "staged" | "unstaged";
+  text: string;
+  bytes: number;
+  truncated: boolean;
+}
+
 // `~/.kiralm/skills/<name>/SKILL.md`'s wire shape -- global, no
 // per-workspace scoping. `enabled` is KiraLM's own state (skills.json),
 // not part of the SKILL.md format itself.
@@ -782,6 +814,80 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message }),
     }).then((r) => asJson<GitCommitResult>(r)),
+
+  gitWorkflowState: (projectId: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/state`,
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowDiff: (
+    projectId: string,
+    scope: GitDiffPreview["scope"] = "all",
+    paths: string[] = [],
+  ) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/diff`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope, paths }),
+      },
+    ).then((r) => asJson<GitDiffPreview>(r)),
+
+  gitWorkflowBranches: (projectId: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches`,
+    ).then((r) => asJson<{ branches: GitBranchInfo[] }>(r)),
+
+  gitWorkflowCreateBranch: (projectId: string, name: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      },
+    ).then((r) => asJson<GitBranchInfo>(r)),
+
+  gitWorkflowSwitchBranch: (projectId: string, name: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches/switch`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      },
+    ).then((r) => asJson<GitBranchInfo>(r)),
+
+  gitWorkflowStage: (projectId: string, paths: string[]) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/stage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paths }),
+      },
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowUnstage: (projectId: string, paths: string[]) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/unstage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paths }),
+      },
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowCommit: (projectId: string, message: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/commit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message }),
+      },
+    ).then((r) => asJson<GitCommitResult>(r)),
 
   // Server-side generation state for a chat session: buffered-so-far
   // text + whether it's still running,
