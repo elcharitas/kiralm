@@ -6,6 +6,7 @@ pub mod agent_plugin;
 pub mod anthropic;
 pub mod dsh;
 pub mod internal;
+pub mod knowledge;
 pub mod marketplace;
 pub mod mcp;
 pub mod openai;
@@ -29,6 +30,9 @@ use crate::engine::supervisor::{
 use crate::engine::optimization::OptimizationProfile;
 use crate::engine::{self, EngineCapabilities};
 use crate::events::{EventBus, EventTopic};
+use crate::knowledge::{
+    DeterministicEmbedder, IndexCancellation, IndexLimits, KnowledgeIndex,
+};
 use crate::pull::{ProgressTx, PullProgress};
 use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource};
 use crate::residency;
@@ -130,6 +134,8 @@ pub struct AppState {
     pub approvals: Arc<crate::approvals::ApprovalManager>,
     pub engine_capabilities: EngineCapabilities,
     pub supervisor: EngineSupervisor,
+    pub knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+    pub knowledge_job: parking_lot::Mutex<Option<IndexCancellation>>,
 }
 
 impl AppState {
@@ -160,6 +166,41 @@ impl AppState {
         chats: Chats,
         tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
         engine_capabilities: EngineCapabilities,
+    ) -> AppState {
+        let path = std::env::temp_dir().join(format!(
+            "kiralm-knowledge-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge = Arc::new(
+            KnowledgeIndex::open(
+                path,
+                DeterministicEmbedder::default(),
+                IndexLimits::default(),
+            )
+            .expect("temporary knowledge index must open"),
+        );
+        Self::new_with_knowledge(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_knowledge(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
     ) -> AppState {
         let events = Arc::new(EventBus::default());
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
@@ -194,6 +235,8 @@ impl AppState {
             approvals,
             engine_capabilities,
             supervisor,
+            knowledge,
+            knowledge_job: parking_lot::Mutex::new(None),
         }
     }
 
@@ -338,6 +381,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(openai::routes())
         .merge(anthropic::routes())
         .merge(internal::routes())
+        .merge(knowledge::routes())
         .merge(tunnel::routes())
         .merge(mcp::routes())
         .merge(marketplace::routes())

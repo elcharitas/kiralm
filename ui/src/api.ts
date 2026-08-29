@@ -87,6 +87,23 @@ export interface AppSettings {
   auto_compact: boolean;
 }
 
+export interface KnowledgeStatus {
+  snapshot: { files: number; chunks: number; content_bytes: number };
+  running: boolean;
+  recovered_corrupt_metadata: string | null;
+}
+
+export interface KnowledgeHit {
+  score: number;
+  content: string;
+  source: {
+    root: string;
+    path: string;
+    start_line: number;
+    end_line: number;
+  };
+}
+
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
 // see sessions.ts's ChatSession for the app-side camelCase shape).
 // `messages` is opaque here -- the daemon stores/returns it verbatim.
@@ -409,6 +426,26 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(settings),
     }).then((r) => asJson<AppSettings>(r)),
+
+  knowledgeStatus: () =>
+    fetch("/api/knowledge").then((r) => asJson<KnowledgeStatus>(r)),
+
+  startKnowledgeIndex: () =>
+    fetch("/api/knowledge/index", { method: "POST" }).then((r) =>
+      asJson<{ started: boolean }>(r),
+    ),
+
+  cancelKnowledgeIndex: () =>
+    fetch("/api/knowledge/index", { method: "DELETE" }).then((r) =>
+      asJson<void>(r),
+    ),
+
+  searchKnowledge: (projectId: string, query: string, limit = 8) =>
+    fetch("/api/knowledge/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, query, limit }),
+    }).then((r) => asJson<{ hits: KnowledgeHit[] }>(r)),
 
   listProjects: () => fetch("/api/projects").then((r) => asJson<{ projects: Project[] }>(r)),
 

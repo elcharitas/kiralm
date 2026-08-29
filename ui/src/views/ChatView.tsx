@@ -4,6 +4,7 @@ import {
   Brain,
   Check,
   ChevronRight,
+  Database,
   Eye,
   GitBranch,
   Lock,
@@ -19,6 +20,7 @@ import {
   streamChat,
   type ApprovalDecision,
   type GitStatus,
+  type KnowledgeStatus,
   type PendingApproval,
   type PermissionMode,
   type StatusResponse,
@@ -78,6 +80,7 @@ export function ChatView({
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({});
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -244,6 +247,36 @@ export function ChatView({
     };
   }, [session?.id]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const result = await api.knowledgeStatus().catch(() => null);
+      if (cancelled || !result) return;
+      setKnowledgeStatus(result);
+      if (result.running) timer = window.setTimeout(poll, 600);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  const toggleKnowledgeIndex = async () => {
+    setError(null);
+    try {
+      if (knowledgeStatus?.running) {
+        await api.cancelKnowledgeIndex();
+      } else {
+        await api.startKnowledgeIndex();
+      }
+      setKnowledgeStatus(await api.knowledgeStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const decideApproval = async (approval: PendingApproval, decision: ApprovalDecision) => {
     setApprovals((current) => current.filter((item) => item.id !== approval.id));
     try {
@@ -280,6 +313,23 @@ export function ChatView({
           {formatContextLength(effectiveModelObj.context_length)}
         </span>
       )}
+      <button
+        type="button"
+        className={
+          knowledgeStatus?.running
+            ? "chip-select chip-toggle chip-toggle-on"
+            : "chip-select chip-toggle"
+        }
+        title={
+          knowledgeStatus
+            ? `${knowledgeStatus.snapshot.files} indexed workspace files`
+            : "Index workspace files for retrieval"
+        }
+        onClick={() => void toggleKnowledgeIndex()}
+      >
+        <Database size={12} />
+        {knowledgeStatus?.running ? "Cancel indexing" : "Index knowledge"}
+      </button>
       <Select
         triggerClassName={
           session?.permission === "full-access"

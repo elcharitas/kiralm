@@ -183,7 +183,12 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     // just finished downloading.
     let (tunnel_listener, tunnel_commands) = tokio::sync::mpsc::channel(2);
     let engine_capabilities = engine::EngineCapabilities::probe(&config.llama_server_bin);
-    let app_state = Arc::new(AppState::new_with_engine_capabilities(
+    let knowledge = Arc::new(knowledge::KnowledgeIndex::open(
+        home.join("knowledge/index.json"),
+        knowledge::DeterministicEmbedder::default(),
+        knowledge::IndexLimits::default(),
+    )?);
+    let app_state = Arc::new(AppState::new_with_knowledge(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
@@ -191,6 +196,7 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         chats::Chats::load()?,
         tunnel_listener,
         engine_capabilities,
+        knowledge,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);

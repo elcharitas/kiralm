@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
@@ -385,9 +383,22 @@ impl<E: Embedder> KnowledgeIndex<E> {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
+        self.search_roots(query, &[], limit)
+    }
+
+    pub fn search_roots(
+        &self,
+        query: &str,
+        roots: &[PathBuf],
+        limit: usize,
+    ) -> anyhow::Result<Vec<SearchHit>> {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
+        let roots: BTreeSet<_> = roots
+            .iter()
+            .map(|root| fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+            .collect();
         let query_tokens = token_counts(query);
         let metadata = self.metadata.read();
         let query_embedding = (metadata.embedding_fingerprint == self.embedder.fingerprint())
@@ -399,6 +410,9 @@ impl<E: Embedder> KnowledgeIndex<E> {
         let mut hits = Vec::new();
 
         for file in metadata.files.values() {
+            if !roots.is_empty() && !roots.contains(&file.root) {
+                continue;
+            }
             for chunk in &file.chunks {
                 let lexical_score = lexical_score(&query_tokens, &chunk.content);
                 let vector_score = query_embedding.as_ref().and_then(|query| {
@@ -1127,6 +1141,31 @@ mod tests {
         assert_eq!(hits[0].source.path, PathBuf::from("fruit.txt"));
         assert_eq!(hits[0].vector_score, None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_can_be_scoped_to_workspace_roots() {
+        let base = test_directory("root-scope");
+        let first = base.join("first");
+        let second = base.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("notes.txt"), "shared term first").unwrap();
+        fs::write(second.join("notes.txt"), "shared term second").unwrap();
+        let index = test_index(&base, FailingEmbedder);
+        index
+            .index_roots(
+                &[first.clone(), second.clone()],
+                &IndexCancellation::default(),
+                |_| {},
+            )
+            .unwrap();
+
+        let hits = index.search_roots("shared", &[first], 5).unwrap();
+
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.source.root.ends_with("first")));
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
