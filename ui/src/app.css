@@ -2660,6 +2660,66 @@
   cursor: pointer;
 }
 
+.eval-view {
+  gap: 16px;
+}
+
+.eval-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.eval-editor {
+  min-height: 280px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.eval-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.eval-metrics span {
+  padding: 8px 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.eval-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.eval-status {
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.eval-status-passed,
+.eval-passed {
+  color: var(--verdict-good);
+}
+
+.eval-status-failed,
+.eval-status-error,
+.eval-status-timed_out,
+.eval-regressed {
+  color: var(--verdict-bad);
+}
+
+.eval-status-cancelled {
+  color: var(--text-faint);
+}
+
 .composer-attachments,
 .message-attachments {
   display: flex;

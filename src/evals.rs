@@ -18,6 +18,9 @@ const EVAL_SUITE_SCHEMA_VERSION: u32 = 1;
 const EVAL_RUN_SCHEMA_VERSION: u32 = 1;
 const MAX_CASES: usize = 10_000;
 const MAX_PATTERN_CHARS: usize = 4_096;
+const MAX_SUITE_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_METADATA_ENTRIES: usize = 128;
+const MAX_CASE_TIMEOUT_MS: u64 = 600_000;
 pub const REGEX_SYNTAX: &str = "literals, ., ^, $, character ranges, \\d, \\s, \\w, *, +, and ?";
 
 pub type EvalFuture =
@@ -58,6 +61,9 @@ impl EvalSuite {
         if self.name.trim().is_empty() {
             anyhow::bail!("suite name cannot be empty");
         }
+        if self.name.len() > 200 || self.description.len() > 10_000 {
+            anyhow::bail!("suite name or description is too long");
+        }
         if self.cases.is_empty() {
             anyhow::bail!("suite must contain at least one case");
         }
@@ -73,11 +79,16 @@ impl EvalSuite {
         }
 
         let mut ids = BTreeSet::new();
+        let mut text_bytes = self.name.len().saturating_add(self.description.len());
         for case in &self.cases {
             case.validate(self.default_model.as_deref())?;
+            text_bytes = text_bytes.saturating_add(case.prompt.len());
             if !ids.insert(case.id.as_str()) {
                 anyhow::bail!("duplicate case id: {}", case.id);
             }
+        }
+        if text_bytes > MAX_SUITE_TEXT_BYTES {
+            anyhow::bail!("suite text exceeds the storage limit");
         }
         Ok(())
     }
@@ -118,8 +129,14 @@ impl EvalCase {
         self.settings
             .validate()
             .with_context(|| format!("invalid settings for case {}", self.id))?;
-        if self.timeout_ms == Some(0) {
-            anyhow::bail!("case {} timeout must be greater than zero", self.id);
+        if self
+            .timeout_ms
+            .is_some_and(|timeout| !(1..=MAX_CASE_TIMEOUT_MS).contains(&timeout))
+        {
+            anyhow::bail!(
+                "case {} timeout must be between 1 and {MAX_CASE_TIMEOUT_MS} ms",
+                self.id
+            );
         }
         if self.assertions.is_empty() {
             anyhow::bail!("case {} must contain an assertion", self.id);
@@ -128,6 +145,14 @@ impl EvalCase {
             assertion
                 .validate()
                 .with_context(|| format!("invalid assertion for case {}", self.id))?;
+        }
+        if self.metadata.len() > MAX_METADATA_ENTRIES
+            || self
+                .metadata
+                .iter()
+                .any(|(key, value)| key.len() > 1_024 || value.len() > 4_096)
+        {
+            anyhow::bail!("case {} metadata is too large", self.id);
         }
         Ok(())
     }
@@ -514,7 +539,7 @@ impl EvalCancellation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum EvalProgress {
     SuiteStarted {
         total: usize,
@@ -1197,6 +1222,18 @@ impl EvalStore {
         Ok(suite)
     }
 
+    pub fn list_suites(&self) -> anyhow::Result<Vec<EvalSuite>> {
+        let directory = self.root.join("suites");
+        let mut ids = json_stems(&directory)?;
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                self.load_suite(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("evaluation suite disappeared while listing"))
+            })
+            .collect()
+    }
+
     pub fn save_run(&self, run: &EvalRun, redactor: &Redactor) -> anyhow::Result<()> {
         validate_id("run", &run.id)?;
         validate_id("suite", &run.suite_id)?;
@@ -1214,6 +1251,25 @@ impl EvalStore {
         storage::load_versioned(&path, EVAL_RUN_SCHEMA_VERSION, |_, value| Ok(value))
     }
 
+    pub fn list_runs(&self, suite_id: &str) -> anyhow::Result<Vec<EvalRun>> {
+        validate_id("suite", suite_id)?;
+        let directory = self.root.join("results").join(suite_id);
+        let mut runs = json_stems(&directory)?
+            .into_iter()
+            .map(|id| {
+                self.load_run(suite_id, &id)?
+                    .ok_or_else(|| anyhow::anyhow!("evaluation run disappeared while listing"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        runs.sort_by(|left, right| {
+            right
+                .finished_at
+                .cmp(&left.finished_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(runs)
+    }
+
     fn suite_path(&self, suite_id: &str) -> anyhow::Result<PathBuf> {
         validate_id("suite", suite_id)?;
         Ok(self.root.join("suites").join(format!("{suite_id}.json")))
@@ -1228,6 +1284,32 @@ impl EvalStore {
             .join(suite_id)
             .join(format!("{run_id}.json")))
     }
+}
+
+fn json_stems(directory: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut stems = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
+            validate_id("evaluation", stem)?;
+            stems.push(stem.to_string());
+        }
+    }
+    Ok(stems)
 }
 
 pub fn export_json(run: &EvalRun, redactor: &Redactor) -> anyhow::Result<String> {
@@ -1997,6 +2079,44 @@ mod tests {
         let run = stored_run("run-a");
         store.save_run(&run, &Redactor::default()).unwrap();
         assert_eq!(store.load_run("suite-a", "run-a").unwrap(), Some(run));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lists_suites_by_id_and_runs_by_completion_time() {
+        let root = temp_dir("listing");
+        let store = EvalStore::new(&root);
+        let mut suite_b = suite(vec![case("one", "yes")]);
+        suite_b.id = "suite-b".to_string();
+        let mut suite_a = suite(vec![case("one", "yes")]);
+        suite_a.id = "suite-a".to_string();
+        store.save_suite(&suite_b).unwrap();
+        store.save_suite(&suite_a).unwrap();
+
+        let mut older = stored_run("z-random-id");
+        older.finished_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+        let newer = stored_run("a-random-id");
+        store.save_run(&older, &Redactor::default()).unwrap();
+        store.save_run(&newer, &Redactor::default()).unwrap();
+
+        assert_eq!(
+            store
+                .list_suites()
+                .unwrap()
+                .into_iter()
+                .map(|suite| suite.id)
+                .collect::<Vec<_>>(),
+            vec!["suite-a", "suite-b"]
+        );
+        assert_eq!(
+            store
+                .list_runs("suite-a")
+                .unwrap()
+                .into_iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>(),
+            vec!["a-random-id", "z-random-id"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

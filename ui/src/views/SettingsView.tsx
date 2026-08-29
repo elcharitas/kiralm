@@ -10,11 +10,12 @@ import {
   type WorkspacePresetInput,
 } from "../api";
 import { ModelsView } from "./ModelsView";
+import { EvaluationsView } from "./EvaluationsView";
 import { useDialogs } from "../components/Dialogs";
 import { Select } from "../components/Select";
 import { useSettings } from "../settings";
 
-export type SettingsTab = "general" | "models";
+export type SettingsTab = "general" | "models" | "evaluations";
 
 // Local Font Access API -- not in lib.dom.d.ts yet. KiraLM only runs
 // as a Tauri desktop webview, never a public site, so there's no
@@ -67,8 +68,30 @@ export function SettingsView({
           <button type="button" className="settings-tab settings-tab-active">
             Models
           </button>
+          <button type="button" className="settings-tab" onClick={() => onTabChange("evaluations")}>
+            Evaluations
+          </button>
         </div>
         <ModelsView status={status} refresh={refresh} />
+      </div>
+    );
+  }
+
+  if (tab === "evaluations") {
+    return (
+      <div className="settings-wrap">
+        <div className="settings-tabs">
+          <button type="button" className="settings-tab" onClick={() => onTabChange("general")}>
+            General
+          </button>
+          <button type="button" className="settings-tab" onClick={() => onTabChange("models")}>
+            Models
+          </button>
+          <button type="button" className="settings-tab settings-tab-active">
+            Evaluations
+          </button>
+        </div>
+        <EvaluationsView status={status} />
       </div>
     );
   }
@@ -81,6 +104,9 @@ export function SettingsView({
         </button>
         <button type="button" className="settings-tab" onClick={() => onTabChange("models")}>
           Models
+        </button>
+        <button type="button" className="settings-tab" onClick={() => onTabChange("evaluations")}>
+          Evaluations
         </button>
       </div>
 

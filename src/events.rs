@@ -12,6 +12,7 @@ pub enum EventTopic {
     Generation,
     Knowledge,
     Attachment,
+    Evaluation,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

@@ -6,6 +6,7 @@ pub mod agent_plugin;
 pub mod anthropic;
 pub mod attachments;
 pub mod dsh;
+pub mod evals;
 pub mod internal;
 pub mod knowledge;
 pub mod marketplace;
@@ -140,6 +141,8 @@ pub struct AppState {
     pub knowledge_job: parking_lot::Mutex<Option<IndexCancellation>>,
     pub workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
     pub attachments: Arc<crate::attachments::AttachmentStore>,
+    pub eval_store: Arc<crate::evals::EvalStore>,
+    pub eval_jobs: RwLock<HashMap<String, crate::evals::EvalCancellation>>,
 }
 
 impl AppState {
@@ -286,6 +289,37 @@ impl AppState {
         workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
         attachments: Arc<crate::attachments::AttachmentStore>,
     ) -> AppState {
+        let eval_path =
+            std::env::temp_dir().join(format!("kiralm-evals-test-{}", uuid::Uuid::new_v4()));
+        Self::new_with_all_stores(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+            attachments,
+            Arc::new(crate::evals::EvalStore::new(eval_path)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_all_stores(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+        eval_store: Arc<crate::evals::EvalStore>,
+    ) -> AppState {
         let events = Arc::new(EventBus::default());
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
         let supervisor = EngineSupervisor::production(
@@ -323,6 +357,8 @@ impl AppState {
             knowledge_job: parking_lot::Mutex::new(None),
             workspace_presets,
             attachments,
+            eval_store,
+            eval_jobs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -482,6 +518,7 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(openai::routes())
         .merge(anthropic::routes())
         .merge(attachments::routes())
+        .merge(evals::routes())
         .merge(internal::routes())
         .merge(knowledge::routes())
         .merge(workspace_presets::routes())

@@ -142,6 +142,60 @@ export interface WorkspacePresetList {
   >;
 }
 
+export interface EvalSuite {
+  id: string;
+  name: string;
+  description: string;
+  default_model: string | null;
+  cases: Array<{
+    id: string;
+    prompt: string;
+    model?: string | null;
+    settings?: {
+      temperature: number;
+      max_tokens: number;
+      seed: number | null;
+    };
+    timeout_ms?: number | null;
+    assertions: Array<Record<string, unknown>>;
+    metadata?: Record<string, string>;
+  }>;
+}
+
+export interface EvalMetrics {
+  total_cases: number;
+  passed: number;
+  failed: number;
+  timed_out: number;
+  cancelled: number;
+  errors: number;
+  pass_rate: number;
+  mean_latency_ms: number;
+  p95_latency_ms: number;
+  total_tokens: number;
+  mean_total_tokens: number;
+}
+
+export interface EvalRun {
+  id: string;
+  suite_id: string;
+  started_at: string;
+  finished_at: string;
+  metrics: EvalMetrics;
+  results: Array<{
+    case_id: string;
+    model: string;
+    status: "passed" | "failed" | "timed_out" | "cancelled" | "error";
+    latency_ms: number;
+    output: string | null;
+    error: string | null;
+  }>;
+  baseline: null | {
+    baseline_run_id: string;
+    regressions: Array<{ metric: string; threshold: number }>;
+  };
+}
+
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
 // see sessions.ts's ChatSession for the app-side camelCase shape).
 // `messages` is opaque here -- the daemon stores/returns it verbatim.
@@ -477,6 +531,63 @@ export const api = {
     fetch("/api/knowledge/index", { method: "DELETE" }).then((r) =>
       asJson<void>(r),
     ),
+
+  listEvalSuites: () =>
+    fetch("/api/evals/suites").then((r) =>
+      asJson<{ suites: EvalSuite[] }>(r),
+    ),
+
+  saveEvalSuite: (suite: EvalSuite) =>
+    fetch(`/api/evals/suites/${encodeURIComponent(suite.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(suite),
+    }).then((r) => asJson<EvalSuite>(r)),
+
+  listEvalRuns: (suiteId: string) =>
+    fetch(`/api/evals/suites/${encodeURIComponent(suiteId)}/runs`).then(
+      (r) => asJson<{ runs: EvalRun[] }>(r),
+    ),
+
+  startEvalRun: (
+    suiteId: string,
+    baselineRunId: string | null,
+  ) =>
+    fetch("/api/evals/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        suite_id: suiteId,
+        baseline_run_id: baselineRunId,
+        max_concurrency: 2,
+        timeout_ms: 120000,
+        thresholds: {
+          max_pass_rate_drop: 0,
+          max_p95_latency_increase_percent: 20,
+          max_mean_tokens_increase_percent: 20,
+        },
+      }),
+    }).then((r) => asJson<{ run_id: string; running: boolean }>(r)),
+
+  evalJob: (runId: string) =>
+    fetch(`/api/evals/jobs/${encodeURIComponent(runId)}`).then((r) =>
+      asJson<{ run_id: string; running: boolean }>(r),
+    ),
+
+  cancelEvalRun: (runId: string) =>
+    fetch(`/api/evals/jobs/${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    }).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+    }),
+
+  exportEvalRun: (suiteId: string, runId: string, format: "json" | "jsonl") =>
+    fetch(
+      `/api/evals/suites/${encodeURIComponent(suiteId)}/runs/${encodeURIComponent(runId)}/export?format=${format}`,
+    ).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+      return r.text();
+    }),
 
   uploadAttachment: (
     reference: string,
