@@ -100,6 +100,8 @@ const RUN_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const MAX_WALK_FILES: usize = 5_000;
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_GLOB_RESULTS: usize = 500;
+const MAX_CHECKPOINT_ENTRIES: usize = 2_000;
+const MAX_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 const WEB_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const SKIP_DIR_NAMES: [&str; 4] = ["node_modules", "target", "dist", ".venv"];
 
@@ -492,9 +494,10 @@ fn mutation_checkpoint(
         _ => return Ok(None),
     };
     let mut entries = Vec::new();
+    let mut budget = CheckpointBudget::default();
     for path in paths {
         let resolved = resolve_in_root(root, path)?;
-        snapshot_path(root, &resolved, &mut entries)?;
+        snapshot_path(root, &resolved, &mut entries, &mut budget)?;
     }
     Ok(Some(MutationCheckpoint {
         operation: name.to_string(),
@@ -502,13 +505,49 @@ fn mutation_checkpoint(
     }))
 }
 
-fn snapshot_path(root: &Path, path: &Path, entries: &mut Vec<PathSnapshot>) -> Result<(), String> {
+#[derive(Default)]
+struct CheckpointBudget {
+    entries: usize,
+    bytes: u64,
+}
+
+impl CheckpointBudget {
+    fn add_entry(&mut self) -> Result<(), String> {
+        if self.entries >= MAX_CHECKPOINT_ENTRIES {
+            return Err(format!(
+                "checkpoint exceeds {MAX_CHECKPOINT_ENTRIES} entries"
+            ));
+        }
+        self.entries += 1;
+        Ok(())
+    }
+
+    fn add_bytes(&mut self, bytes: u64) -> Result<(), String> {
+        let total = self.bytes.saturating_add(bytes);
+        if total > MAX_CHECKPOINT_BYTES {
+            return Err(format!(
+                "checkpoint exceeds {MAX_CHECKPOINT_BYTES} bytes"
+            ));
+        }
+        self.bytes = total;
+        Ok(())
+    }
+}
+
+fn snapshot_path(
+    root: &Path,
+    path: &Path,
+    entries: &mut Vec<PathSnapshot>,
+    budget: &mut CheckpointBudget,
+) -> Result<(), String> {
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let display = path
         .strip_prefix(&root_canon)
         .unwrap_or(path)
         .display()
         .to_string();
+    budget.add_entry()?;
+    budget.add_bytes(display.len() as u64)?;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -534,11 +573,13 @@ fn snapshot_path(root: &Path, path: &Path, entries: &mut Vec<PathSnapshot>) -> R
     if metadata.file_type().is_symlink() {
         let target = std::fs::read_link(path)
             .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?;
+        let link_target = target.display().to_string();
+        budget.add_bytes(link_target.len() as u64)?;
         entries.push(PathSnapshot {
             path: display,
             kind: "symlink".to_string(),
             content: None,
-            link_target: Some(target.display().to_string()),
+            link_target: Some(link_target),
             unix_mode,
         });
         return Ok(());
@@ -558,12 +599,21 @@ fn snapshot_path(root: &Path, path: &Path, entries: &mut Vec<PathSnapshot>) -> R
             .collect();
         children.sort();
         for child in children {
-            snapshot_path(root, &child, entries)?;
+            snapshot_path(root, &child, entries, budget)?;
         }
         return Ok(());
     }
-    let content = std::fs::read(path)
+    let content_limit = MAX_CHECKPOINT_BYTES.saturating_sub(budget.bytes);
+    budget.add_bytes(metadata.len())?;
+    let file = std::fs::File::open(path)
         .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?;
+    let mut content = Vec::new();
+    let mut limited = std::io::Read::take(file, content_limit + 1);
+    std::io::Read::read_to_end(&mut limited, &mut content)
+        .map_err(|error| format!("failed to checkpoint '{}': {error}", path.display()))?;
+    if content.len() as u64 > metadata.len() {
+        budget.add_bytes(content.len() as u64 - metadata.len())?;
+    }
     entries.push(PathSnapshot {
         path: display,
         kind: "file".to_string(),
@@ -1133,6 +1183,54 @@ mod tests {
             entry.path == "folder/note.txt"
                 && entry.content.as_deref() == Some(b"keep me".as_slice())
         }));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_entry_limit_blocks_delete() {
+        let root = tmp_root();
+        let folder = root.join("many");
+        std::fs::create_dir(&folder).unwrap();
+        for index in 0..MAX_CHECKPOINT_ENTRIES {
+            std::fs::write(folder.join(format!("{index}.txt")), []).unwrap();
+        }
+
+        let (content, step) = execute(
+            "delete_file",
+            r#"{"path":"many"}"#,
+            &root,
+            Permission::FullAccess,
+            &crate::mcp::McpRegistry::new(),
+            "dsh",
+        )
+        .await;
+
+        assert!(!step.ok);
+        assert!(content.contains("checkpoint exceeds 2000 entries"));
+        assert!(folder.exists());
+        assert_eq!(std::fs::read_dir(folder).unwrap().count(), MAX_CHECKPOINT_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_byte_limit_blocks_delete() {
+        let root = tmp_root();
+        let path = root.join("large.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CHECKPOINT_BYTES + 1).unwrap();
+
+        let (content, step) = execute(
+            "delete_file",
+            r#"{"path":"large.bin"}"#,
+            &root,
+            Permission::FullAccess,
+            &crate::mcp::McpRegistry::new(),
+            "dsh",
+        )
+        .await;
+
+        assert!(!step.ok);
+        assert!(content.contains("checkpoint exceeds 16777216 bytes"));
+        assert!(path.exists());
+        assert_eq!(std::fs::metadata(path).unwrap().len(), MAX_CHECKPOINT_BYTES + 1);
     }
 
     #[tokio::test]
