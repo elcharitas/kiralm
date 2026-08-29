@@ -16,6 +16,7 @@ mod git;
 mod knowledge;
 mod marketplace;
 mod mcp;
+pub mod platform;
 mod plugin_catalog;
 mod pull;
 mod registry;
