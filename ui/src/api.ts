@@ -33,6 +33,8 @@ export interface StatusResponse {
   config: {
     ram_headroom_gb: number;
     model_dir: string;
+    cache_quota_gb: number;
+    optimization_profile: "balanced" | "throughput" | "latency" | "memory";
   };
 }
 
@@ -374,13 +376,22 @@ export const api = {
   cloudLoginProgressUrl: (deviceCode: string) =>
     `/api/cloud/login/progress?device_code=${encodeURIComponent(deviceCode)}`,
 
-  // Writes ram_headroom_gb/model_dir into config.toml. Takes effect on
-  // next daemon restart, not live -- config.rs loads it once at startup.
-  updateConfig: (ramHeadroomGb: number | null, modelDir: string) =>
+  // Writes runtime keys into config.toml for the next restart.
+  updateConfig: (
+    ramHeadroomGb: number | null,
+    modelDir: string,
+    cacheQuotaGb: number,
+    optimizationProfile: StatusResponse["config"]["optimization_profile"],
+  ) =>
     fetch("/api/config", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ram_headroom_gb: ramHeadroomGb, model_dir: modelDir }),
+      body: JSON.stringify({
+        ram_headroom_gb: ramHeadroomGb,
+        model_dir: modelDir,
+        cache_quota_gb: cacheQuotaGb,
+        optimization_profile: optimizationProfile,
+      }),
     }).then((r) => asJson<{ restart_required: boolean }>(r)),
 
   tunnelStatus: () => fetch("/api/tunnel/status").then((r) => asJson<TunnelStatus>(r)),

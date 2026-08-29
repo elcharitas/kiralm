@@ -17,6 +17,27 @@ pub enum OptimizationProfile {
     Memory,
 }
 
+impl OptimizationProfile {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "balanced" => Some(Self::Balanced),
+            "throughput" => Some(Self::Throughput),
+            "latency" => Some(Self::Latency),
+            "memory" => Some(Self::Memory),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Throughput => "throughput",
+            Self::Latency => "latency",
+            Self::Memory => "memory",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuHardware {
     pub memory_bytes: u64,
@@ -76,6 +97,7 @@ pub struct DraftModelMetadata {
 }
 
 impl DraftModelMetadata {
+    #[cfg(test)]
     pub fn from_gguf(path: PathBuf, metadata: &GgufMetadata, size_bytes: u64) -> Self {
         Self {
             path,

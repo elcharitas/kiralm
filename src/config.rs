@@ -44,6 +44,14 @@ fn default_port_range() -> (u16, u16) {
     (8700, 8799)
 }
 
+fn default_cache_quota_gb() -> f64 {
+    50.0
+}
+
+fn default_optimization_profile() -> String {
+    "balanced".to_string()
+}
+
 fn default_cloud_api_base_url() -> String {
     "http://localhost:3003".to_string()
 }
@@ -167,6 +175,8 @@ struct RawConfig {
     http_listen: Option<String>,
     llama_server_bin: Option<String>,
     llama_server_port_range: Option<(u16, u16)>,
+    cache_quota_gb: Option<f64>,
+    optimization_profile: Option<String>,
     #[serde(default)]
     cloud: RawCloudConfig,
     #[serde(default)]
@@ -184,6 +194,8 @@ pub struct Config {
     pub http_listen: String,
     pub llama_server_bin: String,
     pub llama_server_port_range: (u16, u16),
+    pub cache_quota_gb: f64,
+    pub optimization_profile: String,
     pub cloud: CloudConfig,
     pub tunnel: TunnelConfig,
     pub dsh: DshConfig,
@@ -198,6 +210,8 @@ impl Default for Config {
             http_listen: default_http_listen(),
             llama_server_bin: default_llama_server_bin(),
             llama_server_port_range: default_port_range(),
+            cache_quota_gb: default_cache_quota_gb(),
+            optimization_profile: default_optimization_profile(),
             cloud: CloudConfig::default(),
             tunnel: TunnelConfig::default(),
             dsh: DshConfig::default(),
@@ -226,6 +240,18 @@ impl Config {
                 );
             }
         }
+        if raw.cache_quota_gb.is_some_and(|gb| gb < 1.0) {
+            anyhow::bail!("cache_quota_gb must be at least 1GB");
+        }
+        if let Some(profile) = raw.optimization_profile.as_deref() {
+            if crate::engine::optimization::OptimizationProfile::parse(profile)
+                .is_none()
+            {
+                anyhow::bail!(
+                    "optimization_profile must be balanced, throughput, latency, or memory"
+                );
+            }
+        }
 
         let defaults = Config::default();
         let unix_socket = std::env::var_os("KIRALM_UNIX_SOCKET")
@@ -245,6 +271,12 @@ impl Config {
             llama_server_port_range: raw
                 .llama_server_port_range
                 .unwrap_or(defaults.llama_server_port_range),
+            cache_quota_gb: raw
+                .cache_quota_gb
+                .unwrap_or(defaults.cache_quota_gb),
+            optimization_profile: raw
+                .optimization_profile
+                .unwrap_or(defaults.optimization_profile),
             cloud: CloudConfig {
                 api_base_url: cloud_api_base_url,
                 client_id: raw.cloud.client_id.unwrap_or(defaults.cloud.client_id),

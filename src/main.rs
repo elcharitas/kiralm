@@ -195,6 +195,9 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
     }
+    if let Err(error) = api::prune_artifact_cache(&app_state) {
+        tracing::warn!("failed to enforce artifact cache quota: {error}");
+    }
     let engine_watcher = app_state.supervisor.start_watcher();
 
     let cloud_config = app_state.config.cloud.clone();

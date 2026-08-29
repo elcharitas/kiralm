@@ -94,6 +94,10 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
 
   const [ramHeadroom, setRamHeadroom] = useState("");
   const [modelDir, setModelDir] = useState("");
+  const [cacheQuota, setCacheQuota] = useState("50");
+  const [optimizationProfile, setOptimizationProfile] = useState<
+    StatusResponse["config"]["optimization_profile"]
+  >("balanced");
   const [configTouched, setConfigTouched] = useState(false);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">(
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
@@ -105,20 +109,30 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
     if (configTouched || !status) return;
     setRamHeadroom(status.config.ram_headroom_gb != null ? String(status.config.ram_headroom_gb) : "");
     setModelDir(status.config.model_dir);
+    setCacheQuota(String(status.config.cache_quota_gb));
+    setOptimizationProfile(status.config.optimization_profile);
   }, [status, configTouched]);
 
   // Writes config.toml on blur, not every keystroke -- there's no Save
   // button, but a text field still needs somewhere to land mid-edit.
-  const saveConfig = async () => {
-    if (!configTouched) return;
+  const saveConfig = async (
+    profile = optimizationProfile,
+    force = false,
+  ) => {
+    if (!configTouched && !force) return;
     const trimmed = ramHeadroom.trim();
     const gb = trimmed === "" ? null : Number(trimmed);
     if (gb !== null && !Number.isFinite(gb)) {
       toast("RAM headroom must be a number", "error");
       return;
     }
+    const quota = Number(cacheQuota);
+    if (!Number.isFinite(quota) || quota < 1) {
+      toast("Cache quota must be at least 1GB", "error");
+      return;
+    }
     try {
-      await api.updateConfig(gb, modelDir);
+      await api.updateConfig(gb, modelDir, quota, profile);
       setConfigTouched(false);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
@@ -165,7 +179,38 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
               setRamHeadroom(e.target.value);
               setConfigTouched(true);
             }}
-            onBlur={saveConfig}
+            onBlur={() => void saveConfig()}
+          />
+        </div>
+        <div className="settings-field">
+          <label htmlFor="cache-quota">Artifact cache quota (GB)</label>
+          <input
+            id="cache-quota"
+            className="settings-input"
+            value={cacheQuota}
+            onChange={(e) => {
+              setCacheQuota(e.target.value);
+              setConfigTouched(true);
+            }}
+            onBlur={() => void saveConfig()}
+          />
+        </div>
+        <div className="settings-field">
+          <label>Runtime optimization</label>
+          <Select
+            triggerClassName="settings-select"
+            value={optimizationProfile}
+            onChange={(value) => {
+              const profile = value as StatusResponse["config"]["optimization_profile"];
+              setOptimizationProfile(profile);
+              void saveConfig(profile, true);
+            }}
+            options={[
+              { value: "balanced", label: "Balanced" },
+              { value: "throughput", label: "Throughput" },
+              { value: "latency", label: "Low latency" },
+              { value: "memory", label: "Memory saver" },
+            ]}
           />
         </div>
         <div className="settings-field">
@@ -178,7 +223,7 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
               setModelDir(e.target.value);
               setConfigTouched(true);
             }}
-            onBlur={saveConfig}
+            onBlur={() => void saveConfig()}
           />
         </div>
       </section>

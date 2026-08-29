@@ -26,8 +26,9 @@ use crate::config::Config;
 use crate::engine::supervisor::{
     EngineSupervisor, SupervisorError, SupervisorOptions,
 };
+use crate::engine::optimization::OptimizationProfile;
 use crate::engine::{self, EngineCapabilities};
-use crate::events::EventBus;
+use crate::events::{EventBus, EventTopic};
 use crate::pull::{ProgressTx, PullProgress};
 use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource};
 use crate::residency;
@@ -169,6 +170,11 @@ impl AppState {
             config.llama_server_port_range,
             SupervisorOptions {
                 configured_headroom_gb: config.ram_headroom_gb,
+                engine_capabilities: engine_capabilities.clone(),
+                optimization_profile: OptimizationProfile::parse(
+                    &config.optimization_profile,
+                )
+                .unwrap_or(OptimizationProfile::Balanced),
                 ..SupervisorOptions::default()
             },
         );
@@ -347,6 +353,46 @@ pub fn build_router(state: SharedState) -> Router {
 pub fn resolve_model(app: &SharedState, name: &str) -> Option<String> {
     let aliases = app.state.read().aliases.clone();
     app.registry.resolve(name, &aliases)
+}
+
+pub fn prune_artifact_cache(
+    app: &SharedState,
+) -> anyhow::Result<crate::pull::cache::PruneReport> {
+    let cache = crate::pull::artifact_cache()?;
+    let mut protections = crate::pull::cache::PruneProtections {
+        downloading: cache.active_artifact_hashes()?,
+        ..crate::pull::cache::PruneProtections::default()
+    };
+    for model in app.registry.list() {
+        if model.source != ModelSource::Local {
+            continue;
+        }
+        let Ok(manifest) = ModelManifest::load(&model.gguf_path) else {
+            continue;
+        };
+        if model.hot {
+            protections.hot.insert(manifest.sha256.clone());
+        }
+        if model.active_requests > 0 {
+            protections.active.insert(manifest.sha256);
+        }
+    }
+    let quota =
+        (app.config.cache_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+    let report = cache.prune_to_quota(quota, &protections)?;
+    app.events.publish(
+        EventTopic::Cache,
+        "pruned",
+        None,
+        serde_json::json!({
+            "removed": &report.removed,
+            "bytes_removed": report.bytes_removed,
+            "bytes_remaining": report.bytes_remaining,
+            "quota_bytes": quota,
+            "root": cache.root(),
+        }),
+    );
+    Ok(report)
 }
 
 pub enum GatewayError {

@@ -125,6 +125,8 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
         "config": {
             "ram_headroom_gb": app.config.ram_headroom_gb,
             "model_dir": app.config.model_dir,
+            "cache_quota_gb": app.config.cache_quota_gb,
+            "optimization_profile": app.config.optimization_profile,
         },
     }))
 }
@@ -133,10 +135,12 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
 struct UpdateConfigRequest {
     ram_headroom_gb: Option<f64>,
     model_dir: String,
+    cache_quota_gb: Option<f64>,
+    optimization_profile: Option<String>,
 }
 
-/// Writes `ram_headroom_gb`/`model_dir` into `~/.kiralm/config.toml`,
-/// editing just those two keys of whatever's already on disk (a
+/// Writes managed runtime keys into `~/.kiralm/config.toml`,
+/// editing just those keys of whatever's already on disk (a
 /// generic TOML table, not `Config`'s resolved-with-defaults shape, so
 /// unrelated hand-edited fields -- cloud/tunnel included -- survive
 /// untouched). `Config` itself is loaded once at startup and treated
@@ -169,6 +173,23 @@ async fn update_config(State(_app): State<SharedState>, Json(body): Json<UpdateC
         table.remove("model_dir");
     } else {
         table.insert("model_dir".to_string(), toml::Value::String(model_dir.to_string()));
+    }
+    if let Some(quota) = body.cache_quota_gb {
+        if quota < 1.0 {
+            return err(StatusCode::BAD_REQUEST, "cache quota must be at least 1GB");
+        }
+        table.insert("cache_quota_gb".to_string(), toml::Value::Float(quota));
+    }
+    if let Some(profile) = body.optimization_profile {
+        if crate::engine::optimization::OptimizationProfile::parse(&profile)
+            .is_none()
+        {
+            return err(StatusCode::BAD_REQUEST, "unknown optimization profile");
+        }
+        table.insert(
+            "optimization_profile".to_string(),
+            toml::Value::String(profile.to_ascii_lowercase()),
+        );
     }
 
     let out = match toml::to_string_pretty(&doc) {
@@ -298,6 +319,9 @@ async fn start_pull(State(app): State<SharedState>, Json(body): Json<PullRequest
                     ModelManifest::load(&app_for_task.config.model_dir.join(&resolved.filename))
                 {
                     super::register_model(&app_for_task, &manifest);
+                }
+                if let Err(error) = super::prune_artifact_cache(&app_for_task) {
+                    tracing::warn!("failed to enforce artifact cache quota: {error}");
                 }
             }
             Err(e) => {
@@ -447,6 +471,9 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
         if let Err(e) = state.save() {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
+    }
+    if let Err(error) = super::prune_artifact_cache(&app) {
+        tracing::warn!("failed to enforce artifact cache quota: {error}");
     }
 
     StatusCode::NO_CONTENT.into_response()

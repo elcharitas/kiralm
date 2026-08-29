@@ -145,7 +145,6 @@ impl ArtifactCache {
         Ok(Self { shared })
     }
 
-    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.shared.root
     }
@@ -327,7 +326,6 @@ impl ArtifactCache {
         Ok(mode)
     }
 
-    #[allow(dead_code)]
     pub fn remove_reference(&self, sha256: &str, path: &Path) -> anyhow::Result<bool> {
         let sha256 = normalize_sha256(sha256)?;
         let mut metadata = lock(&self.shared.metadata)?;
@@ -341,7 +339,6 @@ impl ArtifactCache {
         Ok(removed)
     }
 
-    #[allow(dead_code)]
     pub fn prune_to_quota(
         &self,
         quota_bytes: u64,
@@ -356,7 +353,6 @@ impl ArtifactCache {
         let mut candidates: Vec<_> = metadata
             .artifacts
             .values()
-            .filter(|entry| entry.references.is_empty())
             .filter(|entry| !contains_hash(&protections.active, &entry.sha256))
             .filter(|entry| !contains_hash(&protections.hot, &entry.sha256))
             .filter(|entry| !contains_hash(&protections.downloading, &entry.sha256))
@@ -388,7 +384,6 @@ impl ArtifactCache {
         Ok(report)
     }
 
-    #[allow(dead_code)]
     pub fn cleanup_stale_partials(&self, max_age: Duration) -> anyhow::Result<Vec<PathBuf>> {
         let partial_dir = self.shared.root.join(".partial");
         let active = lock(&self.shared.active_partials)?.clone();
@@ -410,10 +405,19 @@ impl ArtifactCache {
         Ok(removed)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn metadata(&self, sha256: &str) -> anyhow::Result<Option<ArtifactMetadata>> {
         let sha256 = normalize_sha256(sha256)?;
         Ok(lock(&self.shared.metadata)?.artifacts.get(&sha256).cloned())
+    }
+
+    pub fn active_artifact_hashes(&self) -> anyhow::Result<HashSet<String>> {
+        Ok(lock(&self.shared.flights)?
+            .keys()
+            .filter_map(|key| key.strip_prefix("artifact:"))
+            .filter(|key| normalize_sha256(key).is_ok())
+            .map(str::to_ascii_lowercase)
+            .collect())
     }
 }
 
@@ -551,7 +555,6 @@ fn complete_flight(
     }
 }
 
-#[allow(dead_code)]
 fn contains_hash(set: &HashSet<String>, sha256: &str) -> bool {
     set.contains(sha256) || set.iter().any(|value| value.eq_ignore_ascii_case(sha256))
 }
@@ -916,6 +919,22 @@ mod tests {
         for artifact in [active, hot, downloading, referenced, recent] {
             assert!(cache.lookup(&artifact.sha256).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn quota_can_drop_a_cold_materialized_cache_link() {
+        let home = TestHome::new("prune-reference");
+        let cache = ArtifactCache::from_home(&home.0).unwrap();
+        let artifact = store(&cache, "referenced", b"model bytes");
+        let model = home.0.join("models/model.gguf");
+        cache.materialize(&artifact, &model).unwrap();
+
+        let report = cache
+            .prune_to_quota(0, &PruneProtections::default())
+            .unwrap();
+
+        assert_eq!(report.removed, vec![artifact.sha256]);
+        assert_eq!(std::fs::read(model).unwrap(), b"model bytes");
     }
 
     #[test]

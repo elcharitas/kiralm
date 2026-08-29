@@ -12,10 +12,14 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::events::{EventBus, EventTopic};
+use crate::engine::optimization::{
+    GpuHardware, HardwareProfile, ModelOptimizationMetadata,
+    OptimizationPlanner, OptimizationProfile, OptimizationRequest,
+};
 use crate::registry::{ModelHealth, ModelRegistry, ModelSource, ModelStatus};
 use crate::residency::{self, RamInfo, ResidencyCandidate};
 
-use super::{allocate_port, spawn, wait_healthy};
+use super::{allocate_port, spawn, wait_healthy, EngineCapabilities};
 
 type BackendFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
@@ -213,6 +217,8 @@ pub struct SupervisorOptions {
     pub poll_interval: Duration,
     pub restart_policy: RestartPolicy,
     pub extra_args: Vec<String>,
+    pub engine_capabilities: EngineCapabilities,
+    pub optimization_profile: OptimizationProfile,
 }
 
 impl Default for SupervisorOptions {
@@ -223,6 +229,8 @@ impl Default for SupervisorOptions {
             poll_interval: Duration::from_secs(5),
             restart_policy: RestartPolicy::default(),
             extra_args: Vec::new(),
+            engine_capabilities: EngineCapabilities::default(),
+            optimization_profile: OptimizationProfile::Balanced,
         }
     }
 }
@@ -679,7 +687,7 @@ impl EngineSupervisor {
             canonical_id: canonical_id.to_string(),
             gguf_path: model.gguf_path.clone(),
             port,
-            extra_args: self.inner.options.extra_args.clone(),
+            extra_args: self.spawn_args(canonical_id, model),
         };
         let process = match self.inner.backend.spawn(request).await {
             Ok(process) => process,
@@ -723,6 +731,57 @@ impl EngineSupervisor {
             serde_json::json!({"pid": pid, "port": port}),
         );
         Ok(())
+    }
+
+    fn spawn_args(
+        &self,
+        canonical_id: &str,
+        model: &crate::registry::ModelState,
+    ) -> Vec<String> {
+        let mut args = self.inner.options.extra_args.clone();
+        let Ok(metadata) = crate::gguf::read_metadata(&model.gguf_path) else {
+            return args;
+        };
+        let ram = self.inner.backend.ram_info();
+        let request = OptimizationRequest {
+            profile: self.inner.options.optimization_profile,
+            hardware: hardware_profile(ram),
+            model: ModelOptimizationMetadata::from_gguf(
+                &metadata,
+                model.size_bytes,
+            ),
+            ram_headroom_bytes: residency::headroom_bytes(
+                ram.total_bytes,
+                self.inner.options.configured_headroom_gb,
+            ),
+            requested_context: None,
+            draft_model: None,
+        };
+        let planner = OptimizationPlanner::new(
+            &self.inner.options.engine_capabilities,
+        );
+        match planner.plan(&request) {
+            Ok(plan) => {
+                let planned = plan.spawn_args().to_vec();
+                self.publish(
+                    canonical_id,
+                    "optimized",
+                    serde_json::json!({
+                        "context_size": plan.context_size,
+                        "gpu_layers": plan.gpu_layers,
+                        "estimated_ram_bytes": plan.estimated_ram_bytes,
+                        "memory_budget_bytes": plan.memory_budget_bytes,
+                    }),
+                );
+                args.splice(0..0, planned);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "optimization skipped for {canonical_id}: {error}"
+                );
+            }
+        }
+        args
     }
 
     async fn make_room(
@@ -1056,6 +1115,28 @@ fn snapshot_from(canonical_id: &str, state: &ManagedEngine) -> EngineSnapshot {
         last_used: *state.activity.last_used.lock(),
         restart_attempts: state.restart.attempts,
         failure: state.failure.clone(),
+    }
+}
+
+fn hardware_profile(ram: RamInfo) -> HardwareProfile {
+    let logical = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let system = sysinfo::System::new_all();
+    let physical = system.physical_core_count().unwrap_or(logical).max(1);
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let gpu = Some(GpuHardware {
+        memory_bytes: ram.total_bytes,
+        unified_memory: true,
+    });
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    let gpu: Option<GpuHardware> = None;
+    HardwareProfile {
+        total_ram_bytes: ram.total_bytes,
+        available_ram_bytes: ram.available_bytes,
+        physical_cpu_cores: physical,
+        logical_cpu_cores: logical,
+        gpu,
     }
 }
 
