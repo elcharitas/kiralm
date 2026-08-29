@@ -15,8 +15,18 @@ use std::path::Path;
 pub struct GgufMetadata {
     pub architecture: String,
     pub context_length: Option<u64>,
+    #[allow(dead_code)]
+    pub block_count: Option<u64>,
+    #[allow(dead_code)]
+    pub embedding_length: Option<u64>,
+    #[allow(dead_code)]
+    pub attention_head_count: Option<u64>,
+    #[allow(dead_code)]
+    pub attention_head_count_kv: Option<u64>,
     pub expert_count_total: Option<u64>,
     pub expert_count_active: Option<u64>,
+    #[allow(dead_code)]
+    pub tokenizer_fingerprint: Option<String>,
 }
 
 // Bool/Float/Array data isn't extracted (only UInt/Int/String are, via
@@ -155,6 +165,18 @@ pub fn read_metadata(path: &Path) -> anyhow::Result<GgufMetadata> {
     let context_length = kv
         .get(&format!("{architecture}.context_length"))
         .and_then(Value::as_u64);
+    let block_count = kv
+        .get(&format!("{architecture}.block_count"))
+        .and_then(Value::as_u64);
+    let embedding_length = kv
+        .get(&format!("{architecture}.embedding_length"))
+        .and_then(Value::as_u64);
+    let attention_head_count = kv
+        .get(&format!("{architecture}.attention.head_count"))
+        .and_then(Value::as_u64);
+    let attention_head_count_kv = kv
+        .get(&format!("{architecture}.attention.head_count_kv"))
+        .and_then(Value::as_u64);
 
     let expert_count_total = kv
         .get(&format!("{architecture}.expert_count"))
@@ -163,18 +185,62 @@ pub fn read_metadata(path: &Path) -> anyhow::Result<GgufMetadata> {
     let expert_count_active = kv
         .get(&format!("{architecture}.expert_used_count"))
         .and_then(Value::as_u64);
+    let tokenizer_fingerprint = tokenizer_fingerprint(&kv);
 
     Ok(GgufMetadata {
         architecture,
         context_length,
+        block_count,
+        embedding_length,
+        attention_head_count,
+        attention_head_count_kv,
         expert_count_total,
         expert_count_active,
+        tokenizer_fingerprint,
     })
+}
+
+fn tokenizer_fingerprint(kv: &HashMap<String, Value>) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let Value::Array(tokens) = kv.get("tokenizer.ggml.tokens")? else {
+        return None;
+    };
+    let mut hasher = Sha256::new();
+    for value in tokens {
+        let Value::String(token) = value else {
+            return None;
+        };
+        hasher.update((token.len() as u64).to_le_bytes());
+        hasher.update(token.as_bytes());
+    }
+    Some(hex::encode(hasher.finalize()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tokenizer_fingerprint_is_stable_and_ordered() {
+        let tokens = |values: &[&str]| {
+            let mut kv = HashMap::new();
+            kv.insert(
+                "tokenizer.ggml.tokens".to_string(),
+                Value::Array(
+                    values
+                        .iter()
+                        .map(|value| Value::String((*value).to_string()))
+                        .collect(),
+                ),
+            );
+            tokenizer_fingerprint(&kv).unwrap()
+        };
+
+        assert_eq!(tokens(&["a", "bc"]), tokens(&["a", "bc"]));
+        assert_ne!(tokens(&["a", "bc"]), tokens(&["ab", "c"]));
+        assert_ne!(tokens(&["a", "bc"]), tokens(&["bc", "a"]));
+    }
 
     /// Manual check against a real downloaded GGUF, not run in CI (path
     /// is machine-local). `cargo test -- --ignored gguf_real_file`.
