@@ -163,11 +163,19 @@ async fn chat_completions(
     if let (Some(session_id), Some(project_id)) = (session_id.clone(), project_id) {
         let project = app.state.read().projects.get(&project_id).cloned();
         if let Some(project) = project {
-            let permission = headers
+            let requested_permission = headers
                 .get("x-kiralm-permission-mode")
                 .and_then(|v| v.to_str().ok())
                 .map(Permission::parse)
                 .unwrap_or(Permission::ReadOnly);
+            let permission = app
+                .chats
+                .read()
+                .chats
+                .iter()
+                .find(|chat| chat.id == session_id)
+                .map(|chat| Permission::parse(&chat.permission).permits(requested_permission))
+                .unwrap_or(requested_permission);
             return run_tool_loop(
                 &app,
                 session_id,
@@ -252,10 +260,7 @@ async fn chat_completions(
 /// as `start_tracked_stream`, so a session's "Worked for Xm Ys" steps and
 /// running state are visible to a reconnecting/other tab the same way.
 ///
-/// The whole loop runs before anything is written to the
-/// response (see agent.rs's module note), so `Stop` can't abort a turn
-/// mid-tool-call today -- it only flips the record to not-running once
-/// this call finally returns.
+/// The response waits for the loop, but its task remains stoppable.
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_loop(
     app: &SharedState,
@@ -306,8 +311,36 @@ async fn run_tool_loop(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let http = reqwest::Client::new();
-    let outcome = agent::run(&http, &url, bearer.as_deref(), req, &project_root, permission, enable_thinking, &app.mcp, &app.config.dsh.bin).await;
+    let app_task = app.clone();
+    let session_task = session_id.clone();
+    let handle = tokio::spawn(async move {
+        let http = reqwest::Client::new();
+        agent::run(
+            &http,
+            &url,
+            bearer.as_deref(),
+            req,
+            &project_root,
+            &session_task,
+            permission,
+            &app_task.approvals,
+            enable_thinking,
+            &app_task.mcp,
+            &app_task.config.dsh.bin,
+        )
+        .await
+    });
+    *sg.task.lock() = Some(handle.abort_handle());
+    let outcome = match handle.await {
+        Ok(outcome) => outcome,
+        Err(error) if error.is_cancelled() => {
+            Err(super::agent::AgentError::Other("generation stopped".to_string()))
+        }
+        Err(_) => Err(super::agent::AgentError::Other(
+            "tool-calling task failed".to_string(),
+        )),
+    };
+    *sg.task.lock() = None;
 
     let (text, steps, gateway_err) = match outcome {
         Ok((resp, steps)) => {
@@ -452,7 +485,7 @@ fn start_tracked_stream(
         sg_task.state.write().running = false;
         *sg_task.tap.lock() = None;
     });
-    *sg.task.lock() = Some(handle);
+    *sg.task.lock() = Some(handle.abort_handle());
 
     let out = async_stream::stream! {
         loop {
@@ -970,5 +1003,116 @@ mod tests {
         assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
         assert_eq!(v["kiralm_tool_steps"][0]["ok"], false);
         assert!(!root.join("out.txt").exists(), "read-only session must not write to disk");
+    }
+
+    #[tokio::test]
+    async fn ask_mode_waits_for_api_approval_before_writing() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let root = register_test_project(&state);
+        let app_router = crate::api::build_router(state.clone());
+        let body = json!({
+            "model": "alias",
+            "stream": false,
+            "messages": [{"role": "user", "content": "write hello to out.txt"}],
+        });
+        let generation_router = app_router.clone();
+        let generation = tokio::spawn(async move {
+            generation_router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .header("x-kiralm-session-id", "sess-tool-ask")
+                        .header("x-kiralm-project-id", "proj-1")
+                        .header("x-kiralm-permission-mode", "ask")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        let approval = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let Some(approval) = state
+                    .approvals
+                    .list(Some("sess-tool-ask"))
+                    .into_iter()
+                    .next()
+                {
+                    break approval;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!root.join("out.txt").exists());
+        let resolve = app_router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/approvals/{}/resolve", approval.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"decision":"allow_once"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolve.status(), StatusCode::NO_CONTENT);
+        assert_eq!(generation.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read_to_string(root.join("out.txt")).unwrap(),
+            "hello from model"
+        );
+        assert!(state.approvals.list(Some("sess-tool-ask")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn stopping_generation_cancels_its_pending_approval() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        let root = register_test_project(&state);
+        let app_router = router(state.clone());
+        let body = json!({
+            "model": "alias",
+            "stream": false,
+            "messages": [{"role": "user", "content": "write hello to out.txt"}],
+        });
+        let generation = tokio::spawn(async move {
+            app_router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .header("x-kiralm-session-id", "sess-tool-stop")
+                        .header("x-kiralm-project-id", "proj-1")
+                        .header("x-kiralm-permission-mode", "ask")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while state.approvals.list(Some("sess-tool-stop")).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(state.stop_generation("sess-tool-stop"));
+        let _ = generation.await.unwrap();
+        assert!(state.approvals.list(Some("sess-tool-stop")).is_empty());
+        assert!(!state.generation_snapshot("sess-tool-stop").running);
+        assert!(!root.join("out.txt").exists());
     }
 }

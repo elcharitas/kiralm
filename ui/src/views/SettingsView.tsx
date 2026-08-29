@@ -188,15 +188,19 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
         <p className="settings-hint">
           Saved to <code>~/.kiralm/settings.json</code> as you change them.
         </p>
-        <label className="settings-toggle">
-          <span>Start new chats with full access instead of read-only</span>
-          <input
-            type="checkbox"
-            className="switch-input"
-            checked={settings.default_permission === "full-access"}
-            onChange={(e) => patchSettings({ default_permission: e.target.checked ? "full-access" : "read-only" })}
+        <div className="settings-field">
+          <label>Default tool access</label>
+          <Select
+            triggerClassName="settings-select"
+            value={settings.default_permission}
+            onChange={(value) => patchSettings({ default_permission: value as AppSettings["default_permission"] })}
+            options={[
+              { value: "read-only", label: "Read only" },
+              { value: "ask", label: "Ask before changes" },
+              { value: "full-access", label: "Full access" },
+            ]}
           />
-        </label>
+        </div>
         <label className="settings-toggle">
           <span>Enter sends the message (unchecked: Enter for a newline, Ctrl/Cmd+Enter sends)</span>
           <input

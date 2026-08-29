@@ -3,18 +3,27 @@ import {
   ArrowUp,
   Brain,
   Check,
-  ChevronDown,
   ChevronRight,
   Eye,
   GitBranch,
   Lock,
   MoreHorizontal,
   Pencil,
+  ShieldQuestion,
   Sparkles,
   Unlock,
   X,
 } from "lucide-react";
-import { api, streamChat, type GitStatus, type StatusResponse, type ToolStep } from "../api";
+import {
+  api,
+  streamChat,
+  type ApprovalDecision,
+  type GitStatus,
+  type PendingApproval,
+  type PermissionMode,
+  type StatusResponse,
+  type ToolStep,
+} from "../api";
 import { compactMessages, shouldAutoCompact } from "../compact";
 import { formatContextLength, formatDuration, groupBySection, modelName } from "../format";
 import { changedFilesOf, codeBlockCountOf, stripCodeBlocks } from "../diff";
@@ -40,7 +49,7 @@ export function ChatView({
   onUpdateMessages,
   onEnsureSession,
   onStreamingChange,
-  onTogglePermission,
+  onSetPermission,
 }: {
   status: StatusResponse | null;
   session: ChatSession | null;
@@ -48,7 +57,7 @@ export function ChatView({
   onUpdateMessages: (id: string, messages: StoredMessage[]) => void;
   onEnsureSession: () => Promise<ChatSession>;
   onStreamingChange: (id: string | null) => void;
-  onTogglePermission: (id: string) => void;
+  onSetPermission: (id: string, permission: PermissionMode) => void;
 }) {
   const { settings } = useSettings();
   const models = status?.models ?? [];
@@ -68,6 +77,7 @@ export function ChatView({
   const [openFiles, setOpenFiles] = useState<Record<number, boolean>>({});
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({});
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -213,6 +223,36 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.messages.length]);
 
+  useEffect(() => {
+    if (!session) {
+      setApprovals([]);
+      return;
+    }
+    const chatId = session.id;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const result = await api.listApprovals(chatId).catch(() => null);
+      if (cancelled) return;
+      if (result) setApprovals(result.approvals);
+      timer = window.setTimeout(poll, 400);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [session?.id]);
+
+  const decideApproval = async (approval: PendingApproval, decision: ApprovalDecision) => {
+    setApprovals((current) => current.filter((item) => item.id !== approval.id));
+    try {
+      await api.resolveApproval(approval.id, decision);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const isStreamingThisSession = sending && streamingSessionId === session?.id;
   const messages = session?.messages ?? [];
 
@@ -240,25 +280,29 @@ export function ChatView({
           {formatContextLength(effectiveModelObj.context_length)}
         </span>
       )}
-      <button
-        type="button"
-        className={
-          session?.permission === "full-access" ? "chip-select chip-toggle chip-toggle-on" : "chip-select chip-toggle"
+      <Select
+        triggerClassName={
+          session?.permission === "full-access"
+            ? "chip-select chip-toggle chip-toggle-on"
+            : "chip-select chip-toggle"
         }
-        title="Whether the model can write files or run commands in this workspace, or only read them"
-        onClick={() => session && onTogglePermission(session.id)}
-      >
-        {session?.permission === "full-access" ? (
-          <>
-            <Unlock size={12} /> Full access
-          </>
-        ) : (
-          <>
-            <Lock size={12} /> Read only
-          </>
-        )}
-        <ChevronDown size={12} />
-      </button>
+        icon={
+          session?.permission === "full-access" ? (
+            <Unlock size={12} />
+          ) : session?.permission === "ask" ? (
+            <ShieldQuestion size={12} />
+          ) : (
+            <Lock size={12} />
+          )
+        }
+        value={session?.permission ?? "read-only"}
+        onChange={(permission) => session && onSetPermission(session.id, permission as PermissionMode)}
+        options={[
+          { value: "read-only", label: "Read only" },
+          { value: "ask", label: "Ask before changes" },
+          { value: "full-access", label: "Full access" },
+        ]}
+      />
     </>
   );
 
@@ -388,6 +432,42 @@ export function ChatView({
       {error && <div className="banner banner-bad">{error}</div>}
 
       <div className="composer">
+        {approvals[0] && (
+          <div className="approval-card" role="alert">
+            <div className="approval-card-head">
+              <span className="approval-card-title">
+                <ShieldQuestion size={14} /> Approval required
+              </span>
+              <span className="approval-risk">{approvals[0].risk.replaceAll("_", " ")}</span>
+            </div>
+            <div className="approval-tool mono">{approvals[0].tool_name}</div>
+            <div className="approval-target mono">{approvals[0].target}</div>
+            <pre className="approval-args mono">{JSON.stringify(approvals[0].arguments, null, 2)}</pre>
+            <div className="approval-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => decideApproval(approvals[0], "deny")}
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => decideApproval(approvals[0], "allow_once")}
+              >
+                Allow once
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => decideApproval(approvals[0], "allow_for_chat")}
+              >
+                Allow for this chat
+              </button>
+            </div>
+          </div>
+        )}
         <form
           className="composer-box"
           onSubmit={(e) => {
