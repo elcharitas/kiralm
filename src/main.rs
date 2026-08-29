@@ -28,6 +28,7 @@ mod settings;
 mod skills;
 mod state;
 mod storage;
+mod telemetry;
 mod tools;
 mod tunnel;
 mod tunnel_auth;
