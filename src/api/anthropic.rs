@@ -22,6 +22,7 @@ use super::openai::{
 };
 use super::{ensure_loaded, resolve_model, GatewayError, SharedState};
 use crate::cloud;
+use crate::engine::supervisor::EngineLease;
 use crate::registry::ModelRoute;
 use crate::state::ModelManifest;
 
@@ -407,8 +408,16 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
     // Same routing branch as `/v1/chat/completions`. The translator
     // below doesn't know or care whether the child is local or cloud,
     // only that `ensure_loaded` handed it a route to call.
-    let (url, bearer, openai_req) = match route {
-        ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, openai_req),
+    let (url, bearer, openai_req, engine_lease) = match route {
+        ModelRoute::Local(lease) => (
+            format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                lease.port()
+            ),
+            None,
+            openai_req,
+            Some(lease),
+        ),
         ModelRoute::Cloud => {
             let token = match cloud::ensure_token() {
                 Ok(t) => t,
@@ -425,14 +434,32 @@ pub async fn messages(State(app): State<SharedState>, Json(req): Json<MessagesRe
                 format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
                 Some(token),
                 req,
+                None,
             )
         }
     };
 
     if stream {
-        stream_messages(http, url, bearer, openai_req, req.stop_sequences, canonical_id).await
+        stream_messages(
+            http,
+            url,
+            bearer,
+            openai_req,
+            req.stop_sequences,
+            canonical_id,
+            engine_lease,
+        )
+        .await
     } else {
-        non_stream_messages(http, url, bearer, openai_req, req.stop_sequences).await
+        non_stream_messages(
+            http,
+            url,
+            bearer,
+            openai_req,
+            req.stop_sequences,
+            engine_lease,
+        )
+        .await
     }
 }
 
@@ -442,7 +469,9 @@ async fn non_stream_messages(
     bearer: Option<String>,
     openai_req: ChatCompletionRequest,
     stop_sequences: Option<Vec<String>>,
+    engine_lease: Option<EngineLease>,
 ) -> Response {
+    let _engine_lease = engine_lease;
     let mut req = http.post(&url).json(&openai_req);
     if let Some(token) = &bearer {
         req = req.bearer_auth(token);
@@ -519,6 +548,7 @@ async fn stream_messages(
     openai_req: ChatCompletionRequest,
     stop_sequences: Option<Vec<String>>,
     canonical_id: String,
+    engine_lease: Option<EngineLease>,
 ) -> Response {
     let mut req = http.post(&url).json(&openai_req);
     if let Some(token) = &bearer {
@@ -550,7 +580,13 @@ async fn stream_messages(
     }
 
     let msg_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let stream = translate_stream(resp, msg_id, canonical_id, stop_sequences);
+    let stream = translate_stream(
+        resp,
+        msg_id,
+        canonical_id,
+        stop_sequences,
+        engine_lease,
+    );
     Sse::new(stream).into_response()
 }
 
@@ -564,8 +600,10 @@ fn translate_stream(
     msg_id: String,
     model: String,
     stop_sequences: Option<Vec<String>>,
+    engine_lease: Option<EngineLease>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+        let _engine_lease = engine_lease;
         yield Ok(sse_json("message_start", json!({
             "type": "message_start",
             "message": {

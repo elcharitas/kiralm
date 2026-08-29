@@ -12,6 +12,7 @@ use serde_json::json;
 use super::agent;
 use super::{ensure_loaded, resolve_model, GatewayError, GenerationState, SharedState};
 use crate::cloud;
+use crate::engine::supervisor::EngineLease;
 use crate::registry::{ModelRoute, ModelSource};
 use crate::state::ModelManifest;
 use crate::tools::Permission;
@@ -127,8 +128,16 @@ async fn chat_completions(
     // outgoing `model` swapped for the cloud model's stored `ref` (the
     // client's requested alias/id is not what kiralm-web expects),
     // same byte-passthrough/streaming logic otherwise.
-    let (url, bearer, body) = match route {
-        ModelRoute::Local(port) => (format!("http://127.0.0.1:{port}/v1/chat/completions"), None, body),
+    let (url, bearer, body, engine_lease) = match route {
+        ModelRoute::Local(lease) => (
+            format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                lease.port()
+            ),
+            None,
+            body,
+            Some(lease),
+        ),
         ModelRoute::Cloud => {
             let token = match cloud::ensure_token() {
                 Ok(t) => t,
@@ -147,6 +156,7 @@ async fn chat_completions(
                 format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
                 Some(token),
                 body,
+                None,
             )
         }
     };
@@ -187,6 +197,7 @@ async fn chat_completions(
                 url,
                 bearer,
                 body,
+                engine_lease,
             )
             .await;
         }
@@ -223,11 +234,24 @@ async fn chat_completions(
 
     if is_stream {
         if let Some(session_id) = session_id {
-            return start_tracked_stream(&app, session_id, canonical, upstream, status);
+            return start_tracked_stream(
+                &app,
+                session_id,
+                canonical,
+                upstream,
+                status,
+                engine_lease,
+            );
         }
         // No session id: an external OpenAI-API client, not the KiraLM
         // UI. Exactly today's behavior, pure byte-copy, no re-parsing.
-        let stream = upstream.bytes_stream();
+        let stream = async_stream::stream! {
+            let _engine_lease = engine_lease;
+            let mut bytes = upstream.bytes_stream();
+            while let Some(item) = bytes.next().await {
+                yield item;
+            }
+        };
         Response::builder()
             .status(status)
             .header("content-type", "text/event-stream")
@@ -235,6 +259,7 @@ async fn chat_completions(
             .body(Body::from_stream(stream))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     } else {
+        let _engine_lease = engine_lease;
         let mut json = match upstream.json::<serde_json::Value>().await {
             Ok(v) => v,
             Err(e) => {
@@ -273,6 +298,7 @@ async fn run_tool_loop(
     url: String,
     bearer: Option<String>,
     raw_body: serde_json::Value,
+    engine_lease: Option<EngineLease>,
 ) -> Response {
     let (sg, _tap) = app.start_generation(&session_id, &canonical);
 
@@ -314,6 +340,7 @@ async fn run_tool_loop(
     let app_task = app.clone();
     let session_task = session_id.clone();
     let handle = tokio::spawn(async move {
+        let _engine_lease = engine_lease;
         let http = reqwest::Client::new();
         agent::run(
             &http,
@@ -450,6 +477,7 @@ fn start_tracked_stream(
     model: String,
     upstream: reqwest::Response,
     status: StatusCode,
+    engine_lease: Option<EngineLease>,
 ) -> Response {
     use tokio::sync::broadcast;
 
@@ -457,6 +485,7 @@ fn start_tracked_stream(
     let sg_task = sg.clone();
 
     let handle = tokio::spawn(async move {
+        let _engine_lease = engine_lease;
         let mut byte_stream = upstream.bytes_stream();
         let mut linebuf = String::new();
         loop {

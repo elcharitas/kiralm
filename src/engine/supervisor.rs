@@ -433,6 +433,15 @@ impl EngineSupervisor {
             drop(guard);
             return Ok(lease);
         }
+        if model.status == ModelStatus::Loaded {
+            if let Some(port) = model.port {
+                self.adopt_registered(canonical_id, &model, port).await;
+                if let Some(lease) = self.ready_lease(canonical_id).await {
+                    drop(guard);
+                    return Ok(lease);
+                }
+            }
+        }
         drop(guard);
 
         let admission = self.inner.admission_lock.lock().await;
@@ -456,6 +465,26 @@ impl EngineSupervisor {
         let _admission = self.inner.admission_lock.lock().await;
         let _model = self.model_lock(canonical_id).lock_owned().await;
         self.drain(canonical_id, false).await
+    }
+
+    pub async fn set_hot(
+        &self,
+        canonical_id: &str,
+        hot: bool,
+    ) -> Result<(), SupervisorError> {
+        self.model(canonical_id)?;
+        self.inner.registry.update(canonical_id, |model| {
+            model.hot = hot;
+        });
+        if let Some(runtime) = self.runtime(canonical_id).await {
+            runtime.lock().await.hot = hot;
+        }
+        self.publish(
+            canonical_id,
+            "hot_changed",
+            serde_json::json!({"hot": hot}),
+        );
+        Ok(())
     }
 
     pub async fn snapshot(&self, canonical_id: &str) -> Option<EngineSnapshot> {
@@ -600,6 +629,25 @@ impl EngineSupervisor {
             activity,
             registry: Arc::downgrade(&self.inner.registry),
         })
+    }
+
+    async fn adopt_registered(
+        &self,
+        canonical_id: &str,
+        model: &crate::registry::ModelState,
+        port: u16,
+    ) {
+        let runtime = self
+            .runtime_for(canonical_id, model.size_bytes, model.hot)
+            .await;
+        let mut state = runtime.lock().await;
+        if state.lifecycle == LifecycleState::Unloaded {
+            state.lifecycle = LifecycleState::Ready;
+            state.pid = model.pid;
+            state.port = Some(port);
+            state.health = ModelHealth::Healthy;
+            state.restart.ready_since = Some(Instant::now());
+        }
     }
 
     async fn ensure_ready(

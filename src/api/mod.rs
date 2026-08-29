@@ -23,10 +23,13 @@ use tokio::sync::broadcast;
 use crate::chats::Chats;
 use crate::cloud::LoginProgressTx;
 use crate::config::Config;
+use crate::engine::supervisor::{
+    EngineSupervisor, SupervisorError, SupervisorOptions,
+};
 use crate::engine::{self, EngineCapabilities};
 use crate::events::EventBus;
 use crate::pull::{ProgressTx, PullProgress};
-use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource, ModelStatus};
+use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource};
 use crate::residency;
 use crate::settings::Settings;
 use crate::state::{ModelManifest, State};
@@ -125,6 +128,7 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     pub approvals: Arc<crate::approvals::ApprovalManager>,
     pub engine_capabilities: EngineCapabilities,
+    pub supervisor: EngineSupervisor,
 }
 
 impl AppState {
@@ -158,6 +162,16 @@ impl AppState {
     ) -> AppState {
         let events = Arc::new(EventBus::default());
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
+        let supervisor = EngineSupervisor::production(
+            registry.clone(),
+            events.clone(),
+            config.llama_server_bin.clone(),
+            config.llama_server_port_range,
+            SupervisorOptions {
+                configured_headroom_gb: config.ram_headroom_gb,
+                ..SupervisorOptions::default()
+            },
+        );
         AppState {
             config,
             registry,
@@ -173,6 +187,7 @@ impl AppState {
             events,
             approvals,
             engine_capabilities,
+            supervisor,
         }
     }
 
@@ -347,16 +362,7 @@ pub enum GatewayError {
     AuthRequired(String),
 }
 
-/// Ensures `canonical_id` has a live `llama-server` child, spawning one
-/// synchronously if cold (admission control applies), and
-/// returns its port. Reuses an already-loaded child on repeat calls,
-/// this is what keeps the model resident across requests.
-///
-/// STUB NOTE: no LRU eviction of cold models to make room, and no
-/// automatic-flag matrix beyond the always-on set. See
-/// engine.rs's module note. The owning residency agent should extend
-/// this rather than replace it wholesale; the admission math and
-/// registry bookkeeping here are real.
+/// Returns a cloud route or a lease on a supervised local engine.
 pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<ModelRoute, GatewayError> {
     let Some(existing) = app.registry.get_clone(canonical_id) else {
         return Err(GatewayError::LoadFailed(format!(
@@ -372,12 +378,6 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
         return Ok(ModelRoute::Cloud);
     }
 
-    if let ModelStatus::Loaded = existing.status {
-        if let Some(port) = existing.port {
-            return Ok(ModelRoute::Local(port));
-        }
-    }
-
     if let Some(entry) = app.state.read().models.get(canonical_id) {
         if let Some(vc) = &entry.verdict_cache {
             if vc.status == "unsupported" {
@@ -388,88 +388,21 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
         }
     }
 
-    let ram = residency::read_ram_info();
-    let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
-    // Cloud entries are always `Loaded` but occupy zero local RAM. The
-    // admission budget only ever tracks locally-spawned children.
-    let loaded_bytes: u64 = app
-        .registry
-        .list()
-        .into_iter()
-        .filter(|m| {
-            m.source == ModelSource::Local
-                && matches!(m.status, ModelStatus::Loaded)
-                && m.canonical_id != canonical_id
-        })
-        .map(|m| m.size_bytes)
-        .sum();
-    if let Err(shortfall) =
-        residency::check_admission(loaded_bytes, existing.size_bytes, ram.total_bytes, headroom)
-    {
-        return Err(GatewayError::InsufficientRam(format!(
-            "need {shortfall} more bytes free to load '{canonical_id}'"
-        )));
+    app.supervisor
+        .acquire(canonical_id)
+        .await
+        .map(ModelRoute::Local)
+        .map_err(map_supervisor_error)
+}
+
+fn map_supervisor_error(error: SupervisorError) -> GatewayError {
+    match error {
+        SupervisorError::InsufficientRam {
+            canonical_id,
+            shortfall_bytes,
+        } => GatewayError::InsufficientRam(format!(
+            "need {shortfall_bytes} more bytes free to load '{canonical_id}'"
+        )),
+        other => GatewayError::LoadFailed(other.to_string()),
     }
-
-    let mut loading = existing.clone();
-    loading.status = ModelStatus::Loading;
-    app.registry.insert(loading);
-
-    let port = match engine::allocate_port(app.config.llama_server_port_range) {
-        Ok(p) => p,
-        Err(e) => {
-            let mut failed = existing.clone();
-            failed.status = ModelStatus::Failed(e.to_string());
-            app.registry.insert(failed);
-            return Err(GatewayError::LoadFailed(e.to_string()));
-        }
-    };
-
-    let spawn_result = engine::spawn(
-        &app.config.llama_server_bin,
-        &existing.gguf_path,
-        canonical_id,
-        port,
-        &[],
-    )
-    .await;
-
-    let mut child = match spawn_result {
-        Ok(c) => c,
-        Err(e) => {
-            let mut failed = existing.clone();
-            failed.status = ModelStatus::Failed(e.to_string());
-            app.registry.insert(failed);
-            return Err(GatewayError::LoadFailed(e.to_string()));
-        }
-    };
-    let pid = child.id();
-
-    if let Err(e) = engine::wait_healthy(port, std::time::Duration::from_secs(30)).await {
-        engine::shutdown(child).await;
-        let msg = format!("{e}: {}", engine::tail_log(canonical_id, 50));
-        let mut failed = existing.clone();
-        failed.status = ModelStatus::Failed(msg.clone());
-        app.registry.insert(failed);
-        return Err(GatewayError::LoadFailed(msg));
-    }
-
-    // Detach: `kill_on_drop(true)` means simply letting `child` fall out
-    // of scope here would kill the server we just started, and
-    // `mem::forget` would leak a zombie once it exits. Instead hand it
-    // to a reaper task that just waits (never kills). The registry only
-    // tracks the pid, which is enough for `DELETE`'s graceful-kill path.
-    // No supervising/restart task yet. See module STUB NOTE.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-
-    let mut loaded = existing;
-    loaded.status = ModelStatus::Loaded;
-    loaded.pid = pid;
-    loaded.port = Some(port);
-    loaded.last_used = std::time::Instant::now();
-    app.registry.insert(loaded);
-
-    Ok(ModelRoute::Local(port))
 }

@@ -43,7 +43,6 @@ fn serve_asset(path: &str) -> Option<Response> {
 
 use super::{ensure_loaded, GatewayError, SharedState};
 use crate::cloud;
-use crate::engine;
 use crate::registry::{ModelSource, ModelState, ModelStatus};
 use crate::residency;
 use crate::state::ModelManifest;
@@ -379,6 +378,9 @@ async fn set_hot(
 
     ms.hot = body.on;
     app.registry.insert(ms);
+    if let Err(error) = app.supervisor.set_hot(&canonical, body.on).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
 
     {
         let mut state = app.state.write();
@@ -417,19 +419,26 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
         return err(StatusCode::NOT_FOUND, format!("model '{id}' not found"));
     };
 
-    // Unload if running (SIGTERM/SIGKILL), by pid. This stub
-    // registry doesn't hold the tokio::process::Child handle, only the
-    // pid, which is enough to signal it directly.
-    if let (ModelStatus::Loaded, Some(pid)) = (&ms.status, ms.pid) {
-        engine::kill_pid_graceful(pid).await;
+    if let Err(error) = app.supervisor.unload(&canonical).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
+    let manifest = ModelManifest::load(&ms.gguf_path).ok();
     if let Err(e) = std::fs::remove_file(&ms.gguf_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     }
     let _ = std::fs::remove_file(ModelManifest::sidecar_path_for(&ms.gguf_path));
+    if let Some(manifest) = manifest {
+        if let Ok(cache) = crate::pull::artifact_cache() {
+            if let Err(error) =
+                cache.remove_reference(&manifest.sha256, &ms.gguf_path)
+            {
+                tracing::warn!("failed to update artifact cache: {error}");
+            }
+        }
+    }
 
     app.registry.remove(&canonical);
     {

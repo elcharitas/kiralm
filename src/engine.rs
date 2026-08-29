@@ -1,6 +1,5 @@
 //! `llama-server` process management and capability discovery.
 
-#[allow(dead_code)]
 pub mod supervisor;
 
 use std::collections::BTreeSet;
@@ -259,24 +258,6 @@ pub async fn send_tiny_completion(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Last `n` lines of a log file, used as the captured error text on a
-/// failed load.
-pub fn tail_log(canonical_id: &str, n: usize) -> String {
-    let path = log_path_for(canonical_id);
-    match std::fs::read_to_string(path) {
-        Ok(s) => s
-            .lines()
-            .rev()
-            .take(n)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Err(_) => String::new(),
-    }
-}
-
 /// Graceful shutdown: SIGTERM, wait up to 5s, SIGKILL if still alive.
 pub async fn shutdown(mut child: Child) {
     if let Some(pid) = child.id() {
@@ -286,21 +267,6 @@ pub async fn shutdown(mut child: Child) {
     if waited.is_err() {
         let _ = child.start_kill();
         let _ = child.wait().await;
-    }
-}
-
-/// Same graceful-shutdown shape as `shutdown()`, but for a pid we only
-/// have a bare `u32` for (e.g. `DELETE /api/models/:id` on a registry
-/// entry that doesn't own the `Child` handle).
-pub async fn kill_pid_graceful(pid: u32) {
-    send_sigterm(pid);
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    #[cfg(unix)]
-    unsafe {
-        // Still alive? SIGKILL. kill(pid, 0) is the standard existence probe.
-        if libc::kill(pid as i32, 0) == 0 {
-            libc::kill(pid as i32, libc::SIGKILL);
-        }
     }
 }
 

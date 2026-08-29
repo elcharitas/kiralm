@@ -32,12 +32,9 @@ pub enum ModelSource {
     Cloud,
 }
 
-/// What `ensure_loaded` hands back to a chat-completion call site: a
-/// local port to proxy to, or a signal to forward to kiralm-web instead.
-/// This is the one place "is this model spawnable locally" is decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A supervised local lease or a route to the cloud gateway.
 pub enum ModelRoute {
-    Local(u16),
+    Local(crate::engine::supervisor::EngineLease),
     Cloud,
 }
 

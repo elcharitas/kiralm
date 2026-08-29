@@ -165,6 +165,13 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     std::fs::create_dir_all(&config.model_dir)?;
     std::fs::create_dir_all(home.join("logs"))?;
     std::fs::write(home.join("kiralm.pid"), std::process::id().to_string())?;
+    if let Ok(cache) = pull::artifact_cache() {
+        if let Err(error) =
+            cache.cleanup_stale_partials(std::time::Duration::from_secs(86_400))
+        {
+            tracing::warn!("failed to clean stale cache partials: {error}");
+        }
+    }
 
     let state = State::load()?;
 
@@ -187,11 +194,13 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
     }
+    let engine_watcher = app_state.supervisor.start_watcher();
 
     let cloud_config = app_state.config.cloud.clone();
     let registry_for_sync = app_state.registry.clone();
     let app_state_for_tunnel = app_state.clone();
     let app_state_for_mcp = app_state.clone();
+    let app_state_for_shutdown = app_state.clone();
     let router = api::build_router(app_state);
 
     if config.unix_socket.exists() {
@@ -253,6 +262,8 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     } else {
         let _ = tokio::join!(unix_task, tunnel_task);
     }
+    engine_watcher.stop().await;
+    app_state_for_shutdown.supervisor.shutdown_all().await;
     Ok(())
 }
 
