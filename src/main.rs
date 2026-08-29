@@ -12,6 +12,7 @@ mod engine;
 mod events;
 mod gguf;
 mod git;
+mod knowledge;
 mod marketplace;
 mod mcp;
 mod plugin_catalog;
