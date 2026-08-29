@@ -10,6 +10,7 @@ mod cloud;
 mod config;
 mod dsh;
 mod engine;
+mod evals;
 mod events;
 mod gguf;
 mod git;
