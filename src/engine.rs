@@ -1,5 +1,6 @@
 //! `llama-server` process management and capability discovery.
 
+pub mod optimization;
 pub mod supervisor;
 
 use std::collections::BTreeSet;
@@ -16,7 +17,7 @@ use crate::config::kiralm_home;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-const KNOWN_FLAGS: [&str; 19] = [
+const KNOWN_FLAGS: [&str; 21] = [
     "--batch-size",
     "--cache-prompt",
     "--cache-ram",
@@ -35,6 +36,8 @@ const KNOWN_FLAGS: [&str; 19] = [
     "--parallel",
     "--slot-save-path",
     "--slots",
+    "--threads",
+    "--threads-batch",
     "--ubatch-size",
 ];
 
@@ -57,7 +60,7 @@ impl EngineCapabilities {
         } else {
             KNOWN_FLAGS
                 .iter()
-                .filter(|flag| help.text.contains(**flag))
+                .filter(|flag| help_contains_flag(&help.text, flag))
                 .map(|flag| (*flag).to_string())
                 .collect()
         };
@@ -67,6 +70,25 @@ impl EngineCapabilities {
     pub fn supports(&self, flag: &str) -> bool {
         self.flags.contains(flag)
     }
+}
+
+fn help_contains_flag(help: &str, flag: &str) -> bool {
+    help.match_indices(flag).any(|(index, _)| {
+        let before = help[..index].chars().next_back();
+        let after = help[index + flag.len()..].chars().next();
+        is_flag_boundary(before) && is_flag_boundary(after)
+    })
+}
+
+fn is_flag_boundary(value: Option<char>) -> bool {
+    match value {
+        Some(value) => !is_flag_character(value),
+        None => true,
+    }
+}
+
+fn is_flag_character(value: char) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, '-' | '_')
 }
 
 struct BoundedOutput {
@@ -166,17 +188,13 @@ pub fn allocate_port(range: (u16, u16)) -> anyhow::Result<u16> {
     )
 }
 
-/// Always-on flags. Planned options arrive through `extra_args`.
+/// Core launch flags. Planned options arrive in `extra_args`.
 fn base_args(gguf_path: &Path, port: u16) -> Vec<String> {
     vec![
         "-m".to_string(),
         gguf_path.display().to_string(),
         "--port".to_string(),
         port.to_string(),
-        "-fa".to_string(),
-        "on".to_string(),
-        "-ngl".to_string(),
-        "99".to_string(),
         // use the GGUF's own chat template (tool-call syntax lives there)
         // instead of llama-server's generic built-in template
         "--jinja".to_string(),
@@ -365,7 +383,7 @@ mod capability_tests {
             r#"if [ "$1" = "--version" ]; then
   echo "llama.cpp build 123"
 else
-  echo "--cache-prompt --cache-reuse --parallel --metrics"
+  echo "--cache-prompt --cache-reuse --parallel --metrics --threads-batch"
 fi"#,
         );
 
@@ -375,6 +393,8 @@ fi"#,
         assert!(capabilities.supports("--cache-reuse"));
         assert!(capabilities.supports("--parallel"));
         assert!(capabilities.supports("--metrics"));
+        assert!(capabilities.supports("--threads-batch"));
+        assert!(!capabilities.supports("--threads"));
         assert!(!capabilities.supports("--model-draft"));
 
         let _ = std::fs::remove_file(path);
@@ -395,5 +415,15 @@ fi"#,
         assert!(started.elapsed() < Duration::from_secs(2));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn base_args_leave_optimization_to_the_planner() {
+        let args = base_args(Path::new("model.gguf"), 8700);
+
+        assert!(!args.iter().any(|arg| arg == "-fa"));
+        assert!(!args.iter().any(|arg| arg == "-ngl"));
+        assert!(!args.iter().any(|arg| arg == "--flash-attn"));
+        assert!(!args.iter().any(|arg| arg == "--n-gpu-layers"));
     }
 }
