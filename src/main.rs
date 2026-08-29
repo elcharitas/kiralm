@@ -3,6 +3,7 @@
 
 mod agent_plugin;
 mod approvals;
+mod attachments;
 mod api;
 mod chats;
 mod cli;
