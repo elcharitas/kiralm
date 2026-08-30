@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,6 +10,7 @@ import {
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { RightPanel } from "./components/RightPanel";
+import { RuntimeDock } from "./components/RuntimeDock";
 import { AppLogo } from "./components/AppLogo";
 import { ChatView } from "./views/ChatView";
 import { HomeView } from "./views/HomeView";
@@ -80,6 +82,7 @@ export default function App() {
     renameSession,
     deleteSession,
     deleteSessionsByProject,
+    refreshSessions,
   } = useSessions();
   const { projects, createProject, cloneProject, deleteProject, refresh: refreshProjects } = useProjects();
   const runningGenerations = useRunningGenerations();
@@ -191,7 +194,7 @@ export default function App() {
     [rightPanelMode, sidebarCollapsed],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const app = appRef.current;
     if (!app) return;
     const reclamp = () => {
@@ -207,12 +210,11 @@ export default function App() {
         updateIslandWidth("right", right);
       }
     };
-    const frame = window.requestAnimationFrame(reclamp);
+    reclamp();
     const observer = new ResizeObserver(reclamp);
     observer.observe(app);
     window.addEventListener("resize", reclamp);
     return () => {
-      window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", reclamp);
     };
@@ -422,17 +424,20 @@ export default function App() {
         ) : effectiveView === "home" ? (
           <HomeView onCreateProject={createProject} onCloneProject={cloneProject} onOpenProject={openProject} />
         ) : (
-          <ChatView
-            status={status}
-            session={active}
-            gitStatus={gitStatus}
-            onUpdateMessages={setMessages}
-            onEnsureSession={newChat}
-            onStreamingChange={setStreamingId}
-            onSetPermission={setPermission}
-            onGitRefresh={refreshGit}
-            gitBusy={activeProjectBusy}
-          />
+          <>
+            <ChatView
+              status={status}
+              session={active}
+              gitStatus={gitStatus}
+              onUpdateMessages={setMessages}
+              onEnsureSession={newChat}
+              onStreamingChange={setStreamingId}
+              onSetPermission={setPermission}
+              onGitRefresh={refreshGit}
+              gitBusy={activeProjectBusy}
+            />
+            {active && <RuntimeDock session={active} onGitRefresh={() => void refreshGit()} onChatsRefresh={() => void refreshSessions()} />}
+          </>
         )}
       </main>
 

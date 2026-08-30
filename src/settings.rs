@@ -37,6 +37,9 @@ pub struct Settings {
     /// summarization itself is client-driven (a plain chat-completion
     /// call), this flag just gates whether it fires automatically.
     pub auto_compact: bool,
+    pub runtime_dock_collapsed: bool,
+    pub runtime_dock_height: u32,
+    pub runtime_dock_tab: String,
 }
 
 impl Default for Settings {
@@ -51,6 +54,9 @@ impl Default for Settings {
             sidebar_collapsed: false,
             collapsed_workspaces: Vec::new(),
             auto_compact: true,
+            runtime_dock_collapsed: true,
+            runtime_dock_height: 280,
+            runtime_dock_tab: "terminal".to_string(),
         }
     }
 }

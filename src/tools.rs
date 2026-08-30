@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// A session's tool-access level. Defaults to `ReadOnly` (new sessions
@@ -60,6 +60,8 @@ pub struct ToolStep {
     pub file_edit: Option<FileEdit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<MutationCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 /// A real file mutation from one `write_file` call: `before` is the
@@ -77,13 +79,13 @@ pub struct FileEdit {
     pub after: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MutationCheckpoint {
     pub operation: String,
     pub entries: Vec<PathSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathSnapshot {
     pub path: String,
     pub kind: String,
@@ -493,16 +495,24 @@ fn mutation_checkpoint(
         }
         _ => return Ok(None),
     };
+    checkpoint_paths(name, &paths, root).map(Some)
+}
+
+pub(crate) fn checkpoint_paths(
+    operation: &str,
+    paths: &[&str],
+    root: &Path,
+) -> Result<MutationCheckpoint, String> {
     let mut entries = Vec::new();
     let mut budget = CheckpointBudget::default();
     for path in paths {
         let resolved = resolve_in_root(root, path)?;
         snapshot_path(root, &resolved, &mut entries, &mut budget)?;
     }
-    Ok(Some(MutationCheckpoint {
-        operation: name.to_string(),
+    Ok(MutationCheckpoint {
+        operation: operation.to_string(),
         entries,
-    }))
+    })
 }
 
 #[derive(Default)]
@@ -693,6 +703,7 @@ pub async fn execute(
         ok,
         file_edit,
         checkpoint,
+        checkpoint_id: None,
     };
     (content, step)
 }
@@ -707,6 +718,7 @@ pub fn denied_step(name: &str, args_json: &str, reason: &str) -> (String, ToolSt
             ok: false,
             file_edit: None,
             checkpoint: None,
+            checkpoint_id: None,
         },
     )
 }

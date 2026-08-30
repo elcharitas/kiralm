@@ -9,6 +9,7 @@ import {
   File as FileIcon,
   Image,
   MemoryStick,
+  MonitorPlay,
   Palette,
   PanelRightClose,
   Plug,
@@ -26,6 +27,7 @@ import { Dial } from "./Dial";
 import { GitPanel } from "./GitPanel";
 import { McpPanel } from "./McpPanel";
 import { PluginsPanel } from "./PluginsPanel";
+import { PreviewIsland } from "./RuntimeDock";
 import { Select } from "./Select";
 import { SkillsPanel } from "./SkillsPanel";
 
@@ -123,7 +125,7 @@ function SourceSplit({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
       <div
         className="git-source-split-top"
         style={{
-          height: `calc(${topRatio * 100}% - ${SPLIT_HANDLE_HEIGHT / 2}px)`,
+          height: `calc(${topRatio * 100}% - ${topRatio * SPLIT_HANDLE_HEIGHT}px)`,
         }}
       >
         {top}
@@ -230,7 +232,7 @@ export function RightPanel({
 
   const [tab, setTab] = useState<string>("plugins");
   const activeTab =
-    tab === "skills" || tab === "mcp" || tab === "plugins" || files.some((f) => f.filename === tab)
+    tab === "skills" || tab === "mcp" || tab === "plugins" || tab === "preview" || files.some((f) => f.filename === tab)
       ? tab
       : "source";
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -265,6 +267,18 @@ export function RightPanel({
             <span className="mono truncate">{f.filename.split("/").pop()}</span>
           </button>
         ))}
+        <button
+          type="button"
+          className={
+            activeTab === "preview"
+              ? "right-panel-tab right-panel-tab-diff right-panel-tab-active"
+              : "right-panel-tab right-panel-tab-diff"
+          }
+          onClick={() => setTab("preview")}
+          title="Preview"
+        >
+          <MonitorPlay size={14} /> <span className="right-panel-tab-label">Preview</span>
+        </button>
         <button
           type="button"
           className={
@@ -323,7 +337,7 @@ export function RightPanel({
         </div>
       </div>
 
-      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "plugins" && turns.length > 0 && (
+      {activeTab !== "skills" && activeTab !== "mcp" && activeTab !== "plugins" && activeTab !== "preview" && turns.length > 0 && (
         <div className="right-panel-selector">
           <Select
             triggerClassName="chip-select"
@@ -340,13 +354,15 @@ export function RightPanel({
         </div>
       )}
 
-      <div className="right-panel-body">
+      <div className={activeTab === "preview" ? "right-panel-body right-panel-body-preview" : "right-panel-body"}>
         {activeTab === "skills" ? (
           <SkillsPanel />
         ) : activeTab === "mcp" ? (
           <McpPanel />
         ) : activeTab === "plugins" ? (
           <PluginsPanel />
+        ) : activeTab === "preview" && session ? (
+          <PreviewIsland projectId={session.projectId} />
         ) : (
           <SourceSplit
             top={(

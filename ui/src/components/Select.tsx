@@ -37,6 +37,7 @@ export function Select<T extends string>({
   triggerClassName,
   icon,
   disabled,
+  ariaLabel,
 }: {
   value: T;
   options?: SelectOption<T>[];
@@ -45,6 +46,7 @@ export function Select<T extends string>({
   triggerClassName: string;
   icon?: ReactNode;
   disabled?: boolean;
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -174,6 +176,7 @@ export function Select<T extends string>({
           }
         }}
         aria-haspopup="listbox"
+        aria-label={ariaLabel}
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
       >
@@ -187,7 +190,7 @@ export function Select<T extends string>({
             className="select-menu"
             id={menuId}
             role="listbox"
-            aria-label="Options"
+            aria-label={ariaLabel ?? "Options"}
             ref={menuRef}
             style={pos ? { top: pos.top, left: pos.left, minWidth: pos.width } : { top: -9999, left: -9999 }}
           >

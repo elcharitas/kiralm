@@ -23,7 +23,12 @@ pub fn routes() -> Router<SharedState> {
         .route("/v1/models", get(list_models))
 }
 
-pub(crate) fn openai_err(status: StatusCode, kind: &str, message: impl Into<String>, param: Option<&str>) -> Response {
+pub(crate) fn openai_err(
+    status: StatusCode,
+    kind: &str,
+    message: impl Into<String>,
+    param: Option<&str>,
+) -> Response {
     (
         status,
         Json(json!({"error": {
@@ -45,10 +50,15 @@ fn gateway_error_response(e: GatewayError) -> Response {
         GatewayError::CachedUnsupported(msg) => {
             openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", msg, None)
         }
-        GatewayError::InsufficientRam(msg) => {
-            openai_err(StatusCode::SERVICE_UNAVAILABLE, "invalid_request_error", msg, None)
+        GatewayError::InsufficientRam(msg) => openai_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invalid_request_error",
+            msg,
+            None,
+        ),
+        GatewayError::LoadFailed(msg) => {
+            openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None)
         }
-        GatewayError::LoadFailed(msg) => openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None),
         GatewayError::AuthRequired(msg) => {
             openai_err(StatusCode::UNAUTHORIZED, "authentication_error", msg, None)
         }
@@ -96,7 +106,10 @@ async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let Some(requested_model) = body.get("model").and_then(|v| v.as_str()).map(str::to_string)
+    let Some(requested_model) = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
     else {
         return openai_err(
             StatusCode::BAD_REQUEST,
@@ -120,7 +133,10 @@ async fn chat_completions(
         Err(e) => return gateway_error_response(e),
     };
 
-    let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Local: exactly today's behavior, proxy byte-for-byte to the
     // spawned llama-server child, client's own `model` field untouched.
@@ -130,10 +146,7 @@ async fn chat_completions(
     // same byte-passthrough/streaming logic otherwise.
     let (url, bearer, body, engine_lease) = match route {
         ModelRoute::Local(lease) => (
-            format!(
-                "http://127.0.0.1:{}/v1/chat/completions",
-                lease.port()
-            ),
+            format!("http://127.0.0.1:{}/v1/chat/completions", lease.port()),
             None,
             body,
             Some(lease),
@@ -150,10 +163,16 @@ async fn chat_completions(
                 .unwrap_or_else(|| canonical.clone());
             let mut body = body;
             if let Some(obj) = body.as_object_mut() {
-                obj.insert("model".to_string(), serde_json::Value::String(cloud_model_id));
+                obj.insert(
+                    "model".to_string(),
+                    serde_json::Value::String(cloud_model_id),
+                );
             }
             (
-                format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
+                format!(
+                    "{}/api/v1/chat/completions",
+                    app.config.cloud.api_base_url.trim_end_matches('/')
+                ),
                 Some(token),
                 body,
                 None,
@@ -273,7 +292,10 @@ async fn chat_completions(
             }
         };
         if let Some(obj) = json.as_object_mut() {
-            obj.insert("model".to_string(), serde_json::Value::String(requested_model));
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String(requested_model),
+            );
         }
         (status, Json(json)).into_response()
     }
@@ -304,10 +326,22 @@ async fn run_tool_loop(
 ) -> Response {
     let (sg, _tap) = app.start_generation(&session_id, &canonical);
 
-    let max_tokens = raw_body.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
-    let temperature = raw_body.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let top_p = raw_body.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let top_k = raw_body.get("top_k").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let max_tokens = raw_body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2048) as u32;
+    let temperature = raw_body
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let top_p = raw_body
+        .get("top_p")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let top_k = raw_body
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
     let mut messages: Vec<_> = raw_body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -327,8 +361,7 @@ async fn run_tool_loop(
     let active_preset = app.workspace_preset_for(&project_id);
     if let Some(preset) = &active_preset {
         if !preset.instruction_text.is_empty() {
-            let instructions: String =
-                preset.instruction_text.chars().take(16_000).collect();
+            let instructions: String = preset.instruction_text.chars().take(16_000).collect();
             messages.insert(
                 0,
                 ChatMessage::text(
@@ -344,12 +377,10 @@ async fn run_tool_loop(
         .rev()
         .find_map(|message| match (message.role.as_str(), &message.content) {
             ("user", Some(ChatContent::Text(text))) => Some(text.as_str()),
-            ("user", Some(ChatContent::Parts(parts))) => parts.iter().find_map(
-                |part| match part {
-                    ChatContentPart::Text { text } => Some(text.as_str()),
-                    ChatContentPart::ImageUrl { .. } => None,
-                },
-            ),
+            ("user", Some(ChatContent::Parts(parts))) => parts.iter().find_map(|part| match part {
+                ChatContentPart::Text { text } => Some(text.as_str()),
+                ChatContentPart::ImageUrl { .. } => None,
+            }),
             _ => None,
         })
         .unwrap_or_default();
@@ -381,7 +412,7 @@ async fn run_tool_loop(
     }
 
     let req = ChatCompletionRequest {
-        model: canonical,
+        model: canonical.clone(),
         messages,
         max_tokens,
         temperature,
@@ -401,30 +432,38 @@ async fn run_tool_loop(
 
     let app_task = app.clone();
     let session_task = session_id.clone();
+    let project_task = project_id.clone();
+    let sg_task = sg.clone();
+    app.events.publish(
+        crate::events::EventTopic::Agent,
+        "run_started",
+        Some(session_id.clone()),
+        json!({ "model": canonical }),
+    );
     let handle = tokio::spawn(async move {
         let _engine_lease = engine_lease;
         let http = reqwest::Client::new();
         agent::run(
+            &app_task,
+            &sg_task,
             &http,
             &url,
             bearer.as_deref(),
             req,
             &project_root,
+            &project_task,
             &session_task,
             permission,
-            &app_task.approvals,
             enable_thinking,
-            &app_task.mcp,
-            &app_task.config.dsh.bin,
         )
         .await
     });
     *sg.task.lock() = Some(handle.abort_handle());
     let outcome = match handle.await {
         Ok(outcome) => outcome,
-        Err(error) if error.is_cancelled() => {
-            Err(super::agent::AgentError::Other("generation stopped".to_string()))
-        }
+        Err(error) if error.is_cancelled() => Err(super::agent::AgentError::Other(
+            "generation stopped".to_string(),
+        )),
         Err(_) => Err(super::agent::AgentError::Other(
             "tool-calling task failed".to_string(),
         )),
@@ -441,10 +480,22 @@ async fn run_tool_loop(
                 .unwrap_or_default();
             (text, steps, None)
         }
-        Err(super::agent::AgentError::AuthRequired(msg)) => {
-            (String::new(), Vec::new(), Some(GatewayError::AuthRequired(msg)))
+        Err(super::agent::AgentError::AuthRequired(msg)) => (
+            String::new(),
+            Vec::new(),
+            Some(GatewayError::AuthRequired(msg)),
+        ),
+        Err(super::agent::AgentError::Stopped(steps)) => {
+            ("Stopped after the current step.".to_string(), steps, None)
         }
-        Err(super::agent::AgentError::Other(msg)) => (String::new(), Vec::new(), Some(GatewayError::LoadFailed(msg))),
+        Err(super::agent::AgentError::HookBlocked(msg, steps)) => {
+            (String::new(), steps, Some(GatewayError::LoadFailed(msg)))
+        }
+        Err(super::agent::AgentError::Other(msg)) => (
+            String::new(),
+            Vec::new(),
+            Some(GatewayError::LoadFailed(msg)),
+        ),
     };
 
     {
@@ -452,7 +503,9 @@ async fn run_tool_loop(
         st.running = false;
         st.text = text.clone();
         st.steps = steps.clone();
-        st.error = gateway_err.as_ref().map(|_| "tool-calling loop failed".to_string());
+        st.error = gateway_err
+            .as_ref()
+            .map(|_| "tool-calling loop failed".to_string());
     }
     *sg.tap.lock() = None;
 
@@ -606,7 +659,11 @@ fn append_delta(state: &parking_lot::RwLock<GenerationState>, line: &str) {
         return;
     }
     if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
-        if let Some(delta) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
+        if let Some(delta) = chunk
+            .choices
+            .first()
+            .and_then(|c| c.delta.content.as_deref())
+        {
             state.write().text.push_str(delta);
         }
     }
@@ -786,7 +843,10 @@ mod tests {
         let mut model = ModelState::from_manifest(&manifest, false);
         model.gguf_path = gguf_path;
         app.registry.insert(model);
-        app.state.write().aliases.insert(alias.to_string(), canonical_id.to_string());
+        app.state
+            .write()
+            .aliases
+            .insert(alias.to_string(), canonical_id.to_string());
     }
 
     fn mark_loaded(app: &SharedState, canonical_id: &str, port: u16) {
@@ -809,14 +869,22 @@ mod tests {
     }
 
     fn router(state: SharedState) -> Router {
-        Router::new().route("/v1/chat/completions", post(chat_completions)).with_state(state)
+        Router::new()
+            .route("/v1/chat/completions", post(chat_completions))
+            .with_state(state)
     }
 
     #[test]
     fn append_delta_accumulates_and_skips_control_lines() {
         let state = parking_lot::RwLock::new(GenerationState::default());
-        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}");
-        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}");
+        append_delta(
+            &state,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}",
+        );
+        append_delta(
+            &state,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}",
+        );
         append_delta(&state, "data: [DONE]");
         append_delta(&state, ""); // keep-alive blank line
         assert_eq!(state.read().text, "hi!");
@@ -833,9 +901,15 @@ mod tests {
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
                         data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n\
                         data: [DONE]\n\n";
-            (StatusCode::OK, [("content-type", "text/event-stream")], body).into_response()
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                body,
+            )
+                .into_response()
         }
-        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream));
+        let upstream =
+            Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -875,7 +949,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             snap = state.generation_snapshot("sess-1");
         }
-        assert!(!snap.running, "background task should finish even though the response was dropped");
+        assert!(
+            !snap.running,
+            "background task should finish even though the response was dropped"
+        );
         assert_eq!(snap.text, "hi!");
     }
 
@@ -899,7 +976,10 @@ mod tests {
             )
                 .into_response()
         }
-        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream_forever));
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(fake_stream_forever),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -934,7 +1014,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let snap = state.generation_snapshot("sess-2");
         assert!(!snap.running);
-        assert_eq!(snap.text.len(), accumulated_at_stop, "no more tokens should land after stop");
+        assert_eq!(
+            snap.text.len(),
+            accumulated_at_stop,
+            "no more tokens should land after stop"
+        );
     }
 
     // -------------------------------------------------------------
@@ -997,7 +1081,8 @@ mod tests {
     }
 
     fn register_test_project(app: &SharedState) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("kiralm-tool-loop-test-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kiralm-tool-loop-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let now = chrono::Utc::now();
         app.state.write().projects.insert(
@@ -1042,7 +1127,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "wrote the file");
         assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
@@ -1089,11 +1176,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
         assert_eq!(v["kiralm_tool_steps"][0]["ok"], false);
-        assert!(!root.join("out.txt").exists(), "read-only session must not write to disk");
+        assert!(
+            !root.join("out.txt").exists(),
+            "read-only session must not write to disk"
+        );
     }
 
     #[tokio::test]

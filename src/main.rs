@@ -2,10 +2,11 @@
 //! `serve` daemon.
 
 mod agent_plugin;
+mod api;
 mod approvals;
 mod attachments;
-mod api;
 mod chats;
+mod checkpoints;
 mod cli;
 mod cloud;
 mod config;
@@ -21,6 +22,7 @@ mod marketplace;
 mod mcp;
 pub mod platform;
 mod plugin_catalog;
+mod policies;
 mod pull;
 mod registry;
 mod residency;
@@ -29,6 +31,7 @@ mod skills;
 mod state;
 mod storage;
 mod telemetry;
+mod terminals;
 mod tools;
 mod tunnel;
 mod tunnel_auth;
@@ -110,7 +113,9 @@ enum TunnelCommand {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     let config = Config::load()?;
@@ -181,7 +186,8 @@ pub async fn start_tunnel_listener(app: &Arc<AppState>) -> Result<(), String> {
         .send(TunnelListenerCommand::Start(tx))
         .await
         .map_err(|_| "tunnel listener manager stopped".to_string())?;
-    rx.await.map_err(|_| "tunnel listener manager stopped".to_string())?
+    rx.await
+        .map_err(|_| "tunnel listener manager stopped".to_string())?
 }
 
 async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Result<()> {
@@ -191,9 +197,7 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     std::fs::create_dir_all(home.join("logs"))?;
     std::fs::write(home.join("kiralm.pid"), std::process::id().to_string())?;
     if let Ok(cache) = pull::artifact_cache() {
-        if let Err(error) =
-            cache.cleanup_stale_partials(std::time::Duration::from_secs(86_400))
-        {
+        if let Err(error) = cache.cleanup_stale_partials(std::time::Duration::from_secs(86_400)) {
             tracing::warn!("failed to clean stale cache partials: {error}");
         }
     }
@@ -216,7 +220,19 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     let attachments = Arc::new(attachments::AttachmentStore::from_home(&home)?);
     attachments.cleanup_stale_partials(std::time::Duration::from_secs(86_400))?;
     let eval_store = Arc::new(evals::EvalStore::new(home.join("evals")));
-    let app_state = Arc::new(AppState::new_with_all_stores(
+    let events = Arc::new(events::EventBus::open(
+        home.join("runtime/events.json"),
+        2_048,
+    )?);
+    let checkpoints = Arc::new(checkpoints::CheckpointStore::open(
+        home.join("checkpoints"),
+        events.clone(),
+    )?);
+    let policies = Arc::new(policies::PolicyStore::open(
+        home.join("policies.json"),
+        events.clone(),
+    )?);
+    let app_state = Arc::new(AppState::new_with_runtime_stores(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
@@ -228,22 +244,24 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         workspace_presets,
         attachments,
         eval_store,
+        events,
+        checkpoints,
+        policies,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
     }
     let bindings = app_state.state.read().workspace_preset_bindings.clone();
     for binding in bindings.values() {
-        let Some(preset) = app_state.workspace_presets.get(&binding.preset_id)
-        else {
+        let Some(preset) = app_state.workspace_presets.get(&binding.preset_id) else {
             continue;
         };
         if preset.revision != binding.preset_revision {
             continue;
         }
-        let Some(profile) = engine::optimization::OptimizationProfile::parse(
-            preset.optimization_profile.as_str(),
-        ) else {
+        let Some(profile) =
+            engine::optimization::OptimizationProfile::parse(preset.optimization_profile.as_str())
+        else {
             continue;
         };
         let mut models = preset.hot_model_ids;
@@ -364,11 +382,13 @@ async fn manage_tunnel_listener(
                 }
                 match tokio::net::TcpListener::bind(&addr).await {
                     Ok(listener) => {
-                        let tunnel_router = router
-                            .clone()
-                            .layer(axum::middleware::from_fn(tunnel_auth::require_tunnel_bearer));
+                        let tunnel_router = router.clone().layer(axum::middleware::from_fn(
+                            tunnel_auth::require_tunnel_bearer,
+                        ));
                         server = Some(tokio::spawn(async move {
-                            if let Err(e) = axum::serve(listener, tunnel_router.into_make_service()).await {
+                            if let Err(e) =
+                                axum::serve(listener, tunnel_router.into_make_service()).await
+                            {
                                 tracing::error!("tunnel listener stopped: {e}");
                             }
                         }));

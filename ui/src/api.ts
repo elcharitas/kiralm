@@ -86,6 +86,9 @@ export interface AppSettings {
   // Whether a long chat gets its older messages summarized
   // automatically instead of always resending full history.
   auto_compact: boolean;
+  runtime_dock_collapsed: boolean;
+  runtime_dock_height: number;
+  runtime_dock_tab: RuntimeDockTab;
 }
 
 export interface KnowledgeStatus {
@@ -504,6 +507,86 @@ export interface CatalogPlugin {
   enabled: boolean;
   sort_order: number;
   installed: boolean;
+}
+
+export type RuntimeDockTab = "terminal" | "timeline" | "safety";
+
+export interface TerminalInfo {
+  id: string;
+  project_id: string;
+  title: string;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+  running: boolean;
+  exit_code: number | null;
+  created_at: string;
+  detected_urls: string[];
+}
+
+export interface TerminalOutput {
+  sequence: number;
+  data: string;
+}
+
+export interface RuntimeEvent {
+  sequence: number;
+  emitted_at: string;
+  topic: "agent" | "engine" | "cache" | "approval" | "generation" | "knowledge" | "attachment" | "evaluation" | "terminal" | "preview" | "policy" | "checkpoint";
+  action: string;
+  resource_id: string | null;
+  data: Record<string, unknown>;
+}
+
+export interface CheckpointSummary {
+  id: string;
+  chat_id: string;
+  project_id: string;
+  operation: string;
+  created_at: string;
+  restored_at: string | null;
+  paths: string[];
+  entry_count: number;
+  size_bytes: number;
+}
+
+export type PolicyEffect = "allow" | "ask" | "deny";
+
+export interface PolicyRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  project_id: string | null;
+  effect: PolicyEffect;
+  tool_pattern: string;
+  target_pattern: string;
+}
+
+export interface PolicyHook {
+  id: string;
+  name: string;
+  enabled: boolean;
+  project_id: string | null;
+  phase: "pre_tool" | "post_tool" | "run_completed" | "checkpoint_restored" | "terminal_started";
+  tool_pattern: string;
+  kind: "command" | "http";
+  target: string;
+  blocking: boolean;
+  timeout_ms: number;
+}
+
+export interface PolicyDocument {
+  revision: number;
+  rules: PolicyRule[];
+  hooks: PolicyHook[];
+}
+
+export interface PreviewProbe {
+  reachable: boolean;
+  status: number | null;
+  latency_ms: number;
+  content_type: string | null;
 }
 
 // GET /api/models/catalog's per-row shape: kiralm-web's cloud catalog
@@ -1146,6 +1229,87 @@ export const api = {
     fetch(`/api/plugins/catalog/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) =>
       asJson<unknown>(r),
     ),
+
+  listTerminals: (projectId: string) =>
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/terminals`).then((r) =>
+      asJson<{ terminals: TerminalInfo[] }>(r),
+    ),
+
+  createTerminal: (projectId: string, title?: string) =>
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/terminals`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: title || null, cols: 100, rows: 30 }),
+    }).then((r) => asJson<TerminalInfo>(r)),
+
+  terminalInput: (id: string, data: string) =>
+    fetch(`/api/terminals/${encodeURIComponent(id)}/input`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ data }),
+    }).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+    }),
+
+  resizeTerminal: (id: string, cols: number, rows: number) =>
+    fetch(`/api/terminals/${encodeURIComponent(id)}/resize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cols, rows }),
+    }).then((r) => asJson<TerminalInfo>(r)),
+
+  closeTerminal: (id: string) =>
+    fetch(`/api/terminals/${encodeURIComponent(id)}`, { method: "DELETE" }).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+    }),
+
+  terminalStreamUrl: (id: string, after = 0) =>
+    `/api/terminals/${encodeURIComponent(id)}/stream?after=${after}`,
+
+  runtimeEvents: (chatId: string) =>
+    fetch(`/api/runtime/events?resource_id=${encodeURIComponent(chatId)}&limit=500`).then((r) =>
+      asJson<{ events: RuntimeEvent[] }>(r),
+    ),
+
+  runtimeEventsUrl: (chatId: string, after = 0) =>
+    `/api/runtime/events/stream?resource_id=${encodeURIComponent(chatId)}&after=${after}&limit=500`,
+
+  controlGeneration: (sessionId: string, action: string, text?: string) =>
+    fetch(`/api/sessions/${encodeURIComponent(sessionId)}/generation/control`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, text }),
+    }).then((r) => asJson<GenerationState>(r)),
+
+  listCheckpoints: (chatId: string) =>
+    fetch(`/api/checkpoints?chat_id=${encodeURIComponent(chatId)}`).then((r) =>
+      asJson<{ checkpoints: CheckpointSummary[] }>(r),
+    ),
+
+  restoreCheckpoint: (id: string, chatId: string, projectId: string, mode: "files" | "conversation" | "both") =>
+    fetch(`/api/checkpoints/${encodeURIComponent(id)}/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, project_id: projectId, mode }),
+    }).then((r) => asJson<{ result: { restored: CheckpointSummary; safety_checkpoint: CheckpointSummary; conversation: unknown | null }; hook_warning: string | null }>(r)),
+
+  policies: () => fetch("/api/policies").then((r) => asJson<PolicyDocument>(r)),
+
+  savePolicies: (document: PolicyDocument) =>
+    fetch("/api/policies", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: document.revision,
+        rules: document.rules,
+        hooks: document.hooks,
+      }),
+    }).then((r) => asJson<PolicyDocument>(r)),
+
+  previewProbe: (url: string) =>
+    fetch(`/api/previews/probe?url=${encodeURIComponent(url)}`).then((r) =>
+      asJson<PreviewProbe>(r),
+    ),
 };
 
 export interface GenerationState {
@@ -1154,6 +1318,10 @@ export interface GenerationState {
   running: boolean;
   error: string | null;
   steps: ToolStep[];
+  paused: boolean;
+  stop_after_step: boolean;
+  queued_followups: string[];
+  applied_followups: string[];
 }
 
 export interface ChatMessage {
@@ -1187,6 +1355,7 @@ export interface ToolStep {
       unix_mode?: number;
     }[];
   } | null;
+  checkpoint_id?: string | null;
 }
 
 // Streams an OpenAI-shaped SSE response, calling onToken per delta. The

@@ -274,8 +274,11 @@ export function ChatView({
       }
     } finally {
       const durationMs = performance.now() - start;
+      const snapshot = await api.generation(target.id).catch(() => null);
+      const followups = snapshot?.applied_followups ?? [];
       onUpdateMessages(target.id, [
         ...startMessages,
+        ...followups.map((content): StoredMessage => ({ role: "user", content })),
         { role: "assistant", content: assistantText, durationMs, steps: liveStepsRef.current },
       ]);
       setLiveText("");
@@ -455,6 +458,7 @@ export function ChatView({
       if (snap.text) {
         onUpdateMessages(sessionId, [
           ...session.messages,
+          ...snap.applied_followups.map((content): StoredMessage => ({ role: "user", content })),
           { role: "assistant", content: snap.text, steps: snap.steps },
         ]);
       } else if (snap.error) {

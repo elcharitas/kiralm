@@ -5,8 +5,8 @@ pub mod agent;
 pub mod agent_plugin;
 pub mod anthropic;
 pub mod attachments;
-pub mod dsh;
 pub mod diagnostics;
+pub mod dsh;
 pub mod evals;
 pub mod internal;
 pub mod knowledge;
@@ -14,6 +14,9 @@ pub mod marketplace;
 pub mod mcp;
 pub mod openai;
 pub mod plugin_catalog;
+pub mod previews;
+pub mod runtime;
+pub mod terminals;
 pub mod tunnel;
 pub mod workspace_presets;
 
@@ -28,15 +31,11 @@ use tokio::sync::broadcast;
 use crate::chats::Chats;
 use crate::cloud::LoginProgressTx;
 use crate::config::Config;
-use crate::engine::supervisor::{
-    EngineSupervisor, SupervisorError, SupervisorOptions,
-};
 use crate::engine::optimization::OptimizationProfile;
+use crate::engine::supervisor::{EngineSupervisor, SupervisorError, SupervisorOptions};
 use crate::engine::{self, EngineCapabilities};
 use crate::events::{EventBus, EventTopic};
-use crate::knowledge::{
-    DeterministicEmbedder, IndexCancellation, IndexLimits, KnowledgeIndex,
-};
+use crate::knowledge::{DeterministicEmbedder, IndexCancellation, IndexLimits, KnowledgeIndex};
 use crate::pull::{ProgressTx, PullProgress};
 use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource};
 use crate::residency;
@@ -87,6 +86,7 @@ pub struct SessionGeneration {
     /// connection -- aborting it is what tells llama-server to stop
     /// generating, same as dropping the connection always did before.
     pub task: parking_lot::Mutex<Option<tokio::task::AbortHandle>>,
+    pub control_notify: tokio::sync::Notify,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -99,6 +99,37 @@ pub struct GenerationState {
     /// what the UI's "Worked for Xm Ys" collapsible actually expands to.
     #[serde(default)]
     pub steps: Vec<crate::tools::ToolStep>,
+    pub paused: bool,
+    pub stop_after_step: bool,
+    pub queued_followups: Vec<String>,
+    pub applied_followups: Vec<String>,
+}
+
+pub struct GenerationControlPoint {
+    pub followups: Vec<String>,
+    pub stop_after_step: bool,
+    pub running: bool,
+}
+
+impl SessionGeneration {
+    pub async fn control_point(&self) -> GenerationControlPoint {
+        loop {
+            let notified = self.control_notify.notified();
+            {
+                let mut state = self.state.write();
+                if !state.paused || !state.running {
+                    let followups = std::mem::take(&mut state.queued_followups);
+                    state.applied_followups.extend(followups.iter().cloned());
+                    return GenerationControlPoint {
+                        followups,
+                        stop_after_step: state.stop_after_step,
+                        running: state.running,
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
 }
 
 pub struct AppState {
@@ -144,9 +175,11 @@ pub struct AppState {
     pub attachments: Arc<crate::attachments::AttachmentStore>,
     pub eval_store: Arc<crate::evals::EvalStore>,
     pub eval_jobs: RwLock<HashMap<String, crate::evals::EvalCancellation>>,
-    pub git_workflows:
-        RwLock<HashMap<String, Arc<crate::git_workflows::GitWorkflowService>>>,
+    pub git_workflows: RwLock<HashMap<String, Arc<crate::git_workflows::GitWorkflowService>>>,
     pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
+    pub terminals: Arc<crate::terminals::TerminalManager>,
+    pub checkpoints: Arc<crate::checkpoints::CheckpointStore>,
+    pub policies: Arc<crate::policies::PolicyStore>,
 }
 
 impl AppState {
@@ -255,10 +288,8 @@ impl AppState {
         knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
         workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
     ) -> AppState {
-        let attachment_path = std::env::temp_dir().join(format!(
-            "kiralm-attachments-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let attachment_path =
+            std::env::temp_dir().join(format!("kiralm-attachments-test-{}", uuid::Uuid::new_v4()));
         let attachments = Arc::new(
             crate::attachments::AttachmentStore::open(
                 attachment_path,
@@ -325,6 +356,54 @@ impl AppState {
         eval_store: Arc<crate::evals::EvalStore>,
     ) -> AppState {
         let events = Arc::new(EventBus::default());
+        let runtime_root =
+            std::env::temp_dir().join(format!("kiralm-runtime-test-{}", uuid::Uuid::new_v4()));
+        let checkpoints = Arc::new(
+            crate::checkpoints::CheckpointStore::open(
+                runtime_root.join("checkpoints"),
+                events.clone(),
+            )
+            .expect("temporary checkpoint store must open"),
+        );
+        let policies = Arc::new(
+            crate::policies::PolicyStore::open(runtime_root.join("policies.json"), events.clone())
+                .expect("temporary policy store must open"),
+        );
+        Self::new_with_runtime_stores(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+            attachments,
+            eval_store,
+            events,
+            checkpoints,
+            policies,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_runtime_stores(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+        eval_store: Arc<crate::evals::EvalStore>,
+        events: Arc<EventBus>,
+        checkpoints: Arc<crate::checkpoints::CheckpointStore>,
+        policies: Arc<crate::policies::PolicyStore>,
+    ) -> AppState {
         let telemetry = Arc::new(crate::telemetry::TelemetryRegistry::default());
         for component in [
             crate::telemetry::HealthComponent::Daemon,
@@ -348,6 +427,7 @@ impl AppState {
             });
         }
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
+        let terminals = Arc::new(crate::terminals::TerminalManager::new(events.clone()));
         let supervisor = EngineSupervisor::production(
             registry.clone(),
             events.clone(),
@@ -356,10 +436,8 @@ impl AppState {
             SupervisorOptions {
                 configured_headroom_gb: config.ram_headroom_gb,
                 engine_capabilities: engine_capabilities.clone(),
-                optimization_profile: OptimizationProfile::parse(
-                    &config.optimization_profile,
-                )
-                .unwrap_or(OptimizationProfile::Balanced),
+                optimization_profile: OptimizationProfile::parse(&config.optimization_profile)
+                    .unwrap_or(OptimizationProfile::Balanced),
                 ..SupervisorOptions::default()
             },
         );
@@ -387,6 +465,9 @@ impl AppState {
             eval_jobs: RwLock::new(HashMap::new()),
             git_workflows: RwLock::new(HashMap::new()),
             telemetry,
+            terminals,
+            checkpoints,
+            policies,
         }
     }
 
@@ -424,9 +505,14 @@ impl AppState {
                 running: true,
                 error: None,
                 steps: Vec::new(),
+                paused: false,
+                stop_after_step: false,
+                queued_followups: Vec::new(),
+                applied_followups: Vec::new(),
             }),
             tap: parking_lot::Mutex::new(Some(tx)),
             task: parking_lot::Mutex::new(None),
+            control_notify: tokio::sync::Notify::new(),
         });
         self.generations
             .write()
@@ -450,7 +536,53 @@ impl AppState {
         let mut st = sg.state.write();
         let was_running = st.running;
         st.running = false;
+        st.paused = false;
+        sg.control_notify.notify_waiters();
         was_running
+    }
+
+    pub fn update_generation_control(
+        &self,
+        session_id: &str,
+        action: &str,
+        text: Option<&str>,
+    ) -> Result<GenerationState, String> {
+        let generation = self
+            .generations
+            .read()
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "generation not found".to_string())?;
+        let mut state = generation.state.write();
+        if !state.running {
+            return Err("generation is not running".to_string());
+        }
+        match action {
+            "queue" => {
+                let message = text.unwrap_or_default().trim();
+                if message.is_empty() {
+                    return Err("follow-up message cannot be empty".to_string());
+                }
+                if message.len() > 16_000 || state.queued_followups.len() >= 16 {
+                    return Err("generation follow-up queue is full".to_string());
+                }
+                state.queued_followups.push(message.to_string());
+            }
+            "pause" => state.paused = true,
+            "resume" => state.paused = false,
+            "stop_after_step" => state.stop_after_step = true,
+            _ => return Err(format!("unknown generation action '{action}'")),
+        }
+        let snapshot = state.clone();
+        drop(state);
+        generation.control_notify.notify_waiters();
+        self.events.publish(
+            EventTopic::Agent,
+            action,
+            Some(session_id.to_string()),
+            serde_json::json!({ "queued": snapshot.queued_followups.len() }),
+        );
+        Ok(snapshot)
     }
 
     /// Buffered-so-far text + running flag for a session, for a client
@@ -558,6 +690,9 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(agent_plugin::routes())
         .merge(dsh::routes())
         .merge(plugin_catalog::routes())
+        .merge(previews::routes())
+        .merge(terminals::routes())
+        .merge(runtime::routes())
         .fallback(internal::static_handler)
         .layer(axum::middleware::from_fn_with_state(
             telemetry_state,
@@ -615,9 +750,7 @@ pub fn resolve_model(app: &SharedState, name: &str) -> Option<String> {
     app.registry.resolve(name, &aliases)
 }
 
-pub fn prune_artifact_cache(
-    app: &SharedState,
-) -> anyhow::Result<crate::pull::cache::PruneReport> {
+pub fn prune_artifact_cache(app: &SharedState) -> anyhow::Result<crate::pull::cache::PruneReport> {
     let cache = crate::pull::artifact_cache()?;
     let mut protections = crate::pull::cache::PruneProtections {
         downloading: cache.active_artifact_hashes()?,
@@ -637,8 +770,7 @@ pub fn prune_artifact_cache(
             protections.active.insert(manifest.sha256);
         }
     }
-    let quota =
-        (app.config.cache_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+    let quota = (app.config.cache_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64;
     let report = cache.prune_to_quota(quota, &protections)?;
     app.events.publish(
         EventTopic::Cache,
@@ -669,7 +801,10 @@ pub enum GatewayError {
 }
 
 /// Returns a cloud route or a lease on a supervised local engine.
-pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<ModelRoute, GatewayError> {
+pub async fn ensure_loaded(
+    app: &SharedState,
+    canonical_id: &str,
+) -> Result<ModelRoute, GatewayError> {
     let Some(existing) = app.registry.get_clone(canonical_id) else {
         return Err(GatewayError::LoadFailed(format!(
             "model '{canonical_id}' not in registry"
@@ -710,5 +845,44 @@ fn map_supervisor_error(error: SupervisorError) -> GatewayError {
             "need {shortfall_bytes} more bytes free to load '{canonical_id}'"
         )),
         other => GatewayError::LoadFailed(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    fn generation(paused: bool) -> Arc<SessionGeneration> {
+        Arc::new(SessionGeneration {
+            state: RwLock::new(GenerationState {
+                running: true,
+                paused,
+                queued_followups: vec!["check the tests".to_string()],
+                ..GenerationState::default()
+            }),
+            tap: parking_lot::Mutex::new(None),
+            task: parking_lot::Mutex::new(None),
+            control_notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn control_point_applies_guidance_and_waits_while_paused() {
+        let active = generation(false);
+        let control = active.control_point().await;
+        assert_eq!(control.followups, vec!["check the tests"]);
+        assert_eq!(active.state.read().applied_followups, control.followups);
+
+        let paused = generation(true);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            paused.control_point(),
+        )
+        .await
+        .is_err());
+        paused.state.write().paused = false;
+        paused.control_notify.notify_waiters();
+        let control = paused.control_point().await;
+        assert_eq!(control.followups, vec!["check the tests"]);
     }
 }

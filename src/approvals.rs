@@ -160,7 +160,7 @@ impl ApprovalManager {
         self.events.publish(
             EventTopic::Approval,
             "requested",
-            Some(id.clone()),
+            Some(chat_id.to_string()),
             serde_json::to_value(&record).unwrap_or_else(|_| json!({})),
         );
 
@@ -258,8 +258,9 @@ impl ApprovalManager {
         self.events.publish(
             EventTopic::Approval,
             "decided",
-            Some(entry.record.id),
+            Some(entry.record.chat_id.clone()),
             json!({
+                "approval_id": entry.record.id,
                 "chat_id": audit.chat_id,
                 "tool_name": audit.tool_name,
                 "decision": audit.decision,
@@ -292,7 +293,7 @@ pub async fn authorize(
     ApprovalOutcome::Allowed
 }
 
-fn approval_target(name: &str, args: &serde_json::Value) -> String {
+pub(crate) fn approval_target(name: &str, args: &serde_json::Value) -> String {
     let string_arg = |key: &str| args.get(key).and_then(|value| value.as_str());
     match name {
         "read_file" | "list_directory" | "search_files" | "glob" | "write_file" | "edit_file"

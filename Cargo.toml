@@ -38,6 +38,8 @@ libc = "0.2"
 rust-embed = { version = "8", features = ["mime-guess"] }
 serde_yaml = "0.9.34"
 rmcp = { version = "3.1.4", features = ["client", "transport-child-process"] }
+base64 = "0.22"
+portable-pty = "0.9"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

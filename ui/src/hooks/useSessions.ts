@@ -25,15 +25,16 @@ export function useSessions() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const { settings } = useSettings();
 
-  useEffect(() => {
-    api
+  const refreshSessions = async () => {
+    const { chats } = await api
       .listChats()
-      .then(({ chats }) => {
-        const loaded = chats.map(fromDto);
-        setSessions(loaded);
-        setActiveId((cur) => cur ?? loaded[0]?.id ?? null);
-      })
-      .catch(() => {});
+    const loaded = chats.map(fromDto);
+    setSessions(loaded);
+    setActiveId((cur) => cur && loaded.some((chat) => chat.id === cur) ? cur : loaded[0]?.id ?? null);
+  };
+
+  useEffect(() => {
+    refreshSessions().catch(() => {});
   }, []);
 
   const createSession = async (projectId: string) => {
@@ -101,5 +102,6 @@ export function useSessions() {
     renameSession,
     deleteSession,
     deleteSessionsByProject,
+    refreshSessions,
   };
 }
