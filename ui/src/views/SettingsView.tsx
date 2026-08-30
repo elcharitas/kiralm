@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   api,
   type AppSettings,
+  type DiagnosticsResponse,
   type PermissionMode,
   type Project,
   type StatusResponse,
@@ -14,6 +15,7 @@ import { EvaluationsView } from "./EvaluationsView";
 import { useDialogs } from "../components/Dialogs";
 import { Select } from "../components/Select";
 import { useSettings } from "../settings";
+import { formatBytes } from "../format";
 
 export type SettingsTab = "general" | "models" | "evaluations";
 
@@ -113,10 +115,106 @@ export function SettingsView({
       <div className="settings-scroll">
         <GeneralSettingsForm status={status} />
         <WorkspacePresetsSection status={status} />
+        <DiagnosticsSection />
         <RemoteAccessSection />
         <DataSection />
       </div>
     </div>
+  );
+}
+
+function DiagnosticsSection() {
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setDiagnostics(await api.diagnostics());
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const report = diagnostics?.platform;
+  const health = diagnostics?.telemetry.health;
+
+  return (
+    <section className="settings-section">
+      <div className="diagnostics-heading">
+        <div>
+          <h3>Diagnostics and observability</h3>
+          <p className="settings-hint">
+            Local readiness checks, bounded metrics, and redacted recent errors.
+          </p>
+        </div>
+        <button type="button" className="btn" disabled={loading} onClick={() => void load()}>
+          {loading ? "Checking..." : "Run checks"}
+        </button>
+      </div>
+      {error && <p className="diagnostics-error">{error}</p>}
+      {report && health && (
+        <>
+          <div className="diagnostics-summary">
+            <span>
+              <strong>{health.status}</strong>
+              {health.ready ? " · ready" : " · not ready"}
+            </span>
+            <span>
+              {report.hardware.platform} · {report.hardware.architecture}
+            </span>
+            <span>{report.hardware.logical_cpus} logical CPUs</span>
+            <span>{formatBytes(report.hardware.available_memory_bytes)} RAM available</span>
+          </div>
+          <div className="diagnostics-grid">
+            <div>
+              <h4>Managed paths</h4>
+              {report.paths.map((path) => (
+                <div className="diagnostics-row" key={path.kind}>
+                  <span>{path.kind}</span>
+                  <span className="mono truncate" title={path.path}>{path.path}</span>
+                  <span className={path.writable ? "diagnostics-ok" : "diagnostics-bad"}>
+                    {path.writable ? formatBytes(path.available_bytes) : "not writable"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <h4>Executables</h4>
+              {report.executables.map((executable) => (
+                <div className="diagnostics-row" key={executable.name}>
+                  <span className="mono truncate" title={executable.name}>{executable.name}</span>
+                  <span className={executable.found ? "diagnostics-ok" : "diagnostics-bad"}>
+                    {executable.found ? "found" : executable.required ? "required" : "optional"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {report.findings.length > 0 && (
+            <div className="diagnostics-findings">
+              {report.findings.map((finding, index) => (
+                <div className={`diagnostics-finding diagnostics-${finding.severity}`} key={`${finding.code}:${index}`}>
+                  <strong>{finding.summary}</strong>
+                  <span>{finding.action}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="settings-hint diagnostics-stats">
+            {diagnostics.telemetry.stats.series} metric series · {diagnostics.telemetry.stats.total_errors} recent errors · {diagnostics.telemetry.stats.dropped_series} dropped series
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 

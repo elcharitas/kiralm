@@ -3,14 +3,43 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// `~/.kiralm`. Everything kiralm owns lives under here.
+/// Resolves the compatible or platform-native KiraLM data directory.
 pub fn kiralm_home() -> PathBuf {
     if let Some(path) = std::env::var_os("KIRALM_HOME") {
         return PathBuf::from(path);
     }
-    dirs::home_dir()
-        .expect("no home directory found")
-        .join(".kiralm")
+    let legacy = dirs::home_dir().map(|home| home.join(".kiralm"));
+    #[cfg(test)]
+    if let Some(legacy) = legacy.clone() {
+        return legacy;
+    }
+    if let Some(existing) = legacy.as_ref().filter(|path| path.exists()) {
+        return existing.clone();
+    }
+    crate::platform::resolve_app_paths()
+        .map(|paths| paths.data.path)
+        .unwrap_or_else(|_| legacy.unwrap_or_else(|| std::env::temp_dir().join("kiralm/data")))
+}
+
+pub fn kiralm_cache_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("KIRALM_HOME") {
+        return PathBuf::from(path).join("cache");
+    }
+    let legacy = dirs::home_dir().map(|home| home.join(".kiralm"));
+    #[cfg(test)]
+    if let Some(legacy) = legacy.clone() {
+        return legacy.join("cache");
+    }
+    if let Some(existing) = legacy.as_ref().filter(|path| path.exists()) {
+        return existing.join("cache");
+    }
+    crate::platform::resolve_app_paths()
+        .map(|paths| paths.cache.path)
+        .unwrap_or_else(|_| {
+            legacy
+                .map(|path| path.join("cache"))
+                .unwrap_or_else(|| std::env::temp_dir().join("kiralm/cache"))
+        })
 }
 
 pub fn default_config_path() -> PathBuf {

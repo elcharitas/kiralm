@@ -88,7 +88,20 @@ impl fmt::Display for PlatformError {
 impl std::error::Error for PlatformError {}
 
 pub fn resolve_app_paths() -> Result<AppPaths, PlatformError> {
-    resolve_app_paths_with(PlatformKind::current(), |key| std::env::var_os(key))
+    let legacy = std::env::var_os("KIRALM_HOME").or_else(|| {
+        let path = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)?
+            .join(".kiralm");
+        path.exists().then(|| path.into_os_string())
+    });
+    resolve_app_paths_with(PlatformKind::current(), |key| {
+        if key == "KIRALM_HOME" {
+            legacy.clone()
+        } else {
+            std::env::var_os(key)
+        }
+    })
 }
 
 fn resolve_app_paths_with<F>(platform: PlatformKind, get: F) -> Result<AppPaths, PlatformError>

@@ -130,7 +130,7 @@ impl Resolved {
 }
 
 pub fn artifact_cache() -> anyhow::Result<cache::ArtifactCache> {
-    cache::ArtifactCache::from_home(crate::config::kiralm_home())
+    cache::ArtifactCache::new(crate::config::kiralm_cache_dir().join("models/sha256"))
 }
 
 /// Resolves `<ref>` against the HF repo's file listing. Fast (one HF

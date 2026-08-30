@@ -121,6 +121,7 @@ pub struct PartialArtifact {
 }
 
 impl ArtifactCache {
+    #[cfg(test)]
     pub fn from_home(home: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::new(home.as_ref().join("cache/models/sha256"))
     }

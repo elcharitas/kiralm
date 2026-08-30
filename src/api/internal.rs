@@ -876,6 +876,7 @@ async fn resolve_approval(
 
 /// Looks up a registered project's real directory by id, 404ing if it
 /// isn't registered rather than falling back to any default path.
+#[allow(clippy::result_large_err)]
 fn project_path(app: &SharedState, id: &str) -> Result<std::path::PathBuf, Response> {
     let state = app.state.read();
     match state.projects.get(id) {

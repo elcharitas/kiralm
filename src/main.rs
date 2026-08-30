@@ -37,8 +37,11 @@ mod workspace_presets;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+#[cfg(unix)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
+#[cfg(unix)]
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+#[cfg(unix)]
 use hyper_util::service::TowerToHyperService;
 
 use crate::api::AppState;
@@ -86,6 +89,8 @@ enum Command {
     Logout,
     /// Shows this machine's registered device identity.
     Device,
+    /// Checks platform, storage, listener, and executable readiness.
+    Doctor,
     /// Enable/disable/check the Cloudflare Tunnel remote connection.
     Tunnel {
         #[command(subcommand)]
@@ -135,6 +140,19 @@ async fn main() -> anyhow::Result<()> {
         Command::Login => cloud::login(&config).await,
         Command::Logout => cloud::logout(),
         Command::Device => cloud::device_info(),
+        Command::Doctor => {
+            let options = api::diagnostics::preflight_options(&config);
+            let report = platform::run_preflight(&options);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report
+                .findings
+                .iter()
+                .any(|finding| finding.severity == platform::Severity::Error)
+            {
+                anyhow::bail!("platform preflight found blocking issues");
+            }
+            Ok(())
+        }
         Command::Tunnel { cmd } => match cmd {
             TunnelCommand::Enable => cli::tunnel_enable(&config).await,
             TunnelCommand::Disable => cli::tunnel_disable(&config).await,
@@ -250,16 +268,26 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     let app_state_for_shutdown = app_state.clone();
     let router = api::build_router(app_state);
 
-    if config.unix_socket.exists() {
-        std::fs::remove_file(&config.unix_socket)?;
-    }
-    if let Some(parent) = config.unix_socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
+    #[cfg(unix)]
+    let local_task = {
+        if config.unix_socket.exists() {
+            std::fs::remove_file(&config.unix_socket)?;
+        }
+        if let Some(parent) = config.unix_socket.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
+        tracing::info!("kiralm serving on {} (unix)", config.unix_socket.display());
+        Some(tokio::spawn(serve_unix(listener, router.clone())))
+    };
+    #[cfg(not(unix))]
+    let local_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    tracing::info!("kiralm serving on {} (unix)", config.unix_socket.display());
-
+    let http_listen = if cfg!(unix) {
+        http_listen
+    } else {
+        Some(http_listen.unwrap_or_else(|| config.http_listen.clone()))
+    };
     let http_task = if let Some(addr) = http_listen {
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!("browser target available at http://{addr}");
@@ -278,8 +306,6 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         config.tunnel.listen.clone(),
         router.clone(),
     ));
-
-    let unix_task = tokio::spawn(serve_unix(unix_listener, router));
 
     // Re-spawn `cloudflared` if it was left enabled across a restart,
     // after listeners are already bound, same ordering
@@ -304,10 +330,19 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         });
     }
 
-    if let Some(http_task) = http_task {
-        let _ = tokio::join!(http_task, unix_task, tunnel_task);
-    } else {
-        let _ = tokio::join!(unix_task, tunnel_task);
+    match (http_task, local_task) {
+        (Some(http_task), Some(local_task)) => {
+            let _ = tokio::join!(http_task, local_task, tunnel_task);
+        }
+        (Some(http_task), None) => {
+            let _ = tokio::join!(http_task, tunnel_task);
+        }
+        (None, Some(local_task)) => {
+            let _ = tokio::join!(local_task, tunnel_task);
+        }
+        (None, None) => {
+            let _ = tunnel_task.await;
+        }
     }
     engine_watcher.stop().await;
     app_state_for_shutdown.supervisor.shutdown_all().await;
@@ -356,6 +391,7 @@ async fn manage_tunnel_listener(
 /// Both listeners route to the same handlers. axum 0.7's
 /// `serve()` only accepts `TcpListener`, so the Unix socket gets its own
 /// small accept loop mirroring axum's own TCP implementation.
+#[cfg(unix)]
 async fn serve_unix(listener: tokio::net::UnixListener, router: axum::Router) {
     loop {
         let (stream, _addr) = match listener.accept().await {

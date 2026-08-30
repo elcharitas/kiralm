@@ -1,18 +1,51 @@
 //! Subcommand handlers. Every subcommand other than `serve` is a
-//! thin HTTP client over `~/.kiralm/kiralm.sock`, auto-spawning the
-//! daemon if the socket isn't live.
+//! thin HTTP client over the local socket or loopback TCP endpoint,
+//! auto-spawning the daemon when it is not live.
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request, StatusCode};
 use hyper_util::client::legacy::Client;
+#[cfg(not(unix))]
+use hyper_util::client::legacy::connect::HttpConnector;
+#[cfg(not(unix))]
+use hyper_util::rt::TokioExecutor;
+#[cfg(unix)]
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 use std::io::Write;
 use std::time::Duration;
 
 use crate::config::{kiralm_home, Config};
 
+#[cfg(unix)]
 type UnixClient = Client<UnixConnector, Full<Bytes>>;
+
+async fn send_request(
+    request: Request<Full<Bytes>>,
+) -> anyhow::Result<hyper::Response<hyper::body::Incoming>> {
+    #[cfg(unix)]
+    {
+        let client: UnixClient = Client::unix();
+        Ok(client.request(request).await?)
+    }
+    #[cfg(not(unix))]
+    {
+        let client: Client<HttpConnector, Full<Bytes>> =
+            Client::builder(TokioExecutor::new()).build_http();
+        Ok(client.request(request).await?)
+    }
+}
+
+fn request_uri(config: &Config, path: &str) -> anyhow::Result<hyper::Uri> {
+    #[cfg(unix)]
+    {
+        Ok(Uri::new(&config.unix_socket, path).into())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(format!("http://{}{}", config.http_listen, path).parse()?)
+    }
+}
 
 /// Connects (spawning the daemon first if needed), then issues one
 /// request and returns `(status, parsed JSON body)`.
@@ -23,8 +56,7 @@ async fn request(
     body: Option<serde_json::Value>,
 ) -> anyhow::Result<(StatusCode, serde_json::Value)> {
     ensure_daemon_running(config).await?;
-    let client: UnixClient = Client::unix();
-    let uri: hyper::Uri = Uri::new(&config.unix_socket, path).into();
+    let uri = request_uri(config, path)?;
 
     let payload = match &body {
         Some(v) => serde_json::to_vec(v)?,
@@ -36,7 +68,7 @@ async fn request(
     }
     let req = builder.body(Full::new(Bytes::from(payload)))?;
 
-    let resp = client.request(req).await?;
+    let resp = send_request(req).await?;
     let status = resp.status();
     let bytes = resp.into_body().collect().await?.to_bytes();
     let value: serde_json::Value = if bytes.is_empty() {
@@ -57,8 +89,7 @@ async fn stream_sse(
     mut on_data: impl FnMut(&str) -> bool, // return false to stop early
 ) -> anyhow::Result<()> {
     ensure_daemon_running(config).await?;
-    let client: UnixClient = Client::unix();
-    let uri: hyper::Uri = Uri::new(&config.unix_socket, path).into();
+    let uri = request_uri(config, path)?;
 
     let payload = match &body {
         Some(v) => serde_json::to_vec(v)?,
@@ -70,7 +101,7 @@ async fn stream_sse(
     }
     let req = builder.body(Full::new(Bytes::from(payload)))?;
 
-    let mut resp = client.request(req).await?;
+    let mut resp = send_request(req).await?;
     if !resp.status().is_success() {
         let bytes = resp.into_body().collect().await?.to_bytes();
         anyhow::bail!("request failed: {}", String::from_utf8_lossy(&bytes));
@@ -99,9 +130,9 @@ async fn stream_sse(
 
 /// Spawns `kiralm serve` detached (setsid, own session, so it survives
 /// the CLI exiting), redirected to `~/.kiralm/kiralm.log`, then polls
-/// the socket for readiness.
+/// the local endpoint for readiness.
 async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
-    if tokio::net::UnixStream::connect(&config.unix_socket).await.is_ok() {
+    if daemon_ready(config).await {
         return Ok(());
     }
 
@@ -136,7 +167,7 @@ async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
     cmd.spawn()?;
 
     for _ in 0..50 {
-        if tokio::net::UnixStream::connect(&config.unix_socket).await.is_ok() {
+        if daemon_ready(config).await {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -145,6 +176,21 @@ async fn ensure_daemon_running(config: &Config) -> anyhow::Result<()> {
         "kiralm serve did not come up in time; check log at {}",
         log_path.display()
     )
+}
+
+async fn daemon_ready(config: &Config) -> bool {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(&config.unix_socket)
+            .await
+            .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::net::TcpStream::connect(&config.http_listen)
+            .await
+            .is_ok()
+    }
 }
 
 /// Percent-encodes a single path segment. Canonical ids contain `/` and

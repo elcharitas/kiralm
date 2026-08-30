@@ -6,6 +6,7 @@ pub mod agent_plugin;
 pub mod anthropic;
 pub mod attachments;
 pub mod dsh;
+pub mod diagnostics;
 pub mod evals;
 pub mod internal;
 pub mod knowledge;
@@ -145,6 +146,7 @@ pub struct AppState {
     pub eval_jobs: RwLock<HashMap<String, crate::evals::EvalCancellation>>,
     pub git_workflows:
         RwLock<HashMap<String, Arc<crate::git_workflows::GitWorkflowService>>>,
+    pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
 }
 
 impl AppState {
@@ -323,6 +325,28 @@ impl AppState {
         eval_store: Arc<crate::evals::EvalStore>,
     ) -> AppState {
         let events = Arc::new(EventBus::default());
+        let telemetry = Arc::new(crate::telemetry::TelemetryRegistry::default());
+        for component in [
+            crate::telemetry::HealthComponent::Daemon,
+            crate::telemetry::HealthComponent::Engine,
+            crate::telemetry::HealthComponent::Cache,
+            crate::telemetry::HealthComponent::Storage,
+            crate::telemetry::HealthComponent::Knowledge,
+            crate::telemetry::HealthComponent::Evaluation,
+            crate::telemetry::HealthComponent::Attachments,
+        ] {
+            telemetry.set_health(crate::telemetry::HealthInput {
+                component,
+                status: crate::telemetry::HealthStatus::Healthy,
+                ready: true,
+                required: matches!(
+                    component,
+                    crate::telemetry::HealthComponent::Daemon
+                        | crate::telemetry::HealthComponent::Storage
+                ),
+                detail: None,
+            });
+        }
         let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
         let supervisor = EngineSupervisor::production(
             registry.clone(),
@@ -362,6 +386,7 @@ impl AppState {
             eval_store,
             eval_jobs: RwLock::new(HashMap::new()),
             git_workflows: RwLock::new(HashMap::new()),
+            telemetry,
         }
     }
 
@@ -517,10 +542,12 @@ pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
 /// Assembles the full route table: OpenAI-compatible, Anthropic-compatible,
 /// and internal `/api/*` routes.
 pub fn build_router(state: SharedState) -> Router {
+    let telemetry_state = state.clone();
     Router::new()
         .merge(openai::routes())
         .merge(anthropic::routes())
         .merge(attachments::routes())
+        .merge(diagnostics::routes())
         .merge(evals::routes())
         .merge(internal::routes())
         .merge(knowledge::routes())
@@ -532,7 +559,53 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(dsh::routes())
         .merge(plugin_catalog::routes())
         .fallback(internal::static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            telemetry_state,
+            observe_request,
+        ))
         .with_state(state)
+}
+
+async fn observe_request(
+    axum::extract::State(app): axum::extract::State<SharedState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let started = std::time::Instant::now();
+    let operation = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| format!("{} {}", request.method(), path.as_str()))
+        .unwrap_or_else(|| format!("{} fallback", request.method()));
+    let correlation_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| crate::telemetry::CorrelationId::parse(value).ok())
+        .unwrap_or_else(|| app.telemetry.next_correlation_id());
+    let mut response = next.run(request).await;
+    let status = response.status();
+    let operation_status = if status.is_success() || status.is_redirection() {
+        crate::telemetry::OperationStatus::Success
+    } else if status.is_client_error() {
+        crate::telemetry::OperationStatus::Rejected
+    } else {
+        crate::telemetry::OperationStatus::Error
+    };
+    let error = (!status.is_success()).then(|| format!("HTTP {}", status.as_u16()));
+    if let Err(record_error) = app.telemetry.record_request(
+        &operation,
+        operation_status,
+        Some(started.elapsed()),
+        Some(&correlation_id),
+        error.as_deref(),
+    ) {
+        tracing::warn!("failed to record request telemetry: {record_error}");
+    }
+    if let Ok(value) = axum::http::HeaderValue::from_str(correlation_id.as_str()) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }
 
 /// Resolves a name (alias or canonical) via the registry + state.json's

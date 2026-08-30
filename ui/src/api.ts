@@ -196,6 +196,74 @@ export interface EvalRun {
   };
 }
 
+export interface HealthSummary {
+  status: "healthy" | "degraded" | "unhealthy";
+  ready: boolean;
+  components: Array<{
+    component: string;
+    status: "healthy" | "degraded" | "unhealthy";
+    ready: boolean;
+    required: boolean;
+    detail: string | null;
+  }>;
+}
+
+export interface DiagnosticReport {
+  schema_version: number;
+  hardware: {
+    platform: "macos" | "linux" | "windows" | "other";
+    architecture: string;
+    logical_cpus: number;
+    physical_cpus: number | null;
+    total_memory_bytes: number;
+    available_memory_bytes: number;
+    supports_unix_sockets: boolean;
+    supports_page_locking: boolean;
+    accelerator_hint: string;
+  };
+  listener: string | null;
+  paths: Array<{
+    kind: "data" | "cache" | "runtime";
+    path: string;
+    source: string;
+    writable: boolean;
+    available_bytes: number | null;
+  }>;
+  executables: Array<{
+    name: string;
+    required: boolean;
+    found: boolean;
+    path: string | null;
+    version_excerpt: string | null;
+    probe_exit_code: number | null;
+  }>;
+  findings: Array<{
+    severity: "info" | "warning" | "error";
+    code: string;
+    summary: string;
+    action: string;
+  }>;
+}
+
+export interface DiagnosticsResponse {
+  platform: DiagnosticReport;
+  telemetry: {
+    health: HealthSummary;
+    recent_errors: Array<{
+      sequence: number;
+      subsystem: string;
+      operation: string;
+      correlation_id: string | null;
+      message: string;
+    }>;
+    stats: {
+      series: number;
+      dropped_series: number;
+      total_errors: number;
+    };
+  };
+}
+
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
 // see sessions.ts's ChatSession for the app-side camelCase shape).
 // `messages` is opaque here -- the daemon stores/returns it verbatim.
@@ -480,6 +548,11 @@ export function subscribeSse(
 
 export const api = {
   status: () => fetch("/api/status").then((r) => asJson<StatusResponse>(r)),
+
+  diagnostics: () =>
+    fetch("/api/diagnostics").then((r) => asJson<DiagnosticsResponse>(r)),
+
+  health: () => fetch("/health").then((r) => asJson<HealthSummary>(r)),
 
   model: (id: string) =>
     fetch(`/api/models/${encodeURIComponent(id)}`).then((r) => asJson<ModelDetail>(r)),

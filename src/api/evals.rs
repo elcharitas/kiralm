@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -227,6 +227,7 @@ async fn start_run(State(app): State<SharedState>, Json(body): Json<StartRunRequ
     let task_app = app.clone();
     let task_run_id = run_id.clone();
     tokio::spawn(async move {
+        let started = Instant::now();
         let event_bus = task_app.events.clone();
         let event_run_id = task_run_id.clone();
         let progress = Arc::new(move |progress| {
@@ -263,12 +264,14 @@ async fn start_run(State(app): State<SharedState>, Json(body): Json<StartRunRequ
                         Ok(comparison) => run.baseline = Some(comparison),
                         Err(error) => {
                             publish_failure(&task_app, &task_run_id, &error);
+                            task_app.eval_jobs.write().remove(&task_run_id);
                             return;
                         }
                     }
                 }
                 if let Err(error) = task_app.eval_store.save_run(&run, &redactor) {
                     publish_failure(&task_app, &task_run_id, &error);
+                    task_app.eval_jobs.write().remove(&task_run_id);
                     return;
                 }
                 task_app.events.publish(
@@ -280,6 +283,18 @@ async fn start_run(State(app): State<SharedState>, Json(body): Json<StartRunRequ
                         "metrics": run.metrics,
                         "baseline": run.baseline,
                     }),
+                );
+                let status = if run.metrics.cancelled > 0 {
+                    crate::telemetry::OperationStatus::Cancelled
+                } else {
+                    crate::telemetry::OperationStatus::Success
+                };
+                let _ = task_app.telemetry.record_evaluation(
+                    "run_suite",
+                    status,
+                    Some(started.elapsed()),
+                    None,
+                    None,
                 );
             }
             Err(error) => publish_failure(&task_app, &task_run_id, &error),
@@ -301,6 +316,13 @@ fn publish_failure(app: &SharedState, run_id: &str, error: &anyhow::Error) {
         "evaluation_failed",
         Some(run_id.to_string()),
         json!({"error": "evaluation failed"}),
+    );
+    let _ = app.telemetry.record_evaluation(
+        "run_suite",
+        crate::telemetry::OperationStatus::Error,
+        None,
+        None,
+        Some("evaluation failed"),
     );
 }
 

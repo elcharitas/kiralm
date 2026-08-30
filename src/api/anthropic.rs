@@ -313,6 +313,7 @@ fn convert_message(m: &InputMessage, vision_capable: bool) -> Result<Vec<OpenAiM
     Ok(out)
 }
 
+#[allow(clippy::result_large_err)]
 fn build_openai_request(
     req: &MessagesRequest,
     canonical_id: &str,

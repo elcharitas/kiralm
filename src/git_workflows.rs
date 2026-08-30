@@ -549,6 +549,7 @@ impl GitWorkflowService {
             .map_err(|_| GitWorkflowError::Busy)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_audit(
         &self,
         operation: GitOperation,

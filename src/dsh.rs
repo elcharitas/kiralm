@@ -23,7 +23,14 @@ use crate::config::kiralm_home;
 pub const RUN_PROFILE_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub fn profiles_dir() -> PathBuf {
-    kiralm_home().join("dsh_profiles")
+    #[cfg(unix)]
+    {
+        kiralm_home().join("dsh_profiles")
+    }
+    #[cfg(not(unix))]
+    {
+        dsh_home_dir().join("profiles")
+    }
 }
 
 /// Real `dsh` resolves a profile as `$DSH_HOME/profiles/<name>`
@@ -45,6 +52,8 @@ fn ensure_dsh_home_linked() -> Result<(), String> {
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(profiles_dir(), &link).map_err(|e| e.to_string())?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&link).map_err(|e| e.to_string())?;
     Ok(())
 }
 
