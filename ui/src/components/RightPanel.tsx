@@ -361,8 +361,12 @@ export function RightPanel({
           <McpPanel />
         ) : activeTab === "plugins" ? (
           <PluginsPanel />
-        ) : activeTab === "preview" && session ? (
-          <PreviewIsland projectId={session.projectId} />
+        ) : activeTab === "preview" ? (
+          session ? (
+            <PreviewIsland projectId={session.projectId} />
+          ) : (
+            <p className="runtime-empty">Open a workspace chat to preview a local app.</p>
+          )
         ) : (
           <SourceSplit
             top={(
