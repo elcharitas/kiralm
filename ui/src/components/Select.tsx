@@ -1,4 +1,11 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 
@@ -42,7 +49,21 @@ export function Select<T extends string>({
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuId = useId();
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const flatOptions = groups ? groups.flatMap((group) => group.options) : (options ?? []);
+  const current = flatOptions.find((option) => option.value === value);
+  const selectedIndex = Math.max(
+    0,
+    flatOptions.findIndex((option) => option.value === value),
+  );
+
+  const focusOption = useCallback((index: number) => {
+    if (flatOptions.length === 0) return;
+    const next = (index + flatOptions.length) % flatOptions.length;
+    optionRefs.current[next]?.focus();
+  }, [flatOptions.length]);
 
   // Measures the trigger + menu after the menu's first (off-screen)
   // render, then places it -- runs before paint, so there's no flash.
@@ -64,7 +85,8 @@ export function Select<T extends string>({
     }
     top = Math.max(8, top);
     setPos({ top, left, width: rect.width });
-  }, [open]);
+    focusOption(selectedIndex);
+  }, [focusOption, open, selectedIndex]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -75,7 +97,28 @@ export function Select<T extends string>({
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+        triggerRef.current?.focus();
+        return;
+      }
+      if (e.key === "Tab") {
+        setOpen(false);
+        return;
+      }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+        return;
+      }
+      e.preventDefault();
+      const focused = optionRefs.current.findIndex(
+        (option) => option === document.activeElement,
+      );
+      if (e.key === "Home") focusOption(0);
+      else if (e.key === "End") focusOption(flatOptions.length - 1);
+      else if (focused < 0) {
+        focusOption(e.key === "ArrowDown" ? 0 : flatOptions.length - 1);
+      } else focusOption(focused + (e.key === "ArrowDown" ? 1 : -1));
     };
     document.addEventListener("mousedown", onOutside);
     document.addEventListener("keydown", onKey);
@@ -83,19 +126,26 @@ export function Select<T extends string>({
       document.removeEventListener("mousedown", onOutside);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [flatOptions.length, focusOption, open]);
 
-  const flatOptions = groups ? groups.flatMap((g) => g.options) : (options ?? []);
-  const current = flatOptions.find((o) => o.value === value);
-
-  const optionButton = (o: SelectOption<T>) => (
+  const optionButton = (o: SelectOption<T>) => {
+    const index = flatOptions.findIndex((option) => option.value === o.value);
+    return (
     <button
       type="button"
       key={o.value}
+      id={`${menuId}-option-${index}`}
+      ref={(element) => {
+        optionRefs.current[index] = element;
+      }}
+      role="option"
+      aria-selected={o.value === value}
+      tabIndex={-1}
       className={o.value === value ? "select-menu-active" : undefined}
       onClick={() => {
         onChange(o.value);
         setOpen(false);
+        triggerRef.current?.focus();
       }}
     >
       <span className="select-menu-option-label truncate">
@@ -104,7 +154,8 @@ export function Select<T extends string>({
       </span>
       {o.value === value && <Check size={13} className="select-menu-check" />}
     </button>
-  );
+    );
+  };
 
   return (
     <div className="select-root">
@@ -114,6 +165,17 @@ export function Select<T extends string>({
         className={triggerClassName}
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          if (!open) setOpen(true);
+          else {
+            focusOption(selectedIndex + (event.key === "ArrowDown" ? 1 : -1));
+          }
+        }}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
       >
         {icon ?? current?.icon}
         <span className="select-value truncate">{current?.label ?? value}</span>
@@ -123,12 +185,20 @@ export function Select<T extends string>({
         createPortal(
           <div
             className="select-menu"
+            id={menuId}
+            role="listbox"
+            aria-label="Options"
             ref={menuRef}
             style={pos ? { top: pos.top, left: pos.left, minWidth: pos.width } : { top: -9999, left: -9999 }}
           >
             {groups
               ? groups.map((g) => (
-                  <div key={g.section} className="select-menu-group">
+                  <div
+                    key={g.section}
+                    className="select-menu-group"
+                    role="group"
+                    aria-label={g.section}
+                  >
                     <div className="select-menu-section">{g.section}</div>
                     {g.options.map(optionButton)}
                   </div>

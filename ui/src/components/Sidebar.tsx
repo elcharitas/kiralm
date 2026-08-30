@@ -51,7 +51,7 @@ export function Sidebar({
   onOpenSettings,
   onOpenModels,
   onOpenEvaluations,
-  settingsActive,
+  activeSettingsTab,
   collapsed,
   onToggleCollapse,
 }: {
@@ -75,7 +75,7 @@ export function Sidebar({
   onOpenSettings: () => void;
   onOpenModels: () => void;
   onOpenEvaluations: () => void;
-  settingsActive: boolean;
+  activeSettingsTab: "general" | "models" | "evaluations" | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
@@ -87,6 +87,7 @@ export function Sidebar({
   const { prompt, confirm, toast, browseFolder } = useDialogs();
   const { settings, save: saveSettings } = useSettings();
   const inProjectContext = activeId != null;
+  const settingsActive = activeSettingsTab !== null;
 
   // Persisted server-side (settings.json) so a collapsed workspace
   // stays collapsed across a reload, not just this tab's lifetime.
@@ -256,7 +257,23 @@ export function Sidebar({
         <div className="sidebar-collapsed-spacer" />
         <button
           type="button"
-          className="sidebar-footer-btn"
+          className={
+            activeSettingsTab === "general"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
+          title="Settings"
+          onClick={onOpenSettings}
+        >
+          <Settings size={16} />
+        </button>
+        <button
+          type="button"
+          className={
+            activeSettingsTab === "models"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
           title="Models"
           onClick={onOpenModels}
         >
@@ -264,19 +281,15 @@ export function Sidebar({
         </button>
         <button
           type="button"
-          className="sidebar-footer-btn"
+          className={
+            activeSettingsTab === "evaluations"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
           title="Evaluations"
           onClick={onOpenEvaluations}
         >
           <FlaskConical size={16} />
-        </button>
-        <button
-          type="button"
-          className={settingsActive ? "sidebar-footer-btn sidebar-settings-btn-active" : "sidebar-footer-btn"}
-          title="Settings"
-          onClick={onOpenSettings}
-        >
-          <Settings size={16} />
         </button>
         <button
           type="button"
@@ -420,7 +433,11 @@ export function Sidebar({
         <div className="sidebar-footer-icons">
           <button
             type="button"
-            className={settingsActive ? "sidebar-footer-btn sidebar-settings-btn-active" : "sidebar-footer-btn"}
+            className={
+              activeSettingsTab === "general"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
             title="Settings"
             onClick={onOpenSettings}
           >
@@ -428,7 +445,11 @@ export function Sidebar({
           </button>
           <button
             type="button"
-            className="sidebar-footer-btn"
+            className={
+              activeSettingsTab === "models"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
             title="Models"
             onClick={onOpenModels}
           >
@@ -436,7 +457,11 @@ export function Sidebar({
           </button>
           <button
             type="button"
-            className="sidebar-footer-btn"
+            className={
+              activeSettingsTab === "evaluations"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
             title="Evaluations"
             onClick={onOpenEvaluations}
           >

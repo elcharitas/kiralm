@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import {
   api,
@@ -10,6 +10,11 @@ import {
 } from "../api";
 import { useDialogs } from "../components/Dialogs";
 import { Select } from "../components/Select";
+import {
+  positiveInteger,
+  unusedNumberedId,
+  validateAssertionValue,
+} from "../evaluationValidation";
 import { modelName } from "../format";
 
 type AssertionKind = EvalAssertion["type"];
@@ -45,6 +50,11 @@ interface SuiteDraft {
   cases: CaseDraft[];
 }
 
+interface ActiveEvalRun {
+  runId: string;
+  suiteId: string;
+}
+
 const assertionOptions: Array<{ value: AssertionKind; label: string }> = [
   { value: "exact", label: "Exact match" },
   { value: "contains", label: "Contains text" },
@@ -59,9 +69,9 @@ function emptyAssertion(): AssertionDraft {
   return { type: "contains", target: "output", value: "" };
 }
 
-function emptyCase(index: number): CaseDraft {
+function emptyCase(id: string): CaseDraft {
   return {
-    id: `case-${index}`,
+    id,
     prompt: "",
     model: "",
     temperature: "0",
@@ -81,7 +91,7 @@ function starterDraft(model: string): SuiteDraft {
     defaultModel: model,
     cases: [
       {
-        ...emptyCase(1),
+        ...emptyCase("case-1"),
         id: "hello",
         prompt: "Reply with exactly: hello",
         maxTokens: "32",
@@ -147,15 +157,8 @@ function suiteToDraft(suite: EvalSuite): SuiteDraft {
   };
 }
 
-function positiveNumber(value: string, label: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be greater than zero`);
-  }
-  return parsed;
-}
-
 function assertionFromDraft(draft: AssertionDraft): EvalAssertion {
+  validateAssertionValue(draft.type, draft.value);
   if (draft.type === "regex") {
     return { type: draft.type, target: draft.target, pattern: draft.value };
   }
@@ -176,13 +179,13 @@ function assertionFromDraft(draft: AssertionDraft): EvalAssertion {
   if (draft.type === "max_latency_ms") {
     return {
       type: draft.type,
-      max: positiveNumber(draft.value, "Maximum latency"),
+      max: positiveInteger(draft.value, "Maximum latency"),
     };
   }
   if (draft.type === "max_total_tokens") {
     return {
       type: draft.type,
-      max: positiveNumber(draft.value, "Maximum tokens"),
+      max: positiveInteger(draft.value, "Maximum tokens"),
     };
   }
   return {
@@ -199,6 +202,7 @@ function suiteFromDraft(draft: SuiteDraft): EvalSuite {
   if (draft.cases.length === 0) {
     throw new Error("Add at least one evaluation case");
   }
+  const caseIds = new Set<string>();
   return {
     id: draft.id.trim(),
     name: draft.name.trim(),
@@ -208,12 +212,23 @@ function suiteFromDraft(draft: SuiteDraft): EvalSuite {
       if (!evalCase.id.trim() || !evalCase.prompt.trim()) {
         throw new Error("Every case needs an id and prompt");
       }
+      if (caseIds.has(evalCase.id.trim())) {
+        throw new Error(`Case id ${evalCase.id.trim()} is duplicated`);
+      }
+      caseIds.add(evalCase.id.trim());
+      if (evalCase.assertions.length === 0) {
+        throw new Error(`Case ${evalCase.id} needs at least one assertion`);
+      }
       const temperature = Number(evalCase.temperature);
-      if (!Number.isFinite(temperature)) {
-        throw new Error(`Case ${evalCase.id} has an invalid temperature`);
+      if (
+        !Number.isFinite(temperature) ||
+        temperature < 0 ||
+        temperature > 2
+      ) {
+        throw new Error(`Case ${evalCase.id} temperature must be 0 to 2`);
       }
       const seed = evalCase.seed === "" ? null : Number(evalCase.seed);
-      if (seed != null && (!Number.isInteger(seed) || seed < 0)) {
+      if (seed != null && (!Number.isSafeInteger(seed) || seed < 0)) {
         throw new Error(`Case ${evalCase.id} has an invalid seed`);
       }
       return {
@@ -222,15 +237,20 @@ function suiteFromDraft(draft: SuiteDraft): EvalSuite {
         model: evalCase.model || null,
         settings: {
           temperature,
-          max_tokens: positiveNumber(
+          max_tokens: positiveInteger(
             evalCase.maxTokens,
             `Case ${evalCase.id} max tokens`,
+            4_294_967_295,
           ),
           seed,
         },
         timeout_ms: evalCase.timeoutMs === ""
           ? null
-          : positiveNumber(evalCase.timeoutMs, `Case ${evalCase.id} timeout`),
+          : positiveInteger(
+              evalCase.timeoutMs,
+              `Case ${evalCase.id} timeout`,
+              600_000,
+            ),
         assertions: evalCase.assertions.map(assertionFromDraft),
         metadata: Object.fromEntries(
           evalCase.metadata
@@ -245,12 +265,13 @@ function suiteFromDraft(draft: SuiteDraft): EvalSuite {
 export function EvaluationsView({ status }: { status: StatusResponse | null }) {
   const { toast } = useDialogs();
   const firstModelId = status?.models[0]?.id ?? "";
+  const firstModelIdRef = useRef(firstModelId);
   const [suites, setSuites] = useState<EvalSuite[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<SuiteDraft | null>(null);
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [baselineId, setBaselineId] = useState("");
-  const [activeRun, setActiveRun] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<ActiveEvalRun | null>(null);
   const [loading, setLoading] = useState(true);
 
   const modelOptions = [
@@ -267,15 +288,9 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
     return result.suites;
   }, []);
 
-  const loadRuns = useCallback(async (suiteId: string) => {
-    if (!suiteId) {
-      setRuns([]);
-      return [];
-    }
-    const result = await api.listEvalRuns(suiteId);
-    setRuns(result.runs);
-    return result.runs;
-  }, []);
+  useEffect(() => {
+    if (firstModelId) firstModelIdRef.current = firstModelId;
+  }, [firstModelId]);
 
   useEffect(() => {
     void loadSuites()
@@ -283,46 +298,67 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
         if (loaded.length > 0) {
           setSelectedId(loaded[0].id);
         } else {
-          setDraft(starterDraft(firstModelId));
+          setDraft(starterDraft(firstModelIdRef.current));
         }
       })
       .catch((error) =>
         toast(error instanceof Error ? error.message : String(error), "error"),
       )
       .finally(() => setLoading(false));
-  }, [firstModelId, loadSuites, toast]);
+  }, [loadSuites, toast]);
 
   useEffect(() => {
     const suite = suites.find((item) => item.id === selectedId);
     if (suite) setDraft(suiteToDraft(suite));
     setBaselineId("");
-    void loadRuns(selectedId).catch((error) =>
-      toast(error instanceof Error ? error.message : String(error), "error"),
+    if (!selectedId) {
+      setRuns([]);
+      return;
+    }
+    let disposed = false;
+    void api.listEvalRuns(selectedId).then(
+      (result) => {
+        if (!disposed) setRuns(result.runs);
+      },
+      (error) => {
+        if (!disposed) {
+          toast(error instanceof Error ? error.message : String(error), "error");
+        }
+      },
     );
-  }, [loadRuns, selectedId, suites, toast]);
+    return () => {
+      disposed = true;
+    };
+  }, [selectedId, suites, toast]);
 
   useEffect(() => {
-    if (!activeRun || !selectedId) return;
+    if (!activeRun) return;
+    const { runId, suiteId } = activeRun;
     let disposed = false;
     const timer = window.setInterval(() => {
       void api
-        .evalJob(activeRun)
+        .evalJob(runId)
         .then(async (job) => {
           if (disposed || job.running) return;
           window.clearInterval(timer);
-          const latest = await loadRuns(selectedId);
+          const result = await api.listEvalRuns(suiteId);
           if (disposed) return;
-          if (latest.some((run) => run.id === activeRun)) {
+          if (selectedId === suiteId) setRuns(result.runs);
+          if (result.runs.some((run) => run.id === runId)) {
             toast("Evaluation completed", "success");
           } else {
             toast("Evaluation failed before producing a result", "error");
           }
-          setActiveRun(null);
+          setActiveRun((current) =>
+            current?.runId === runId ? null : current,
+          );
         })
         .catch((error) => {
           if (!disposed) {
             window.clearInterval(timer);
-            setActiveRun(null);
+            setActiveRun((current) =>
+              current?.runId === runId ? null : current,
+            );
             toast(error instanceof Error ? error.message : String(error), "error");
           }
         });
@@ -331,7 +367,7 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [activeRun, loadRuns, selectedId, toast]);
+  }, [activeRun, selectedId, toast]);
 
   const latestRun = runs[0] ?? null;
   const selectedSuite = useMemo(
@@ -392,7 +428,7 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
         selectedSuite.id,
         baselineId || null,
       );
-      setActiveRun(started.run_id);
+      setActiveRun({ runId: started.run_id, suiteId: selectedSuite.id });
       toast("Evaluation started", "success");
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -402,7 +438,7 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
   const cancelRun = async () => {
     if (!activeRun) return;
     try {
-      await api.cancelEvalRun(activeRun);
+      await api.cancelEvalRun(activeRun.runId);
       toast("Cancellation requested", "success");
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), "error");
@@ -435,7 +471,12 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
               Build deterministic prompts and regression checks.
             </p>
           </div>
-          <button type="button" className="btn" onClick={createSuite}>
+          <button
+            type="button"
+            className="btn"
+            disabled={activeRun !== null}
+            onClick={createSuite}
+          >
             <Plus size={13} /> New suite
           </button>
         </div>
@@ -447,6 +488,7 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
             <Select
               triggerClassName="settings-select"
               value={selectedId}
+              disabled={activeRun !== null}
               onChange={setSelectedId}
               options={suites.map((suite) => ({
                 value: suite.id,
@@ -657,8 +699,19 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
                               )}
                               options={[
                                 { value: "output", label: "Output" },
-                                { value: "tool_trace", label: "Tool trace" },
+                                ...(assertion.target === "tool_trace"
+                                  ? [{
+                                      value: "tool_trace" as const,
+                                      label: "Tool trace (existing)",
+                                    }]
+                                  : []),
                               ]}
+                            />
+                          )}
+                          {!hasTarget && (
+                            <span
+                              className="eval-assertion-target-placeholder"
+                              aria-hidden="true"
                             />
                           )}
                           {isJson ? (
@@ -770,7 +823,10 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
                   ...draft,
                   cases: [
                     ...draft.cases,
-                    emptyCase(draft.cases.length + 1),
+                    emptyCase(unusedNumberedId(
+                      draft.cases.map((evalCase) => evalCase.id),
+                      "case",
+                    )),
                   ],
                 })}
               >
@@ -816,11 +872,15 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
               disabled={activeRun !== null}
               onClick={() => void runSuite()}
             >
-              {activeRun ? "Running..." : "Run suite"}
+              {activeRun?.suiteId === selectedSuite.id
+                ? "Running..."
+                : activeRun
+                  ? "Another suite is running"
+                  : "Run suite"}
             </button>
             {activeRun && (
               <button type="button" className="btn" onClick={() => void cancelRun()}>
-                Cancel
+                Cancel run
               </button>
             )}
           </div>

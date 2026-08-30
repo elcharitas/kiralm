@@ -21,6 +21,19 @@
   user-select: text;
 }
 
+.app :where(
+  .md,
+  pre,
+  code,
+  .git-change-path,
+  .git-log-message,
+  .git-log-meta,
+  .settings-hint,
+  .eval-results
+) {
+  user-select: text;
+}
+
 .app img {
   -webkit-user-drag: none;
 }
@@ -50,6 +63,14 @@
 .island-resize-handle:hover::after,
 .island-resizing .island-resize-handle::after {
   background: var(--border-strong);
+}
+
+.island-resize-handle:focus-visible {
+  outline: none;
+}
+
+.island-resize-handle:focus-visible::after {
+  background: var(--accent);
 }
 
 .tauri-macos .island-resize-handle {
@@ -440,6 +461,12 @@
   background: var(--bg-inset);
 }
 
+.select-root > button:focus-visible,
+.select-menu [role="option"]:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .select-menu-option-label {
   display: flex;
   align-items: center;
@@ -683,10 +710,13 @@
   grid-column: 2;
   grid-row: 2;
   min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   border-top: none;
+  container-name: main-content;
+  container-type: inline-size;
 }
 
 /* Home renders no TopBar above it, so it fills the full column
@@ -1488,9 +1518,14 @@
   color: var(--text-faint);
 }
 
-.message-actions button:hover {
+.message-actions button:hover:not(:disabled) {
   background: var(--bg-inset);
   color: var(--text);
+}
+
+.message-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .message-editor {
@@ -2109,6 +2144,62 @@
   color: var(--text-dim);
 }
 
+@container (max-width: 520px) {
+  .composer-toolbar {
+    gap: 6px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .chip-select-model {
+    width: 140px;
+  }
+
+  .composer-mode-group > .chip-toggle {
+    width: 30px;
+    justify-content: center;
+    gap: 0;
+    padding-right: 6px;
+    padding-left: 6px;
+    font-size: 0;
+  }
+}
+
+@container (max-width: 420px) {
+  .chip-select-model {
+    width: 100px;
+  }
+
+  .composer-mode-group .select-value {
+    display: none;
+  }
+
+  .composer-mode-group .select-chevron {
+    display: none;
+  }
+
+  .composer-mode-group .chip-select {
+    width: 36px;
+    justify-content: center;
+    padding-right: 5px;
+    padding-left: 5px;
+  }
+
+  .composer-git-label {
+    display: none;
+  }
+
+  .composer-git-row .select-root {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .composer-git-branch-select {
+    width: 100%;
+    max-width: none;
+  }
+}
+
 /* Right panel */
 
 .right-panel {
@@ -2272,6 +2363,7 @@
 .right-panel-body {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   overflow-y: overlay;
   padding: 16px;
@@ -2402,18 +2494,36 @@
 }
 
 .git-source-split-handle {
+  position: relative;
   flex-shrink: 0;
-  height: 6px;
-  margin: 8px 0;
-  border-radius: 3px;
-  background: var(--border);
+  height: 22px;
+  background: transparent;
   cursor: row-resize;
   touch-action: none;
 }
 
-.git-source-split-handle:hover,
-.git-source-split-handle:active {
+.git-source-split-handle::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  right: 0;
+  left: 0;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+}
+
+.git-source-split-handle:hover::after,
+.git-source-split-handle:active::after {
   background: var(--border-strong);
+}
+
+.git-source-split-handle:focus-visible {
+  outline: none;
+}
+
+.git-source-split-handle:focus-visible::after {
+  background: var(--accent);
 }
 
 .git-source-split-bottom {
@@ -2441,6 +2551,7 @@
 
 .git-panel-commit-form .mcp-field {
   flex: 1;
+  min-width: 0;
 }
 
 .git-panel-toolbar,
@@ -2552,7 +2663,7 @@
 
 .git-log-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 40%);
   align-items: center;
   gap: 8px;
   padding: 6px 4px;
@@ -3031,7 +3142,7 @@
   margin-top: 14px;
 }
 
-@media (max-width: 900px) {
+@container main-content (max-width: 620px) {
   .eval-form-grid {
     grid-template-columns: 1fr;
   }
@@ -3052,6 +3163,44 @@
   .eval-assertion-row > .right-panel-icon-btn {
     grid-column: 3;
     grid-row: 1;
+  }
+}
+
+@container main-content (max-width: 520px) {
+  .settings-wrap {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .eval-heading {
+    flex-direction: column;
+  }
+
+  .eval-heading .btn {
+    align-self: flex-start;
+  }
+
+  .eval-metadata-row {
+    grid-template-columns: minmax(0, 1fr) 26px;
+  }
+
+  .eval-metadata-row > .settings-input:nth-child(2) {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .eval-metadata-row > .right-panel-icon-btn {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .eval-suite-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .eval-suite-actions .btn {
+    justify-content: center;
   }
 }
 

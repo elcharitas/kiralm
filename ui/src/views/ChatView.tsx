@@ -96,6 +96,11 @@ function modelIcon(source: "local" | "cloud") {
     : <Cpu size={12} />;
 }
 
+interface MessageMarker {
+  sessionId: string;
+  index: number;
+}
+
 export function ChatView({
   status,
   session,
@@ -105,6 +110,7 @@ export function ChatView({
   onStreamingChange,
   onSetPermission,
   onGitRefresh,
+  gitBusy,
 }: {
   status: StatusResponse | null;
   session: ChatSession | null;
@@ -114,6 +120,7 @@ export function ChatView({
   onStreamingChange: (id: string | null) => void;
   onSetPermission: (id: string, permission: PermissionMode) => void;
   onGitRefresh: () => Promise<void>;
+  gitBusy: boolean;
 }) {
   const { settings } = useSettings();
   const { toast } = useDialogs();
@@ -137,19 +144,35 @@ export function ChatView({
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
   const [attachments, setAttachments] = useState<AttachmentDescriptor[]>([]);
-  const [attachmentReference, setAttachmentReference] = useState<string | null>(null);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [editingMessage, setEditingMessage] = useState<number | null>(null);
+  const [editingMessage, setEditingMessage] = useState<MessageMarker | null>(null);
   const [editingText, setEditingText] = useState("");
-  const [copiedMessage, setCopiedMessage] = useState<number | null>(null);
+  const [copiedMessage, setCopiedMessage] = useState<MessageMarker | null>(null);
   const [gitBranches, setGitBranches] = useState<GitBranchInfo[]>([]);
   const [switchingBranch, setSwitchingBranch] = useState(false);
+  const attachmentsRef = useRef<AttachmentDescriptor[]>([]);
+  const attachmentReferenceRef = useRef<string | null>(null);
+  const uploadVersionRef = useRef(0);
+  const uploadActiveRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const dragDepthRef = useRef(0);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
+  sessionIdRef.current = session?.id ?? null;
+
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
   const effectiveModelObj = models.find((m) => m.id === effectiveModel);
+
+  useEffect(() => () => {
+    sessionIdRef.current = null;
+    uploadVersionRef.current += 1;
+    const reference = attachmentReferenceRef.current;
+    if (!reference) return;
+    for (const attachment of attachmentsRef.current) {
+      api.releaseOneAttachment(attachment.id, reference).catch(() => {});
+    }
+  }, []);
 
   // Manual compaction: typing "/compact" replaces the older half of the
   // chat with one model-written summary instead of sending it as a
@@ -172,7 +195,12 @@ export function ChatView({
 
   const send = async () => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || !effectiveModel || sending) return;
+    if (
+      (!text && attachments.length === 0) ||
+      !effectiveModel ||
+      sending ||
+      uploadActiveRef.current
+    ) return;
     if (
       attachments.some((attachment) => attachment.kind === "image") &&
       !effectiveModelObj?.vision_capable
@@ -187,6 +215,8 @@ export function ChatView({
     const target = session ?? (await onEnsureSession());
     setError(null);
     setInput("");
+    setEditingMessage(null);
+    setEditingText("");
 
     let baseMessages = target.messages;
     if (settings.auto_compact && shouldAutoCompact(baseMessages, effectiveModelObj?.context_length)) {
@@ -206,8 +236,9 @@ export function ChatView({
       },
     ];
     onUpdateMessages(target.id, startMessages);
+    attachmentsRef.current = [];
+    attachmentReferenceRef.current = null;
     setAttachments([]);
-    setAttachmentReference(null);
 
     setSending(true);
     setStreamingSessionId(target.id);
@@ -264,40 +295,58 @@ export function ChatView({
   const uploadAttachments = async (
     files: FileList | readonly File[] | null,
   ) => {
-    if (!files?.length || uploadingAttachment) return;
+    if (!files?.length || uploadActiveRef.current) return;
     const pendingFiles = Array.from(files);
-    if (attachments.length + pendingFiles.length > 8) {
+    if (attachmentsRef.current.length + pendingFiles.length > 8) {
       setError("A message can contain at most 8 attachments");
       return;
     }
     const target = session ?? (await onEnsureSession());
     const reference = `chat:${target.id}`;
-    setAttachmentReference(reference);
+    const uploadVersion = ++uploadVersionRef.current;
+    uploadActiveRef.current = true;
+    attachmentReferenceRef.current = reference;
     setUploadingAttachment(true);
     setError(null);
     try {
       for (const file of pendingFiles) {
+        if (uploadVersionRef.current !== uploadVersion) break;
         const descriptor = await api.uploadAttachment(
           reference,
           file.name,
           await blobAsDataUrl(file),
         );
-        setAttachments((current) => [...current, descriptor]);
+        if (
+          uploadVersionRef.current !== uploadVersion ||
+          sessionIdRef.current !== target.id
+        ) {
+          await api.releaseOneAttachment(descriptor.id, reference).catch(() => {});
+          break;
+        }
+        attachmentsRef.current = [...attachmentsRef.current, descriptor];
+        setAttachments(attachmentsRef.current);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (uploadVersionRef.current === uploadVersion) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setUploadingAttachment(false);
+      if (uploadVersionRef.current === uploadVersion) {
+        uploadActiveRef.current = false;
+        setUploadingAttachment(false);
+      }
     }
   };
 
   const removeAttachment = (attachment: AttachmentDescriptor) => {
-    setAttachments((current) =>
-      current.filter((item) => item.id !== attachment.id),
+    attachmentsRef.current = attachmentsRef.current.filter(
+      (item) => item.id !== attachment.id,
     );
-    if (attachmentReference) {
+    setAttachments(attachmentsRef.current);
+    const reference = attachmentReferenceRef.current;
+    if (reference) {
       api
-        .releaseOneAttachment(attachment.id, attachmentReference)
+        .releaseOneAttachment(attachment.id, reference)
         .catch(() => {});
     }
   };
@@ -316,26 +365,31 @@ export function ChatView({
   };
 
   const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
-    if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
     if (dragDepthRef.current === 0) setDropActive(false);
   };
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
-    if (!event.dataTransfer.files.length) return;
     event.preventDefault();
     dragDepthRef.current = 0;
     setDropActive(false);
+    if (!event.dataTransfer.files.length) return;
     void uploadAttachments(event.dataTransfer.files);
   };
 
   const copyMessage = async (index: number, content: string) => {
+    if (!session) return;
+    const marker = { sessionId: session.id, index };
     try {
       await navigator.clipboard.writeText(content);
-      setCopiedMessage(index);
+      setCopiedMessage(marker);
       window.setTimeout(() => {
-        setCopiedMessage((current) => current === index ? null : current);
+        setCopiedMessage((current) =>
+          current?.sessionId === marker.sessionId && current.index === marker.index
+            ? null
+            : current,
+        );
       }, 1500);
     } catch {
       setError("Could not copy the message");
@@ -343,15 +397,22 @@ export function ChatView({
   };
 
   const beginEditMessage = (index: number, content: string) => {
-    setEditingMessage(index);
+    if (!session || sending) return;
+    setEditingMessage({ sessionId: session.id, index });
     setEditingText(content);
   };
 
   const saveEditedMessage = () => {
-    if (editingMessage == null || !session || !editingText.trim()) return;
+    if (
+      !editingMessage ||
+      !session ||
+      editingMessage.sessionId !== session.id ||
+      sending ||
+      !editingText.trim()
+    ) return;
     onUpdateMessages(
       session.id,
-      session.messages.map((message, index) => index === editingMessage
+      session.messages.map((message, index) => index === editingMessage.index
         ? { ...message, content: editingText.trim() }
         : message),
     );
@@ -378,6 +439,8 @@ export function ChatView({
       const snap = await api.generation(sessionId).catch(() => null);
       if (cancelled || !snap || !snap.model) return;
       if (snap.running) {
+        setEditingMessage(null);
+        setEditingText("");
         setLiveText(snap.text);
         setSending(true);
         setStreamingSessionId(sessionId);
@@ -467,15 +530,25 @@ export function ChatView({
   }, [gitStatus?.branch, gitStatus?.is_repo, session?.projectId]);
 
   useEffect(() => {
-    const currentReference = session ? `chat:${session.id}` : null;
-    if (!attachmentReference || attachmentReference === currentReference) return;
-    for (const attachment of attachments) {
+    const currentReference = session?.id ? `chat:${session.id}` : null;
+    dragDepthRef.current = 0;
+    setDropActive(false);
+    setEditingMessage(null);
+    setEditingText("");
+    setCopiedMessage(null);
+    const staleReference = attachmentReferenceRef.current;
+    if (!staleReference || staleReference === currentReference) return;
+    uploadVersionRef.current += 1;
+    uploadActiveRef.current = false;
+    setUploadingAttachment(false);
+    for (const attachment of attachmentsRef.current) {
       api
-        .releaseOneAttachment(attachment.id, attachmentReference)
+        .releaseOneAttachment(attachment.id, staleReference)
         .catch(() => {});
     }
+    attachmentsRef.current = [];
+    attachmentReferenceRef.current = null;
     setAttachments([]);
-    setAttachmentReference(null);
   }, [session?.id]);
 
   const toggleKnowledgeIndex = async () => {
@@ -513,7 +586,13 @@ export function ChatView({
   };
 
   const switchBranch = async (name: string) => {
-    if (!session || !name || name === gitStatus?.branch) return;
+    if (
+      !session ||
+      !name ||
+      name === gitStatus?.branch ||
+      gitBusy ||
+      sending
+    ) return;
     setSwitchingBranch(true);
     setError(null);
     try {
@@ -539,6 +618,12 @@ export function ChatView({
   };
 
   const isStreamingThisSession = sending && streamingSessionId === session?.id;
+  const editingIndex = editingMessage && editingMessage.sessionId === session?.id
+    ? editingMessage.index
+    : null;
+  const copiedIndex = copiedMessage && copiedMessage.sessionId === session?.id
+    ? copiedMessage.index
+    : null;
   const messages = session?.messages ?? [];
   const presetBinding = session
     ? presetState?.bindings[session.projectId]
@@ -561,8 +646,7 @@ export function ChatView({
     }),
   );
 
-  // Secondary controls collapse into the overflow menu on a narrow
-  // composer while model and chat mode stay directly reachable.
+  // Secondary controls move into overflow on narrow composers.
   const renderConfigChips = () => (
     <>
       {effectiveModelObj && (
@@ -650,12 +734,13 @@ export function ChatView({
         aria-label="Copy message"
         onClick={() => void copyMessage(index, message.content)}
       >
-        {copiedMessage === index ? <Check size={13} /> : <Copy size={13} />}
+        {copiedIndex === index ? <Check size={13} /> : <Copy size={13} />}
       </button>
       <button
         type="button"
         title="Edit message"
         aria-label="Edit message"
+        disabled={sending}
         onClick={() => beginEditMessage(index, message.content)}
       >
         <Pencil size={13} />
@@ -719,7 +804,7 @@ export function ChatView({
           m.role === "user" ? (
             <div key={i} className="turn-user">
               <div className="chat-bubble chat-bubble-user">
-                {editingMessage === i
+                {editingIndex === i
                   ? renderMessageEditor()
                   : <Markdown>{m.content}</Markdown>}
                 {m.attachments && m.attachments.length > 0 && (
@@ -740,11 +825,11 @@ export function ChatView({
                   </div>
                 )}
               </div>
-              {editingMessage !== i && renderMessageActions(m, i)}
+              {editingIndex !== i && renderMessageActions(m, i)}
             </div>
           ) : (
             <div key={i} className="turn-assistant">
-              {editingMessage === i
+              {editingIndex === i
                 ? renderMessageEditor()
                 : stripCodeBlocks(m.content) && (
                 <Markdown className="chat-text">{stripCodeBlocks(m.content)}</Markdown>
@@ -844,7 +929,7 @@ export function ChatView({
                 </div>
               )}
               {openCode[i] && <pre className="changed-block-code mono">{m.content}</pre>}
-              {editingMessage !== i && renderMessageActions(m, i)}
+              {editingIndex !== i && renderMessageActions(m, i)}
             </div>
           ),
         )}
@@ -941,8 +1026,7 @@ export function ChatView({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key !== "Enter") return;
-              // Default: Enter sends and Shift+Enter adds a newline.
-              // The alternate setting uses Ctrl/Cmd+Enter to send.
+              // Enter sends; Ctrl/Cmd+Enter is the alternate.
               const sends = settings.send_on_enter
                 ? !e.shiftKey
                 : e.metaKey || e.ctrlKey;
@@ -1012,6 +1096,7 @@ export function ChatView({
                   !effectiveModel ||
                   (!input.trim() && attachments.length === 0) ||
                   sending ||
+                  uploadingAttachment ||
                   compacting
                 }
                 title="Send"
@@ -1033,14 +1118,24 @@ export function ChatView({
             <Select
               triggerClassName="composer-git-branch-select mono"
               value={gitStatus.branch ?? ""}
-              disabled={switchingBranch || !gitStatus.branch}
+              disabled={
+                switchingBranch ||
+                gitBusy ||
+                sending ||
+                gitBranches.length === 0
+              }
               onChange={(name) => void switchBranch(name)}
-              options={gitBranches.map((branch) => ({
-                value: branch.name,
-                label: `${branch.name}${
-                  branch.current && gitStatus.dirty ? " •" : ""
-                }`,
-              }))}
+              options={[
+                ...(gitStatus.branch
+                  ? []
+                  : [{ value: "", label: "detached HEAD" }]),
+                ...gitBranches.map((branch) => ({
+                  value: branch.name,
+                  label: `${branch.name}${
+                    branch.current && gitStatus.dirty ? " •" : ""
+                  }`,
+                })),
+              ]}
             />
           </div>
         )}

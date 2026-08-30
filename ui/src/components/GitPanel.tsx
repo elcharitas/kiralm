@@ -11,7 +11,17 @@ import { formatRelativeTime } from "../format";
 import { Select } from "./Select";
 import { useDialogs } from "./Dialogs";
 
-export function GitPanel({ projectId }: { projectId: string | undefined }) {
+export function GitPanel({
+  projectId,
+  refreshVersion,
+  gitBusy,
+  onGitChanged,
+}: {
+  projectId: string | undefined;
+  refreshVersion: number;
+  gitBusy: boolean;
+  onGitChanged: () => Promise<void>;
+}) {
   const [state, setState] = useState<GitRepositoryState | null>(null);
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
@@ -54,14 +64,14 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
   useEffect(() => {
     setLoading(true);
     void load().finally(() => setLoading(false));
-  }, [load]);
+  }, [load, refreshVersion]);
 
   const mutate = async (operation: () => Promise<unknown>, success: string) => {
-    if (busy) return false;
+    if (busy || gitBusy) return false;
     setBusy(true);
     try {
       await operation();
-      await load();
+      await Promise.all([load(), onGitChanged()]);
       toast(success, "success");
       return true;
     } catch (caught) {
@@ -115,7 +125,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
               `Switched to ${name}`,
             );
           }}
-          disabled={busy}
+          disabled={busy || gitBusy}
           icon={<GitBranch size={13} />}
           options={branches.map((branch) => ({
             value: branch.name,
@@ -126,7 +136,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
           type="button"
           className="right-panel-icon-btn"
           title="Refresh Git state"
-          disabled={busy}
+          disabled={busy || gitBusy}
           onClick={() => void load()}
         >
           <RefreshCw size={13} />
@@ -138,7 +148,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
           className="mcp-field mono"
           placeholder="New branch name"
           value={branchName}
-          disabled={busy}
+          disabled={busy || gitBusy}
           onChange={(event) => setBranchName(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") void createBranch();
@@ -148,7 +158,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
           type="button"
           className="btn"
           title="Create branch"
-          disabled={!branchName.trim() || busy}
+          disabled={!branchName.trim() || busy || gitBusy}
           onClick={() => void createBranch()}
         >
           <Plus size={13} /> Create
@@ -183,7 +193,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
                   <button
                     type="button"
                     className="btn"
-                    disabled={busy || file.conflicted}
+                    disabled={busy || gitBusy || file.conflicted}
                     onClick={() =>
                       void mutate(
                         () => api.gitWorkflowStage(projectId, [file.path]),
@@ -198,7 +208,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
                   <button
                     type="button"
                     className="btn"
-                    disabled={busy || file.conflicted}
+                    disabled={busy || gitBusy || file.conflicted}
                     onClick={() =>
                       void mutate(
                         () => api.gitWorkflowUnstage(projectId, [file.path]),
@@ -229,7 +239,7 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
           className="mcp-field mono"
           placeholder="Commit staged changes"
           value={message}
-          disabled={busy}
+          disabled={busy || gitBusy}
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") void commit();
@@ -238,7 +248,13 @@ export function GitPanel({ projectId }: { projectId: string | undefined }) {
         <button
           type="button"
           className="btn btn-accent"
-          disabled={!message.trim() || !hasStaged || busy || state.conflicted}
+          disabled={
+            !message.trim() ||
+            !hasStaged ||
+            busy ||
+            gitBusy ||
+            state.conflicted
+          }
           onClick={() => void commit()}
         >
           <GitCommit size={14} /> Commit
