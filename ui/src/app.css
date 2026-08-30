@@ -13,6 +13,68 @@
   padding: var(--gap);
   background: linear-gradient(135deg, #050505, #0a0a0a);
   transition: grid-template-columns 0.15s ease;
+  user-select: none;
+}
+
+.app input,
+.app textarea {
+  user-select: text;
+}
+
+.app img {
+  -webkit-user-drag: none;
+}
+
+.island-resize-handle {
+  position: absolute;
+  z-index: 40;
+  top: var(--gap);
+  bottom: var(--gap);
+  width: var(--gap);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.island-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 24px;
+  bottom: 24px;
+  left: 5px;
+  width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.island-resize-handle:hover::after,
+.island-resizing .island-resize-handle::after {
+  background: var(--border-strong);
+}
+
+.tauri-macos .island-resize-handle {
+  top: 36px;
+}
+
+.island-resizing,
+.island-resizing *,
+.source-split-resizing,
+.source-split-resizing * {
+  user-select: none !important;
+}
+
+.island-resizing,
+.island-resizing * {
+  cursor: col-resize !important;
+}
+
+.island-resizing .app {
+  transition: none;
+}
+
+.source-split-resizing,
+.source-split-resizing * {
+  cursor: row-resize !important;
 }
 
 .tauri-macos .app {
@@ -2371,6 +2433,8 @@
 
 .git-panel-commit-form {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -2487,12 +2551,14 @@
 }
 
 .git-log-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 6px 4px;
   border-radius: var(--radius);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .git-log-row:hover {

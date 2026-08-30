@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { RightPanel } from "./components/RightPanel";
@@ -17,6 +22,15 @@ import type { Project } from "./api";
 
 type View = "thread" | "settings" | "home";
 
+const COLLAPSED_ISLAND_WIDTH = 56;
+const DEFAULT_SIDEBAR_WIDTH = 260;
+const DEFAULT_RIGHT_PANEL_WIDTH = 340;
+const MIN_ISLAND_WIDTH = 190;
+const MAX_ISLAND_WIDTH = 520;
+const COLLAPSE_THRESHOLD = 104;
+const MIN_MAIN_WIDTH = 360;
+const SHELL_HORIZONTAL_SPACE = 48;
+
 export default function App() {
   const [view, setView] = useState<View>("thread");
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
@@ -24,6 +38,11 @@ export default function App() {
   const [streamingSince, setStreamingSince] = useState<number | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [rightPanelMode, setRightPanelMode] = useState<"split" | "collapsed">("split");
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [rightPanelWidth, setRightPanelWidth] = useState(
+    DEFAULT_RIGHT_PANEL_WIDTH,
+  );
+  const appRef = useRef<HTMLDivElement>(null);
   const { settings, save: saveSettings } = useSettings();
   const { toast } = useDialogs();
   // Persisted server-side (settings.json), not local state -- collapse
@@ -104,6 +123,60 @@ export default function App() {
     setView("settings");
   };
 
+  const beginIslandResize = (
+    side: "left" | "right",
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const app = appRef.current;
+    if (!app) return;
+    event.preventDefault();
+    const rect = app.getBoundingClientRect();
+    let finished = false;
+    document.body.classList.add("island-resizing");
+
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      document.body.classList.remove("island-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+
+    const move = (pointerEvent: globalThis.PointerEvent) => {
+      const proposed = side === "left"
+        ? pointerEvent.clientX - rect.left - 12
+        : rect.right - pointerEvent.clientX - 12;
+      if (proposed <= COLLAPSE_THRESHOLD) {
+        if (side === "left") void setSidebarCollapsed(true);
+        else setRightPanelMode("collapsed");
+        finish();
+        return;
+      }
+      const oppositeWidth = side === "left"
+        ? rightPanelMode === "collapsed"
+          ? COLLAPSED_ISLAND_WIDTH
+          : rightPanelWidth
+        : sidebarCollapsed
+          ? COLLAPSED_ISLAND_WIDTH
+          : sidebarWidth;
+      const available = rect.width
+        - SHELL_HORIZONTAL_SPACE
+        - oppositeWidth
+        - MIN_MAIN_WIDTH;
+      const width = Math.min(
+        MAX_ISLAND_WIDTH,
+        Math.max(MIN_ISLAND_WIDTH, Math.min(available, proposed)),
+      );
+      if (side === "left") setSidebarWidth(width);
+      else setRightPanelWidth(width);
+    };
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
   // The three floating panels resize by shifting the grid's column
   // sizes directly -- fewer combinatorial CSS classes than one per
   // (sidebar x right-panel) state pairing.
@@ -111,13 +184,20 @@ export default function App() {
   // instead of ballooning on a wide window -- only the middle (chat)
   // column should actually get the extra space.
   const gridTemplateColumns = [
-    sidebarCollapsed ? "56px" : "260px",
+    sidebarCollapsed ? `${COLLAPSED_ISLAND_WIDTH}px` : `${sidebarWidth}px`,
     "1fr",
-    rightPanelMode === "collapsed" ? "56px" : "340px",
+    rightPanelMode === "collapsed"
+      ? `${COLLAPSED_ISLAND_WIDTH}px`
+      : `${rightPanelWidth}px`,
   ].join(" ");
 
   return (
-    <div className="app" style={{ gridTemplateColumns }} data-tauri-drag-region>
+    <div
+      ref={appRef}
+      className="app"
+      style={{ gridTemplateColumns }}
+      data-tauri-drag-region
+    >
       <div className="desktop-title-brand" data-tauri-drag-region>
         <AppLogo className="desktop-title-logo" />
         <span>KiraLM</span>
@@ -147,7 +227,20 @@ export default function App() {
           setView("thread");
         }}
         onOpenSettings={() => openSettings("general")}
+        onOpenModels={() => openSettings("models")}
+        onOpenEvaluations={() => openSettings("evaluations")}
       />
+
+      {!sidebarCollapsed && (
+        <div
+          className="island-resize-handle island-resize-handle-left"
+          style={{ left: 12 + sidebarWidth }}
+          role="separator"
+          aria-label="Resize workspace sidebar"
+          aria-orientation="vertical"
+          onPointerDown={(event) => beginIslandResize("left", event)}
+        />
+      )}
 
       {effectiveView !== "home" && (
         <TopBar
@@ -186,6 +279,16 @@ export default function App() {
         mode={rightPanelMode}
         onModeChange={setRightPanelMode}
       />
+      {rightPanelMode !== "collapsed" && (
+        <div
+          className="island-resize-handle island-resize-handle-right"
+          style={{ right: 12 + rightPanelWidth }}
+          role="separator"
+          aria-label="Resize secondary sidebar"
+          aria-orientation="vertical"
+          onPointerDown={(event) => beginIslandResize("right", event)}
+        />
+      )}
     </div>
   );
 }

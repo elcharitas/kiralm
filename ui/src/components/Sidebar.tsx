@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import {
-  BarChart3,
+  Boxes,
   ChevronRight,
   Filter,
   Folder,
   FolderPlus,
   FoldVertical,
-  KeyRound,
+  FlaskConical,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -49,6 +49,8 @@ export function Sidebar({
   onSelect,
   onNewChat,
   onOpenSettings,
+  onOpenModels,
+  onOpenEvaluations,
   settingsActive,
   collapsed,
   onToggleCollapse,
@@ -71,6 +73,8 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
+  onOpenModels: () => void;
+  onOpenEvaluations: () => void;
   settingsActive: boolean;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -252,6 +256,22 @@ export function Sidebar({
         <div className="sidebar-collapsed-spacer" />
         <button
           type="button"
+          className="sidebar-footer-btn"
+          title="Models"
+          onClick={onOpenModels}
+        >
+          <Boxes size={16} />
+        </button>
+        <button
+          type="button"
+          className="sidebar-footer-btn"
+          title="Evaluations"
+          onClick={onOpenEvaluations}
+        >
+          <FlaskConical size={16} />
+        </button>
+        <button
+          type="button"
           className={settingsActive ? "sidebar-footer-btn sidebar-settings-btn-active" : "sidebar-footer-btn"}
           title="Settings"
           onClick={onOpenSettings}
@@ -406,11 +426,21 @@ export function Sidebar({
           >
             <Settings size={16} />
           </button>
-          <button type="button" className="sidebar-footer-btn" title="Keys">
-            <KeyRound size={16} />
+          <button
+            type="button"
+            className="sidebar-footer-btn"
+            title="Models"
+            onClick={onOpenModels}
+          >
+            <Boxes size={16} />
           </button>
-          <button type="button" className="sidebar-footer-btn" title="Usage">
-            <BarChart3 size={16} />
+          <button
+            type="button"
+            className="sidebar-footer-btn"
+            title="Evaluations"
+            onClick={onOpenEvaluations}
+          >
+            <FlaskConical size={16} />
           </button>
         </div>
         <button

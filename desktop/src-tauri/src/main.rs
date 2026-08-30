@@ -176,7 +176,8 @@ fn main() {
             let window =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("KiraLM")
-                    .inner_size(1100.0, 760.0);
+                    .inner_size(1100.0, 760.0)
+                    .min_inner_size(1040.0, 680.0);
             #[cfg(target_os = "macos")]
             let window = window
                 .title_bar_style(tauri::TitleBarStyle::Overlay)

@@ -38,28 +38,41 @@ const SPLIT_HANDLE_HEIGHT = 22;
 // diff view below, resized by dragging the handle between them.
 function SourceSplit({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [topHeight, setTopHeight] = useState(220);
+  const [topRatio, setTopRatio] = useState(0.5);
   const dragging = useRef(false);
 
   const onDown = (e: PointerEvent<HTMLDivElement>) => {
     dragging.current = true;
+    document.body.classList.add("source-split-resizing");
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onMove = (e: PointerEvent<HTMLDivElement>) => {
     if (!dragging.current || !containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const max = rect.height - SPLIT_MIN_SECTION - SPLIT_HANDLE_HEIGHT;
-    const next = Math.min(max, Math.max(SPLIT_MIN_SECTION, e.clientY - rect.top));
-    setTopHeight(next);
+    const available = rect.height - SPLIT_HANDLE_HEIGHT;
+    const max = available - SPLIT_MIN_SECTION;
+    const next = Math.min(
+      max,
+      Math.max(SPLIT_MIN_SECTION, e.clientY - rect.top),
+    );
+    setTopRatio(next / available);
   };
   const onUp = (e: PointerEvent<HTMLDivElement>) => {
     dragging.current = false;
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    document.body.classList.remove("source-split-resizing");
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
   };
 
   return (
     <div className="git-source-split" ref={containerRef}>
-      <div className="git-source-split-top" style={{ height: topHeight }}>
+      <div
+        className="git-source-split-top"
+        style={{
+          height: `calc(${topRatio * 100}% - ${SPLIT_HANDLE_HEIGHT / 2}px)`,
+        }}
+      >
         {top}
       </div>
       <div
@@ -67,6 +80,7 @@ function SourceSplit({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
+        onPointerCancel={onUp}
       />
       <div className="git-source-split-bottom">{bottom}</div>
     </div>
