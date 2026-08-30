@@ -142,24 +142,52 @@ export interface WorkspacePresetList {
   >;
 }
 
+export type EvalAssertionTarget = "output" | "tool_trace";
+
+export type EvalAssertion =
+  | {
+      type: "exact" | "contains";
+      target: EvalAssertionTarget;
+      expected: string;
+    }
+  | {
+      type: "regex";
+      target: EvalAssertionTarget;
+      pattern: string;
+    }
+  | {
+      type: "json_equals";
+      target: EvalAssertionTarget;
+      expected: unknown;
+    }
+  | {
+      type: "json_shape";
+      target: EvalAssertionTarget;
+      shape: unknown;
+    }
+  | { type: "max_latency_ms"; max: number }
+  | { type: "max_total_tokens"; max: number };
+
+export interface EvalCase {
+  id: string;
+  prompt: string;
+  model?: string | null;
+  settings?: {
+    temperature: number;
+    max_tokens: number;
+    seed: number | null;
+  };
+  timeout_ms?: number | null;
+  assertions: EvalAssertion[];
+  metadata?: Record<string, string>;
+}
+
 export interface EvalSuite {
   id: string;
   name: string;
   description: string;
   default_model: string | null;
-  cases: Array<{
-    id: string;
-    prompt: string;
-    model?: string | null;
-    settings?: {
-      temperature: number;
-      max_tokens: number;
-      seed: number | null;
-    };
-    timeout_ms?: number | null;
-    assertions: Array<Record<string, unknown>>;
-    metadata?: Record<string, string>;
-  }>;
+  cases: EvalCase[];
 }
 
 export interface EvalMetrics {

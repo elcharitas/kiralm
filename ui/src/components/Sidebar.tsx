@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import {
-  BarChart3,
+  Boxes,
   ChevronRight,
   Filter,
   Folder,
   FolderPlus,
   FoldVertical,
-  KeyRound,
+  FlaskConical,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -49,7 +49,9 @@ export function Sidebar({
   onSelect,
   onNewChat,
   onOpenSettings,
-  settingsActive,
+  onOpenModels,
+  onOpenEvaluations,
+  activeSettingsTab,
   collapsed,
   onToggleCollapse,
 }: {
@@ -71,7 +73,9 @@ export function Sidebar({
   onSelect: (id: string) => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
-  settingsActive: boolean;
+  onOpenModels: () => void;
+  onOpenEvaluations: () => void;
+  activeSettingsTab: "general" | "models" | "evaluations" | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }) {
@@ -83,6 +87,7 @@ export function Sidebar({
   const { prompt, confirm, toast, browseFolder } = useDialogs();
   const { settings, save: saveSettings } = useSettings();
   const inProjectContext = activeId != null;
+  const settingsActive = activeSettingsTab !== null;
 
   // Persisted server-side (settings.json) so a collapsed workspace
   // stays collapsed across a reload, not just this tab's lifetime.
@@ -252,11 +257,39 @@ export function Sidebar({
         <div className="sidebar-collapsed-spacer" />
         <button
           type="button"
-          className={settingsActive ? "sidebar-footer-btn sidebar-settings-btn-active" : "sidebar-footer-btn"}
+          className={
+            activeSettingsTab === "general"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
           title="Settings"
           onClick={onOpenSettings}
         >
           <Settings size={16} />
+        </button>
+        <button
+          type="button"
+          className={
+            activeSettingsTab === "models"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
+          title="Models"
+          onClick={onOpenModels}
+        >
+          <Boxes size={16} />
+        </button>
+        <button
+          type="button"
+          className={
+            activeSettingsTab === "evaluations"
+              ? "sidebar-footer-btn sidebar-settings-btn-active"
+              : "sidebar-footer-btn"
+          }
+          title="Evaluations"
+          onClick={onOpenEvaluations}
+        >
+          <FlaskConical size={16} />
         </button>
         <button
           type="button"
@@ -400,17 +433,39 @@ export function Sidebar({
         <div className="sidebar-footer-icons">
           <button
             type="button"
-            className={settingsActive ? "sidebar-footer-btn sidebar-settings-btn-active" : "sidebar-footer-btn"}
+            className={
+              activeSettingsTab === "general"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
             title="Settings"
             onClick={onOpenSettings}
           >
             <Settings size={16} />
           </button>
-          <button type="button" className="sidebar-footer-btn" title="Keys">
-            <KeyRound size={16} />
+          <button
+            type="button"
+            className={
+              activeSettingsTab === "models"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
+            title="Models"
+            onClick={onOpenModels}
+          >
+            <Boxes size={16} />
           </button>
-          <button type="button" className="sidebar-footer-btn" title="Usage">
-            <BarChart3 size={16} />
+          <button
+            type="button"
+            className={
+              activeSettingsTab === "evaluations"
+                ? "sidebar-footer-btn sidebar-settings-btn-active"
+                : "sidebar-footer-btn"
+            }
+            title="Evaluations"
+            onClick={onOpenEvaluations}
+          >
+            <FlaskConical size={16} />
           </button>
         </div>
         <button

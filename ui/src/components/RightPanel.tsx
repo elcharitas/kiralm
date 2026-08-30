@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import type { PointerEvent, ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import {
   Braces,
   ChevronRight,
@@ -38,39 +38,119 @@ const SPLIT_HANDLE_HEIGHT = 22;
 // diff view below, resized by dragging the handle between them.
 function SourceSplit({ top, bottom }: { top: ReactNode; bottom: ReactNode }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [topHeight, setTopHeight] = useState(220);
-  const dragging = useRef(false);
+  const [topRatio, setTopRatio] = useState(0.5);
+  const activePointer = useRef<{
+    id: number;
+    target: HTMLDivElement;
+  } | null>(null);
+
+  const stopDragging = useCallback((pointerId?: number) => {
+    const active = activePointer.current;
+    if (!active || (pointerId !== undefined && active.id !== pointerId)) {
+      return;
+    }
+    activePointer.current = null;
+    document.body.classList.remove("source-split-resizing");
+    if (active.target.hasPointerCapture(active.id)) {
+      active.target.releasePointerCapture(active.id);
+    }
+  }, []);
+
+  const ratioBounds = useCallback(() => {
+    const height = containerRef.current?.getBoundingClientRect().height ?? 0;
+    const available = height - SPLIT_HANDLE_HEIGHT;
+    if (available <= SPLIT_MIN_SECTION * 2) return [0.5, 0.5];
+    const minimum = SPLIT_MIN_SECTION / available;
+    return [minimum, 1 - minimum];
+  }, []);
+
+  useEffect(() => {
+    const onBlur = () => stopDragging();
+    const container = containerRef.current;
+    const observer = new ResizeObserver(() => {
+      const [minimum, maximum] = ratioBounds();
+      setTopRatio((ratio) => clampRatio(ratio, minimum, maximum));
+    });
+    if (container) observer.observe(container);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("blur", onBlur);
+      stopDragging();
+    };
+  }, [ratioBounds, stopDragging]);
 
   const onDown = (e: PointerEvent<HTMLDivElement>) => {
-    dragging.current = true;
+    if (e.button !== 0 || !e.isPrimary) return;
+    e.preventDefault();
+    stopDragging();
+    activePointer.current = { id: e.pointerId, target: e.currentTarget };
+    document.body.classList.add("source-split-resizing");
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onMove = (e: PointerEvent<HTMLDivElement>) => {
-    if (!dragging.current || !containerRef.current) return;
+    if (activePointer.current?.id !== e.pointerId || !containerRef.current) {
+      return;
+    }
     const rect = containerRef.current.getBoundingClientRect();
-    const max = rect.height - SPLIT_MIN_SECTION - SPLIT_HANDLE_HEIGHT;
-    const next = Math.min(max, Math.max(SPLIT_MIN_SECTION, e.clientY - rect.top));
-    setTopHeight(next);
+    const available = rect.height - SPLIT_HANDLE_HEIGHT;
+    if (available <= SPLIT_MIN_SECTION * 2) {
+      setTopRatio(0.5);
+      return;
+    }
+    const [minimum, maximum] = ratioBounds();
+    setTopRatio(clampRatio((e.clientY - rect.top) / available, minimum, maximum));
   };
   const onUp = (e: PointerEvent<HTMLDivElement>) => {
-    dragging.current = false;
-    e.currentTarget.releasePointerCapture(e.pointerId);
+    stopDragging(e.pointerId);
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
+      return;
+    }
+    e.preventDefault();
+    const [minimum, maximum] = ratioBounds();
+    if (e.key === "Home") setTopRatio(minimum);
+    else if (e.key === "End") setTopRatio(maximum);
+    else {
+      const delta = e.key === "ArrowUp" ? -0.05 : 0.05;
+      setTopRatio((ratio) => clampRatio(ratio + delta, minimum, maximum));
+    }
   };
 
   return (
     <div className="git-source-split" ref={containerRef}>
-      <div className="git-source-split-top" style={{ height: topHeight }}>
+      <div
+        className="git-source-split-top"
+        style={{
+          height: `calc(${topRatio * 100}% - ${SPLIT_HANDLE_HEIGHT / 2}px)`,
+        }}
+      >
         {top}
       </div>
       <div
         className="git-source-split-handle"
+        role="separator"
+        tabIndex={0}
+        aria-label="Resize Source sections"
+        aria-orientation="horizontal"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(topRatio * 100)}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
+        onPointerCancel={onUp}
+        onLostPointerCapture={onUp}
+        onKeyDown={onKeyDown}
       />
       <div className="git-source-split-bottom">{bottom}</div>
     </div>
   );
+}
+
+function clampRatio(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
 }
 
 export type RightPanelMode = "split" | "collapsed";
@@ -131,11 +211,17 @@ export function RightPanel({
   session,
   mode,
   onModeChange,
+  gitRefreshVersion,
+  gitBusy,
+  onGitChanged,
 }: {
   status: StatusResponse | null;
   session: ChatSession | null;
   mode: RightPanelMode;
   onModeChange: (mode: RightPanelMode) => void;
+  gitRefreshVersion: number;
+  gitBusy: boolean;
+  onGitChanged: () => Promise<void>;
 }) {
   const turns = session?.messages.filter((m) => m.role === "assistant") ?? [];
   const [turnIdx, setTurnIdx] = useState(0);
@@ -263,7 +349,14 @@ export function RightPanel({
           <PluginsPanel />
         ) : (
           <SourceSplit
-            top={<GitPanel projectId={session?.projectId} />}
+            top={(
+              <GitPanel
+                projectId={session?.projectId}
+                refreshVersion={gitRefreshVersion}
+                gitBusy={gitBusy}
+                onGitChanged={onGitChanged}
+              />
+            )}
             bottom={
               files.length === 0 ? (
                 <p className="settings-hint">No changed files in this turn.</p>

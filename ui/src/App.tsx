@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { RightPanel } from "./components/RightPanel";
@@ -13,9 +20,25 @@ import { useRunningGenerations } from "./hooks/useRunningGenerations";
 import { useGitStatus } from "./hooks/useGitStatus";
 import { useSettings } from "./settings";
 import { useDialogs } from "./components/Dialogs";
+import {
+  COLLAPSED_ISLAND_WIDTH,
+  COLLAPSE_THRESHOLD,
+  DEFAULT_RIGHT_PANEL_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_ISLAND_WIDTH,
+  MIN_ISLAND_WIDTH,
+  MIN_MAIN_WIDTH,
+  SHELL_HORIZONTAL_SPACE,
+  clamp,
+  fitExpandedIslands,
+} from "./islandLayout";
 import type { Project } from "./api";
 
 type View = "thread" | "settings" | "home";
+
+const KEYBOARD_RESIZE_STEP = 16;
+
+type IslandSide = "left" | "right";
 
 export default function App() {
   const [view, setView] = useState<View>("thread");
@@ -24,15 +47,27 @@ export default function App() {
   const [streamingSince, setStreamingSince] = useState<number | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [rightPanelMode, setRightPanelMode] = useState<"split" | "collapsed">("split");
+  const [gitRefreshVersion, setGitRefreshVersion] = useState(0);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [rightPanelWidth, setRightPanelWidth] = useState(
+    DEFAULT_RIGHT_PANEL_WIDTH,
+  );
+  const appRef = useRef<HTMLDivElement>(null);
+  const sidebarWidthRef = useRef(DEFAULT_SIDEBAR_WIDTH);
+  const rightPanelWidthRef = useRef(DEFAULT_RIGHT_PANEL_WIDTH);
+  const islandResizeCleanupRef = useRef<(() => void) | null>(null);
   const { settings, save: saveSettings } = useSettings();
   const { toast } = useDialogs();
   // Persisted server-side (settings.json), not local state -- collapse
   // should survive a reload/relaunch, not just this tab's lifetime.
   const sidebarCollapsed = settings.sidebar_collapsed;
-  const setSidebarCollapsed = (next: boolean) =>
-    saveSettings({ ...settings, sidebar_collapsed: next }).catch((e) =>
-      toast(e instanceof Error ? e.message : String(e), "error"),
-    );
+  const setSidebarCollapsed = useCallback(
+    (next: boolean) =>
+      saveSettings({ ...settings, sidebar_collapsed: next }).catch((e) =>
+        toast(e instanceof Error ? e.message : String(e), "error"),
+      ),
+    [saveSettings, settings, toast],
+  );
   const { status, error, refresh } = useStatus();
   const {
     sessions,
@@ -48,7 +83,20 @@ export default function App() {
   } = useSessions();
   const { projects, createProject, cloneProject, deleteProject, refresh: refreshProjects } = useProjects();
   const runningGenerations = useRunningGenerations();
-  const { status: gitStatus } = useGitStatus(active?.projectId);
+  const { status: gitStatus, refresh: refreshGitStatus } = useGitStatus(
+    active?.projectId,
+  );
+  const refreshGit = useCallback(async () => {
+    await refreshGitStatus();
+    setGitRefreshVersion((version) => version + 1);
+  }, [refreshGitStatus]);
+  const activeProjectBusy = active
+    ? sessions.some(
+        (session) =>
+          session.projectId === active.projectId &&
+          runningGenerations.has(session.id),
+      )
+    : false;
 
   // No chat selected (fresh launch, or the active one got cleared) and
   // not in settings -> the project-home screen, not an empty ChatView.
@@ -102,6 +150,190 @@ export default function App() {
     setView("settings");
   };
 
+  const updateIslandWidth = useCallback(
+    (side: IslandSide, width: number) => {
+      if (side === "left") {
+        sidebarWidthRef.current = width;
+        setSidebarWidth(width);
+      } else {
+        rightPanelWidthRef.current = width;
+        setRightPanelWidth(width);
+      }
+    },
+    [],
+  );
+
+  const collapseIsland = useCallback(
+    (side: IslandSide) => {
+      if (side === "left") void setSidebarCollapsed(true);
+      else setRightPanelMode("collapsed");
+    },
+    [setSidebarCollapsed],
+  );
+
+  const availableIslandWidth = useCallback(
+    (side: IslandSide, containerWidth: number) => {
+      const oppositeWidth = side === "left"
+        ? rightPanelMode === "collapsed"
+          ? COLLAPSED_ISLAND_WIDTH
+          : rightPanelWidthRef.current
+        : sidebarCollapsed
+          ? COLLAPSED_ISLAND_WIDTH
+          : sidebarWidthRef.current;
+      return Math.max(
+        COLLAPSE_THRESHOLD + 1,
+        containerWidth
+          - SHELL_HORIZONTAL_SPACE
+          - oppositeWidth
+          - MIN_MAIN_WIDTH,
+      );
+    },
+    [rightPanelMode, sidebarCollapsed],
+  );
+
+  useEffect(() => {
+    const app = appRef.current;
+    if (!app) return;
+    const reclamp = () => {
+      const [left, right] = fitExpandedIslands(
+        app.getBoundingClientRect().width,
+        sidebarWidthRef.current,
+        rightPanelWidthRef.current,
+        sidebarCollapsed,
+        rightPanelMode === "collapsed",
+      );
+      if (left !== sidebarWidthRef.current) updateIslandWidth("left", left);
+      if (right !== rightPanelWidthRef.current) {
+        updateIslandWidth("right", right);
+      }
+    };
+    const frame = window.requestAnimationFrame(reclamp);
+    const observer = new ResizeObserver(reclamp);
+    observer.observe(app);
+    window.addEventListener("resize", reclamp);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", reclamp);
+    };
+  }, [rightPanelMode, sidebarCollapsed, updateIslandWidth]);
+
+  useEffect(
+    () => () => islandResizeCleanupRef.current?.(),
+    [],
+  );
+
+  const beginIslandResize = (
+    side: IslandSide,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    const app = appRef.current;
+    if (!app || event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    islandResizeCleanupRef.current?.();
+    const rect = app.getBoundingClientRect();
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    const initialWidth = side === "left"
+      ? sidebarWidthRef.current
+      : rightPanelWidthRef.current;
+    let lastWidth = initialWidth;
+    let finished = false;
+    target.setPointerCapture(pointerId);
+    document.body.classList.add("island-resizing");
+
+    const finish = (snap = true) => {
+      if (finished) return;
+      finished = true;
+      document.body.classList.remove("island-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      window.removeEventListener("blur", onBlur);
+      target.removeEventListener("lostpointercapture", onLostCapture);
+      if (target.hasPointerCapture(pointerId)) {
+        target.releasePointerCapture(pointerId);
+      }
+      islandResizeCleanupRef.current = null;
+      if (snap && lastWidth < MIN_ISLAND_WIDTH) {
+        const maximum = availableIslandWidth(side, rect.width);
+        updateIslandWidth(side, Math.min(MIN_ISLAND_WIDTH, maximum));
+      }
+    };
+
+    const move = (pointerEvent: globalThis.PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      const proposed = side === "left"
+        ? pointerEvent.clientX - rect.left - 12
+        : rect.right - pointerEvent.clientX - 12;
+      if (proposed <= COLLAPSE_THRESHOLD) {
+        finish(false);
+        updateIslandWidth(side, initialWidth);
+        collapseIsland(side);
+        return;
+      }
+      lastWidth = clamp(
+        proposed,
+        COLLAPSE_THRESHOLD + 1,
+        Math.min(MAX_ISLAND_WIDTH, availableIslandWidth(side, rect.width)),
+      );
+      updateIslandWidth(side, lastWidth);
+    };
+
+    const onEnd = (pointerEvent: globalThis.PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) finish();
+    };
+    const onBlur = () => finish();
+    const onLostCapture = () => finish();
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    window.addEventListener("blur", onBlur);
+    target.addEventListener("lostpointercapture", onLostCapture);
+    islandResizeCleanupRef.current = finish;
+  };
+
+  const resizeIslandWithKeyboard = (
+    side: IslandSide,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const app = appRef.current;
+    if (!app) return;
+    const shrinkingKey = side === "left" ? "ArrowLeft" : "ArrowRight";
+    const growingKey = side === "left" ? "ArrowRight" : "ArrowLeft";
+    if (event.key === "Home") {
+      event.preventDefault();
+      collapseIsland(side);
+      return;
+    }
+    if (event.key !== shrinkingKey && event.key !== growingKey
+      && event.key !== "End") return;
+    event.preventDefault();
+    const current = side === "left"
+      ? sidebarWidthRef.current
+      : rightPanelWidthRef.current;
+    const maximum = Math.min(
+      MAX_ISLAND_WIDTH,
+      availableIslandWidth(side, app.getBoundingClientRect().width),
+    );
+    if (event.key === "End") {
+      updateIslandWidth(side, maximum);
+      return;
+    }
+    if (event.key === shrinkingKey && current <= MIN_ISLAND_WIDTH) {
+      collapseIsland(side);
+      return;
+    }
+    const delta = event.key === growingKey
+      ? KEYBOARD_RESIZE_STEP
+      : -KEYBOARD_RESIZE_STEP;
+    updateIslandWidth(
+      side,
+      clamp(current + delta, MIN_ISLAND_WIDTH, maximum),
+    );
+  };
+
   // The three floating panels resize by shifting the grid's column
   // sizes directly -- fewer combinatorial CSS classes than one per
   // (sidebar x right-panel) state pairing.
@@ -109,13 +341,20 @@ export default function App() {
   // instead of ballooning on a wide window -- only the middle (chat)
   // column should actually get the extra space.
   const gridTemplateColumns = [
-    sidebarCollapsed ? "56px" : "260px",
+    sidebarCollapsed ? `${COLLAPSED_ISLAND_WIDTH}px` : `${sidebarWidth}px`,
     "1fr",
-    rightPanelMode === "collapsed" ? "56px" : "340px",
+    rightPanelMode === "collapsed"
+      ? `${COLLAPSED_ISLAND_WIDTH}px`
+      : `${rightPanelWidth}px`,
   ].join(" ");
 
   return (
-    <div className="app" style={{ gridTemplateColumns }} data-tauri-drag-region>
+    <div
+      ref={appRef}
+      className="app"
+      style={{ gridTemplateColumns }}
+      data-tauri-drag-region
+    >
       <div className="desktop-title-brand" data-tauri-drag-region>
         <AppLogo className="desktop-title-logo" />
         <span>KiraLM</span>
@@ -135,7 +374,7 @@ export default function App() {
         runningSessionIds={runningGenerations}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-        settingsActive={view === "settings"}
+        activeSettingsTab={view === "settings" ? settingsTab : null}
         onSelect={(id) => {
           setActiveId(id);
           setView("thread");
@@ -145,7 +384,25 @@ export default function App() {
           setView("thread");
         }}
         onOpenSettings={() => openSettings("general")}
+        onOpenModels={() => openSettings("models")}
+        onOpenEvaluations={() => openSettings("evaluations")}
       />
+
+      {!sidebarCollapsed && (
+        <div
+          className="island-resize-handle island-resize-handle-left"
+          style={{ left: 12 + sidebarWidth }}
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize workspace sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_ISLAND_WIDTH}
+          aria-valuemax={MAX_ISLAND_WIDTH}
+          aria-valuenow={Math.round(sidebarWidth)}
+          onPointerDown={(event) => beginIslandResize("left", event)}
+          onKeyDown={(event) => resizeIslandWithKeyboard("left", event)}
+        />
+      )}
 
       {effectiveView !== "home" && (
         <TopBar
@@ -173,6 +430,8 @@ export default function App() {
             onEnsureSession={newChat}
             onStreamingChange={setStreamingId}
             onSetPermission={setPermission}
+            onGitRefresh={refreshGit}
+            gitBusy={activeProjectBusy}
           />
         )}
       </main>
@@ -182,7 +441,25 @@ export default function App() {
         session={effectiveView === "thread" ? active : null}
         mode={rightPanelMode}
         onModeChange={setRightPanelMode}
+        gitRefreshVersion={gitRefreshVersion}
+        gitBusy={activeProjectBusy}
+        onGitChanged={refreshGitStatus}
       />
+      {rightPanelMode !== "collapsed" && (
+        <div
+          className="island-resize-handle island-resize-handle-right"
+          style={{ right: 12 + rightPanelWidth }}
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize secondary sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_ISLAND_WIDTH}
+          aria-valuemax={MAX_ISLAND_WIDTH}
+          aria-valuenow={Math.round(rightPanelWidth)}
+          onPointerDown={(event) => beginIslandResize("right", event)}
+          onKeyDown={(event) => resizeIslandWithKeyboard("right", event)}
+        />
+      )}
     </div>
   );
 }
