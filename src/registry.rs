@@ -1,10 +1,4 @@
-//! In-memory `ModelRegistry`, `ModelState`, name resolution, verdict
-//! computation.
-//!
-//! STUB NOTE: the full `ModelRegistry` (RwLock<HashMap>, load/unload
-//! transitions, RSS tracking) is only lightly used by this worktree's
-//! `serve`/`pull` wiring. The owning agent for engine/residency should
-//! flesh out `ModelState.status` transitions and hook the RSS watcher in.
+//! In-memory model metadata and runtime observations.
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -19,7 +13,15 @@ pub enum ModelStatus {
     Unloaded,
     Loading,
     Loaded,
+    Draining,
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelHealth {
+    Unknown,
+    Healthy,
+    Unhealthy,
 }
 
 /// Where a `ModelState` came from. One registry, one resolve path, both
@@ -30,12 +32,9 @@ pub enum ModelSource {
     Cloud,
 }
 
-/// What `ensure_loaded` hands back to a chat-completion call site: a
-/// local port to proxy to, or a signal to forward to kiralm-web instead.
-/// This is the one place "is this model spawnable locally" is decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A supervised local lease or a route to the cloud gateway.
 pub enum ModelRoute {
-    Local(u16),
+    Local(crate::engine::supervisor::EngineLease),
     Cloud,
 }
 
@@ -60,8 +59,7 @@ impl VerdictTier {
     }
 }
 
-// tok_per_sec_multiplier isn't read yet in this worktree; it's the UI
-// detail-drawer's field to surface.
+// This estimate is reserved for the model detail UI.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Verdict {
@@ -116,10 +114,7 @@ pub fn compute_ratio_verdict(is_moe: bool, model_size_bytes: u64, budget_bytes: 
     }
 }
 
-// architecture/is_moe/expert_count/mlocked round-trip the manifest's
-// shape but this worktree only reads size_bytes/status/hot/verdict/
-// gguf_path so far; the engine flag-selection matrix (engine.rs's
-// STUB NOTE) is what consumes the rest.
+// Architecture metadata feeds the launch-plan optimization layer.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ModelState {
@@ -131,6 +126,7 @@ pub struct ModelState {
     /// From the GGUF's trained context window (manifest sidecar).
     /// `None` for cloud entries, whose catalog doesn't carry it.
     pub context_length: Option<u64>,
+    pub vision_capable: bool,
     pub size_bytes: u64,
     pub hot: bool,
     pub status: ModelStatus,
@@ -138,6 +134,9 @@ pub struct ModelState {
     pub port: Option<u16>,
     pub mlocked: bool,
     pub last_used: Instant,
+    pub active_requests: usize,
+    pub rss_bytes: Option<u64>,
+    pub health: ModelHealth,
     /// `None` for `Cloud` entries: no RAM check ever ran (there's no
     /// local file to weigh against headroom).
     pub verdict: Option<Verdict>,
@@ -163,6 +162,7 @@ impl ModelState {
                 .as_ref()
                 .map(|e| (e.active, e.total)),
             context_length: Some(m.context_length_trained),
+            vision_capable: m.vision_capable,
             size_bytes: m.size_bytes,
             hot,
             status: ModelStatus::Unloaded,
@@ -170,6 +170,9 @@ impl ModelState {
             port: None,
             mlocked: false,
             last_used: Instant::now(),
+            active_requests: 0,
+            rss_bytes: None,
+            health: ModelHealth::Unknown,
             verdict: Some(Verdict {
                 tier: VerdictTier::NotRecommended,
                 reason: "not yet evaluated".to_string(),
@@ -202,6 +205,7 @@ impl ModelState {
             is_moe: false,
             expert_count: None,
             context_length: None,
+            vision_capable: false,
             size_bytes: m.size_bytes.unwrap_or(0),
             hot: false,
             status: ModelStatus::Loaded,
@@ -209,6 +213,9 @@ impl ModelState {
             port: None,
             mlocked: false,
             last_used: Instant::now(),
+            active_requests: 0,
+            rss_bytes: None,
+            health: ModelHealth::Unknown,
             verdict: None,
             source: ModelSource::Cloud,
             cloud_model_id: Some(m.id.clone()),
@@ -233,6 +240,15 @@ impl ModelRegistry {
 
     pub fn get_clone(&self, canonical_id: &str) -> Option<ModelState> {
         self.inner.read().get(canonical_id).cloned()
+    }
+
+    pub fn update(&self, canonical_id: &str, update: impl FnOnce(&mut ModelState)) -> bool {
+        let mut inner = self.inner.write();
+        let Some(state) = inner.get_mut(canonical_id) else {
+            return false;
+        };
+        update(state);
+        true
     }
 
     pub fn list(&self) -> Vec<ModelState> {

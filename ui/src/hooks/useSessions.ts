@@ -10,7 +10,8 @@ function fromDto(c: ChatDto): ChatSession {
     createdAt: c.created_at,
     updatedAt: c.updated_at,
     projectId: c.project_id,
-    permission: c.permission === "full-access" ? "full-access" : "read-only",
+    permission:
+      c.permission === "full-access" ? "full-access" : c.permission === "ask" ? "ask" : "read-only",
     messages: (c.messages as StoredMessage[] | null) ?? [],
   };
 }

@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::kiralm_home;
 
+const SCHEMA_VERSION: u32 = 1;
+
 pub fn state_path() -> PathBuf {
     kiralm_home().join("state.json")
 }
@@ -117,6 +119,12 @@ pub struct Project {
     pub last_active_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePresetBinding {
+    pub preset_id: String,
+    pub preset_revision: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct State {
     pub models: HashMap<String, ModelEntry>,
@@ -125,6 +133,8 @@ pub struct State {
     pub tunnel: Option<TunnelState>,
     #[serde(default)]
     pub projects: HashMap<String, Project>,
+    #[serde(default)]
+    pub workspace_preset_bindings: HashMap<String, WorkspacePresetBinding>,
 }
 
 impl State {
@@ -133,11 +143,7 @@ impl State {
     }
 
     pub fn load_from(path: &Path) -> anyhow::Result<State> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Ok(serde_json::from_str(&s)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
-            Err(e) => Err(e.into()),
-        }
+        Ok(crate::storage::load_versioned(path, SCHEMA_VERSION, migrate)?.unwrap_or_default())
     }
 
     /// Atomic rewrite: write to a tmp file in the same dir, then rename
@@ -147,12 +153,13 @@ impl State {
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        crate::storage::save_versioned(path, SCHEMA_VERSION, self)
+    }
+}
+
+fn migrate(version: u32, value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    match version {
+        0 => Ok(value),
+        _ => anyhow::bail!("no state migration from schema version {version}"),
     }
 }

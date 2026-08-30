@@ -1,11 +1,23 @@
-import { useEffect, useState } from "react";
-import { api, type AppSettings, type StatusResponse, type TunnelStatus } from "../api";
+import { useCallback, useEffect, useState } from "react";
+import {
+  api,
+  type AppSettings,
+  type DiagnosticsResponse,
+  type PermissionMode,
+  type Project,
+  type StatusResponse,
+  type TunnelStatus,
+  type WorkspacePreset,
+  type WorkspacePresetInput,
+} from "../api";
 import { ModelsView } from "./ModelsView";
+import { EvaluationsView } from "./EvaluationsView";
 import { useDialogs } from "../components/Dialogs";
 import { Select } from "../components/Select";
 import { useSettings } from "../settings";
+import { formatBytes } from "../format";
 
-export type SettingsTab = "general" | "models";
+export type SettingsTab = "general" | "models" | "evaluations";
 
 // Local Font Access API -- not in lib.dom.d.ts yet. KiraLM only runs
 // as a Tauri desktop webview, never a public site, so there's no
@@ -58,8 +70,30 @@ export function SettingsView({
           <button type="button" className="settings-tab settings-tab-active">
             Models
           </button>
+          <button type="button" className="settings-tab" onClick={() => onTabChange("evaluations")}>
+            Evaluations
+          </button>
         </div>
         <ModelsView status={status} refresh={refresh} />
+      </div>
+    );
+  }
+
+  if (tab === "evaluations") {
+    return (
+      <div className="settings-wrap">
+        <div className="settings-tabs">
+          <button type="button" className="settings-tab" onClick={() => onTabChange("general")}>
+            General
+          </button>
+          <button type="button" className="settings-tab" onClick={() => onTabChange("models")}>
+            Models
+          </button>
+          <button type="button" className="settings-tab settings-tab-active">
+            Evaluations
+          </button>
+        </div>
+        <EvaluationsView status={status} />
       </div>
     );
   }
@@ -73,14 +107,114 @@ export function SettingsView({
         <button type="button" className="settings-tab" onClick={() => onTabChange("models")}>
           Models
         </button>
+        <button type="button" className="settings-tab" onClick={() => onTabChange("evaluations")}>
+          Evaluations
+        </button>
       </div>
 
       <div className="settings-scroll">
         <GeneralSettingsForm status={status} />
+        <WorkspacePresetsSection status={status} />
+        <DiagnosticsSection />
         <RemoteAccessSection />
         <DataSection />
       </div>
     </div>
+  );
+}
+
+function DiagnosticsSection() {
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setDiagnostics(await api.diagnostics());
+      setError(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const report = diagnostics?.platform;
+  const health = diagnostics?.telemetry.health;
+
+  return (
+    <section className="settings-section">
+      <div className="diagnostics-heading">
+        <div>
+          <h3>Diagnostics and observability</h3>
+          <p className="settings-hint">
+            Local readiness checks, bounded metrics, and redacted recent errors.
+          </p>
+        </div>
+        <button type="button" className="btn" disabled={loading} onClick={() => void load()}>
+          {loading ? "Checking..." : "Run checks"}
+        </button>
+      </div>
+      {error && <p className="diagnostics-error">{error}</p>}
+      {report && health && (
+        <>
+          <div className="diagnostics-summary">
+            <span>
+              <strong>{health.status}</strong>
+              {health.ready ? " · ready" : " · not ready"}
+            </span>
+            <span>
+              {report.hardware.platform} · {report.hardware.architecture}
+            </span>
+            <span>{report.hardware.logical_cpus} logical CPUs</span>
+            <span>{formatBytes(report.hardware.available_memory_bytes)} RAM available</span>
+          </div>
+          <div className="diagnostics-grid">
+            <div>
+              <h4>Managed paths</h4>
+              {report.paths.map((path) => (
+                <div className="diagnostics-row" key={path.kind}>
+                  <span>{path.kind}</span>
+                  <span className="mono truncate" title={path.path}>{path.path}</span>
+                  <span className={path.writable ? "diagnostics-ok" : "diagnostics-bad"}>
+                    {path.writable ? formatBytes(path.available_bytes) : "not writable"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <h4>Executables</h4>
+              {report.executables.map((executable) => (
+                <div className="diagnostics-row" key={executable.name}>
+                  <span className="mono truncate" title={executable.name}>{executable.name}</span>
+                  <span className={executable.found ? "diagnostics-ok" : "diagnostics-bad"}>
+                    {executable.found ? "found" : executable.required ? "required" : "optional"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {report.findings.length > 0 && (
+            <div className="diagnostics-findings">
+              {report.findings.map((finding, index) => (
+                <div className={`diagnostics-finding diagnostics-${finding.severity}`} key={`${finding.code}:${index}`}>
+                  <strong>{finding.summary}</strong>
+                  <span>{finding.action}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="settings-hint diagnostics-stats">
+            {diagnostics.telemetry.stats.series} metric series · {diagnostics.telemetry.stats.total_errors} recent errors · {diagnostics.telemetry.stats.dropped_series} dropped series
+          </p>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -94,6 +228,10 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
 
   const [ramHeadroom, setRamHeadroom] = useState("");
   const [modelDir, setModelDir] = useState("");
+  const [cacheQuota, setCacheQuota] = useState("50");
+  const [optimizationProfile, setOptimizationProfile] = useState<
+    StatusResponse["config"]["optimization_profile"]
+  >("balanced");
   const [configTouched, setConfigTouched] = useState(false);
   const [notifPermission, setNotifPermission] = useState<NotificationPermission | "unsupported">(
     typeof Notification === "undefined" ? "unsupported" : Notification.permission,
@@ -105,20 +243,30 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
     if (configTouched || !status) return;
     setRamHeadroom(status.config.ram_headroom_gb != null ? String(status.config.ram_headroom_gb) : "");
     setModelDir(status.config.model_dir);
+    setCacheQuota(String(status.config.cache_quota_gb));
+    setOptimizationProfile(status.config.optimization_profile);
   }, [status, configTouched]);
 
   // Writes config.toml on blur, not every keystroke -- there's no Save
   // button, but a text field still needs somewhere to land mid-edit.
-  const saveConfig = async () => {
-    if (!configTouched) return;
+  const saveConfig = async (
+    profile = optimizationProfile,
+    force = false,
+  ) => {
+    if (!configTouched && !force) return;
     const trimmed = ramHeadroom.trim();
     const gb = trimmed === "" ? null : Number(trimmed);
     if (gb !== null && !Number.isFinite(gb)) {
       toast("RAM headroom must be a number", "error");
       return;
     }
+    const quota = Number(cacheQuota);
+    if (!Number.isFinite(quota) || quota < 1) {
+      toast("Cache quota must be at least 1GB", "error");
+      return;
+    }
     try {
-      await api.updateConfig(gb, modelDir);
+      await api.updateConfig(gb, modelDir, quota, profile);
       setConfigTouched(false);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
@@ -165,7 +313,38 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
               setRamHeadroom(e.target.value);
               setConfigTouched(true);
             }}
-            onBlur={saveConfig}
+            onBlur={() => void saveConfig()}
+          />
+        </div>
+        <div className="settings-field">
+          <label htmlFor="cache-quota">Artifact cache quota (GB)</label>
+          <input
+            id="cache-quota"
+            className="settings-input"
+            value={cacheQuota}
+            onChange={(e) => {
+              setCacheQuota(e.target.value);
+              setConfigTouched(true);
+            }}
+            onBlur={() => void saveConfig()}
+          />
+        </div>
+        <div className="settings-field">
+          <label>Runtime optimization</label>
+          <Select
+            triggerClassName="settings-select"
+            value={optimizationProfile}
+            onChange={(value) => {
+              const profile = value as StatusResponse["config"]["optimization_profile"];
+              setOptimizationProfile(profile);
+              void saveConfig(profile, true);
+            }}
+            options={[
+              { value: "balanced", label: "Balanced" },
+              { value: "throughput", label: "Throughput" },
+              { value: "latency", label: "Low latency" },
+              { value: "memory", label: "Memory saver" },
+            ]}
           />
         </div>
         <div className="settings-field">
@@ -178,7 +357,7 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
               setModelDir(e.target.value);
               setConfigTouched(true);
             }}
-            onBlur={saveConfig}
+            onBlur={() => void saveConfig()}
           />
         </div>
       </section>
@@ -188,15 +367,19 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
         <p className="settings-hint">
           Saved to <code>~/.kiralm/settings.json</code> as you change them.
         </p>
-        <label className="settings-toggle">
-          <span>Start new chats with full access instead of read-only</span>
-          <input
-            type="checkbox"
-            className="switch-input"
-            checked={settings.default_permission === "full-access"}
-            onChange={(e) => patchSettings({ default_permission: e.target.checked ? "full-access" : "read-only" })}
+        <div className="settings-field">
+          <label>Default tool access</label>
+          <Select
+            triggerClassName="settings-select"
+            value={settings.default_permission}
+            onChange={(value) => patchSettings({ default_permission: value as AppSettings["default_permission"] })}
+            options={[
+              { value: "read-only", label: "Read only" },
+              { value: "ask", label: "Ask before changes" },
+              { value: "full-access", label: "Full access" },
+            ]}
           />
-        </label>
+        </div>
         <label className="settings-toggle">
           <span>Enter sends the message (unchecked: Enter for a newline, Ctrl/Cmd+Enter sends)</span>
           <input
@@ -278,6 +461,352 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
         </div>
       </section>
     </>
+  );
+}
+
+function emptyPreset(): WorkspacePresetInput {
+  return {
+    name: "",
+    project_id: null,
+    preferred_model: null,
+    permission: "read-only",
+    optimization_profile: "balanced",
+    knowledge_roots: [],
+    hot_model_ids: [],
+    enabled_mcp_servers: [],
+    instruction_text: "",
+  };
+}
+
+function splitValues(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function WorkspacePresetsSection({ status }: { status: StatusResponse | null }) {
+  const { confirm, toast } = useDialogs();
+  const [presets, setPresets] = useState<WorkspacePreset[]>([]);
+  const [storeRevision, setStoreRevision] = useState(0);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [editing, setEditing] = useState<WorkspacePreset | null>(null);
+  const [draft, setDraft] = useState<WorkspacePresetInput>(emptyPreset);
+  const [busy, setBusy] = useState(false);
+
+  const reload = async () => {
+    const [presetResult, projectResult] = await Promise.all([
+      api.listWorkspacePresets(),
+      api.listProjects(),
+    ]);
+    setPresets(presetResult.presets);
+    setStoreRevision(presetResult.revision);
+    setProjects(projectResult.projects);
+  };
+
+  useEffect(() => {
+    reload().catch(() => {});
+  }, []);
+
+  const patchDraft = (patch: Partial<WorkspacePresetInput>) => {
+    setDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const reset = () => {
+    setEditing(null);
+    setDraft(emptyPreset());
+  };
+
+  const savePreset = async () => {
+    setBusy(true);
+    try {
+      if (editing) {
+        await api.updateWorkspacePreset({ ...editing, ...draft });
+        toast("Workspace preset updated", "success");
+      } else {
+        await api.createWorkspacePreset(draft);
+        toast("Workspace preset created", "success");
+      }
+      reset();
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removePreset = async (preset: WorkspacePreset) => {
+    const approved = await confirm({
+      title: "Delete workspace preset",
+      message: `Delete “${preset.name}”?`,
+      confirmLabel: "Delete preset",
+      danger: true,
+    });
+    if (!approved) return;
+    try {
+      await api.deleteWorkspacePreset(preset.id, preset.revision);
+      if (editing?.id === preset.id) reset();
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const duplicatePreset = async (preset: WorkspacePreset) => {
+    try {
+      await api.duplicateWorkspacePreset(
+        preset.id,
+        preset.revision,
+        `${preset.name} copy`,
+      );
+      await reload();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const exportPresets = async () => {
+    try {
+      const body = await api.exportWorkspacePresets();
+      const url = URL.createObjectURL(
+        new Blob([body], { type: "application/json" }),
+      );
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "kiralm-workspace-presets.json";
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  const importPresets = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      await api.importWorkspacePresets(
+        await file.text(),
+        "merge",
+        storeRevision,
+      );
+      await reload();
+      toast("Workspace presets imported", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
+  return (
+    <section className="settings-section">
+      <h3>Workspace presets</h3>
+      <p className="settings-hint">
+        Reuse model, access, optimization, knowledge, MCP, and instruction
+        settings across workspaces.
+      </p>
+      {presets.length > 0 && (
+        <div className="preset-list">
+          {presets.map((preset) => (
+            <div className="preset-row" key={preset.id}>
+              <div>
+                <strong>{preset.name}</strong>
+                <span>
+                  {projects.find((project) => project.id === preset.project_id)
+                    ?.name ?? "Any workspace"}
+                </span>
+              </div>
+              <div className="settings-actions">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setEditing(preset);
+                    setDraft({
+                      name: preset.name,
+                      project_id: preset.project_id,
+                      preferred_model: preset.preferred_model,
+                      permission: preset.permission,
+                      optimization_profile: preset.optimization_profile,
+                      knowledge_roots: preset.knowledge_roots,
+                      hot_model_ids: preset.hot_model_ids,
+                      enabled_mcp_servers: preset.enabled_mcp_servers,
+                      instruction_text: preset.instruction_text,
+                    });
+                  }}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void duplicatePreset(preset)}
+                >
+                  Duplicate
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger-solid"
+                  onClick={() => void removePreset(preset)}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="settings-field">
+        <label htmlFor="preset-name">Name</label>
+        <input
+          id="preset-name"
+          className="settings-input"
+          value={draft.name}
+          onChange={(event) => patchDraft({ name: event.target.value })}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Workspace</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.project_id ?? ""}
+          onChange={(value) => patchDraft({ project_id: value || null })}
+          options={[
+            { value: "", label: "Any workspace" },
+            ...projects.map((project) => ({
+              value: project.id,
+              label: project.name,
+            })),
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Preferred model</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.preferred_model ?? ""}
+          onChange={(value) => patchDraft({ preferred_model: value || null })}
+          options={[
+            { value: "", label: "Automatic" },
+            ...(status?.models ?? []).map((model) => ({
+              value: model.id,
+              label: model.id,
+            })),
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Tool access</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.permission}
+          onChange={(value) =>
+            patchDraft({ permission: value as PermissionMode })
+          }
+          options={[
+            { value: "read-only", label: "Read only" },
+            { value: "ask", label: "Ask before changes" },
+            { value: "full-access", label: "Full access" },
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label>Runtime optimization</label>
+        <Select
+          triggerClassName="settings-select"
+          value={draft.optimization_profile}
+          onChange={(value) =>
+            patchDraft({
+              optimization_profile:
+                value as WorkspacePresetInput["optimization_profile"],
+            })
+          }
+          options={[
+            { value: "balanced", label: "Balanced" },
+            { value: "throughput", label: "Throughput" },
+            { value: "latency", label: "Low latency" },
+            { value: "memory", label: "Memory saver" },
+          ]}
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-roots">Extra knowledge roots</label>
+        <input
+          id="preset-roots"
+          className="settings-input mono"
+          placeholder="Comma-separated absolute paths"
+          value={draft.knowledge_roots.join(", ")}
+          onChange={(event) =>
+            patchDraft({ knowledge_roots: splitValues(event.target.value) })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-hot-models">Hot model IDs</label>
+        <input
+          id="preset-hot-models"
+          className="settings-input mono"
+          placeholder="Comma-separated model IDs"
+          value={draft.hot_model_ids.join(", ")}
+          onChange={(event) =>
+            patchDraft({ hot_model_ids: splitValues(event.target.value) })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-mcp">Enabled MCP servers</label>
+        <input
+          id="preset-mcp"
+          className="settings-input mono"
+          placeholder="Comma-separated server names"
+          value={draft.enabled_mcp_servers.join(", ")}
+          onChange={(event) =>
+            patchDraft({
+              enabled_mcp_servers: splitValues(event.target.value),
+            })
+          }
+        />
+      </div>
+      <div className="settings-field">
+        <label htmlFor="preset-instructions">Workspace instructions</label>
+        <textarea
+          id="preset-instructions"
+          className="settings-input"
+          rows={4}
+          value={draft.instruction_text}
+          onChange={(event) =>
+            patchDraft({ instruction_text: event.target.value })
+          }
+        />
+      </div>
+      <div className="settings-actions">
+        <button
+          type="button"
+          className="btn btn-accent"
+          disabled={busy || !draft.name.trim()}
+          onClick={() => void savePreset()}
+        >
+          {editing ? "Update preset" : "Create preset"}
+        </button>
+        {editing && (
+          <button type="button" className="btn" onClick={reset}>
+            Cancel edit
+          </button>
+        )}
+        <button type="button" className="btn" onClick={exportPresets}>
+          Export
+        </button>
+        <label className="btn preset-import">
+          Import
+          <input
+            type="file"
+            accept="application/json,.json"
+            onChange={(event) =>
+              void importPresets(event.target.files?.[0])
+            }
+          />
+        </label>
+      </div>
+    </section>
   );
 }
 

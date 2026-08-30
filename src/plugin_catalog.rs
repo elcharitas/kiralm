@@ -230,6 +230,7 @@ fn ensure_default_dsh_profile() -> Result<(), String> {
 /// Outcome of dispatching an install by `source_kind`, carrying enough
 /// per-kind detail for the API layer to wire live mcp connections and
 /// serialize a real response, not just an ack.
+#[allow(clippy::large_enum_variant)]
 pub enum CatalogInstallOutcome {
     Marketplace(marketplace::InstallOutcome),
     AgentPlugin(agent_plugin::InstallResult),

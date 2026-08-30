@@ -15,6 +15,7 @@ export interface ModelStatus {
   size_bytes: number;
   quant: string;
   hot: boolean;
+  vision_capable: boolean;
   context_length: number | null;
   loaded: boolean;
   rss_bytes: number | null;
@@ -33,6 +34,8 @@ export interface StatusResponse {
   config: {
     ram_headroom_gb: number;
     model_dir: string;
+    cache_quota_gb: number;
+    optimization_profile: "balanced" | "throughput" | "latency" | "memory";
   };
 }
 
@@ -70,7 +73,7 @@ export interface CloudStatus {
 }
 
 export interface AppSettings {
-  default_permission: "read-only" | "full-access";
+  default_permission: PermissionMode;
   send_on_enter: boolean;
   notify_on_finish: boolean;
   default_hot_on_pull: boolean;
@@ -85,6 +88,182 @@ export interface AppSettings {
   auto_compact: boolean;
 }
 
+export interface KnowledgeStatus {
+  snapshot: { files: number; chunks: number; content_bytes: number };
+  running: boolean;
+  recovered_corrupt_metadata: string | null;
+}
+
+export interface KnowledgeHit {
+  score: number;
+  content: string;
+  source: {
+    root: string;
+    path: string;
+    start_line: number;
+    end_line: number;
+  };
+}
+
+export interface AttachmentDescriptor {
+  id: string;
+  sha256: string;
+  media_type: string;
+  kind: "image" | "document" | "text";
+  size_bytes: number;
+  filename: string;
+}
+
+export interface WorkspacePresetInput {
+  name: string;
+  project_id: string | null;
+  preferred_model: string | null;
+  permission: PermissionMode;
+  optimization_profile: StatusResponse["config"]["optimization_profile"];
+  knowledge_roots: string[];
+  hot_model_ids: string[];
+  enabled_mcp_servers: string[];
+  instruction_text: string;
+}
+
+export interface WorkspacePreset extends WorkspacePresetInput {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  revision: number;
+}
+
+export interface WorkspacePresetList {
+  revision: number;
+  presets: WorkspacePreset[];
+  bindings: Record<
+    string,
+    { preset_id: string; preset_revision: number }
+  >;
+}
+
+export interface EvalSuite {
+  id: string;
+  name: string;
+  description: string;
+  default_model: string | null;
+  cases: Array<{
+    id: string;
+    prompt: string;
+    model?: string | null;
+    settings?: {
+      temperature: number;
+      max_tokens: number;
+      seed: number | null;
+    };
+    timeout_ms?: number | null;
+    assertions: Array<Record<string, unknown>>;
+    metadata?: Record<string, string>;
+  }>;
+}
+
+export interface EvalMetrics {
+  total_cases: number;
+  passed: number;
+  failed: number;
+  timed_out: number;
+  cancelled: number;
+  errors: number;
+  pass_rate: number;
+  mean_latency_ms: number;
+  p95_latency_ms: number;
+  total_tokens: number;
+  mean_total_tokens: number;
+}
+
+export interface EvalRun {
+  id: string;
+  suite_id: string;
+  started_at: string;
+  finished_at: string;
+  metrics: EvalMetrics;
+  results: Array<{
+    case_id: string;
+    model: string;
+    status: "passed" | "failed" | "timed_out" | "cancelled" | "error";
+    latency_ms: number;
+    output: string | null;
+    error: string | null;
+  }>;
+  baseline: null | {
+    baseline_run_id: string;
+    regressions: Array<{ metric: string; threshold: number }>;
+  };
+}
+
+export interface HealthSummary {
+  status: "healthy" | "degraded" | "unhealthy";
+  ready: boolean;
+  components: Array<{
+    component: string;
+    status: "healthy" | "degraded" | "unhealthy";
+    ready: boolean;
+    required: boolean;
+    detail: string | null;
+  }>;
+}
+
+export interface DiagnosticReport {
+  schema_version: number;
+  hardware: {
+    platform: "macos" | "linux" | "windows" | "other";
+    architecture: string;
+    logical_cpus: number;
+    physical_cpus: number | null;
+    total_memory_bytes: number;
+    available_memory_bytes: number;
+    supports_unix_sockets: boolean;
+    supports_page_locking: boolean;
+    accelerator_hint: string;
+  };
+  listener: string | null;
+  paths: Array<{
+    kind: "data" | "cache" | "runtime";
+    path: string;
+    source: string;
+    writable: boolean;
+    available_bytes: number | null;
+  }>;
+  executables: Array<{
+    name: string;
+    required: boolean;
+    found: boolean;
+    path: string | null;
+    version_excerpt: string | null;
+    probe_exit_code: number | null;
+  }>;
+  findings: Array<{
+    severity: "info" | "warning" | "error";
+    code: string;
+    summary: string;
+    action: string;
+  }>;
+}
+
+export interface DiagnosticsResponse {
+  platform: DiagnosticReport;
+  telemetry: {
+    health: HealthSummary;
+    recent_errors: Array<{
+      sequence: number;
+      subsystem: string;
+      operation: string;
+      correlation_id: string | null;
+      message: string;
+    }>;
+    stats: {
+      series: number;
+      dropped_series: number;
+      total_errors: number;
+    };
+  };
+}
+
 // `~/.kiralm/chats.json`'s wire shape (daemon-persisted chat history,
 // see sessions.ts's ChatSession for the app-side camelCase shape).
 // `messages` is opaque here -- the daemon stores/returns it verbatim.
@@ -97,6 +276,28 @@ export interface ChatDto {
   permission: string;
   messages: unknown;
 }
+
+export type PermissionMode = "read-only" | "ask" | "full-access";
+
+export interface PendingApproval {
+  id: string;
+  chat_id: string;
+  tool_name: string;
+  risk:
+    | "read"
+    | "write"
+    | "process_execution"
+    | "network_access"
+    | "git_mutation"
+    | "destructive_filesystem"
+    | "external_mcp";
+  target: string;
+  arguments: unknown;
+  requested_at: string;
+  expires_at: string;
+}
+
+export type ApprovalDecision = "allow_once" | "allow_for_chat" | "deny";
 
 export interface TunnelStatus {
   enabled: boolean;
@@ -139,6 +340,38 @@ export interface GitCommitResult {
   hash: string;
   short_hash: string;
   summary: string;
+}
+
+export interface GitWorkingTreeEntry {
+  path: string;
+  original_path: string | null;
+  index_status: string | null;
+  worktree_status: string | null;
+  conflicted: boolean;
+}
+
+export interface GitRepositoryState {
+  repository: string;
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+  conflicted: boolean;
+  files: GitWorkingTreeEntry[];
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+  commit: string;
+  upstream: string | null;
+  tracking: string | null;
+}
+
+export interface GitDiffPreview {
+  scope: "all" | "staged" | "unstaged";
+  text: string;
+  bytes: number;
+  truncated: boolean;
 }
 
 // `~/.kiralm/skills/<name>/SKILL.md`'s wire shape -- global, no
@@ -316,6 +549,11 @@ export function subscribeSse(
 export const api = {
   status: () => fetch("/api/status").then((r) => asJson<StatusResponse>(r)),
 
+  diagnostics: () =>
+    fetch("/api/diagnostics").then((r) => asJson<DiagnosticsResponse>(r)),
+
+  health: () => fetch("/health").then((r) => asJson<HealthSummary>(r)),
+
   model: (id: string) =>
     fetch(`/api/models/${encodeURIComponent(id)}`).then((r) => asJson<ModelDetail>(r)),
 
@@ -352,13 +590,22 @@ export const api = {
   cloudLoginProgressUrl: (deviceCode: string) =>
     `/api/cloud/login/progress?device_code=${encodeURIComponent(deviceCode)}`,
 
-  // Writes ram_headroom_gb/model_dir into config.toml. Takes effect on
-  // next daemon restart, not live -- config.rs loads it once at startup.
-  updateConfig: (ramHeadroomGb: number | null, modelDir: string) =>
+  // Writes runtime keys into config.toml for the next restart.
+  updateConfig: (
+    ramHeadroomGb: number | null,
+    modelDir: string,
+    cacheQuotaGb: number,
+    optimizationProfile: StatusResponse["config"]["optimization_profile"],
+  ) =>
     fetch("/api/config", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ram_headroom_gb: ramHeadroomGb, model_dir: modelDir }),
+      body: JSON.stringify({
+        ram_headroom_gb: ramHeadroomGb,
+        model_dir: modelDir,
+        cache_quota_gb: cacheQuotaGb,
+        optimization_profile: optimizationProfile,
+      }),
     }).then((r) => asJson<{ restart_required: boolean }>(r)),
 
   tunnelStatus: () => fetch("/api/tunnel/status").then((r) => asJson<TunnelStatus>(r)),
@@ -376,6 +623,195 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(settings),
     }).then((r) => asJson<AppSettings>(r)),
+
+  knowledgeStatus: () =>
+    fetch("/api/knowledge").then((r) => asJson<KnowledgeStatus>(r)),
+
+  startKnowledgeIndex: () =>
+    fetch("/api/knowledge/index", { method: "POST" }).then((r) =>
+      asJson<{ started: boolean }>(r),
+    ),
+
+  cancelKnowledgeIndex: () =>
+    fetch("/api/knowledge/index", { method: "DELETE" }).then((r) =>
+      asJson<void>(r),
+    ),
+
+  listEvalSuites: () =>
+    fetch("/api/evals/suites").then((r) =>
+      asJson<{ suites: EvalSuite[] }>(r),
+    ),
+
+  saveEvalSuite: (suite: EvalSuite) =>
+    fetch(`/api/evals/suites/${encodeURIComponent(suite.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(suite),
+    }).then((r) => asJson<EvalSuite>(r)),
+
+  listEvalRuns: (suiteId: string) =>
+    fetch(`/api/evals/suites/${encodeURIComponent(suiteId)}/runs`).then(
+      (r) => asJson<{ runs: EvalRun[] }>(r),
+    ),
+
+  startEvalRun: (
+    suiteId: string,
+    baselineRunId: string | null,
+  ) =>
+    fetch("/api/evals/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        suite_id: suiteId,
+        baseline_run_id: baselineRunId,
+        max_concurrency: 2,
+        timeout_ms: 120000,
+        thresholds: {
+          max_pass_rate_drop: 0,
+          max_p95_latency_increase_percent: 20,
+          max_mean_tokens_increase_percent: 20,
+        },
+      }),
+    }).then((r) => asJson<{ run_id: string; running: boolean }>(r)),
+
+  evalJob: (runId: string) =>
+    fetch(`/api/evals/jobs/${encodeURIComponent(runId)}`).then((r) =>
+      asJson<{ run_id: string; running: boolean }>(r),
+    ),
+
+  cancelEvalRun: (runId: string) =>
+    fetch(`/api/evals/jobs/${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    }).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+    }),
+
+  exportEvalRun: (suiteId: string, runId: string, format: "json" | "jsonl") =>
+    fetch(
+      `/api/evals/suites/${encodeURIComponent(suiteId)}/runs/${encodeURIComponent(runId)}/export?format=${format}`,
+    ).then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+      return r.text();
+    }),
+
+  uploadAttachment: (
+    reference: string,
+    filename: string,
+    dataUrl: string,
+  ) =>
+    fetch("/api/attachments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reference, filename, data_url: dataUrl }),
+    }).then((r) => asJson<AttachmentDescriptor>(r)),
+
+  attachmentUrl: (id: string) =>
+    `/api/attachments/${encodeURIComponent(id)}`,
+
+  releaseAttachmentReference: (reference: string) =>
+    fetch(
+      `/api/attachment-references/${encodeURIComponent(reference)}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<void>(r)),
+
+  releaseOneAttachment: (id: string, reference: string) =>
+    fetch(
+      `/api/attachments/${encodeURIComponent(id)}/references/${encodeURIComponent(reference)}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<void>(r)),
+
+  searchKnowledge: (projectId: string, query: string, limit = 8) =>
+    fetch("/api/knowledge/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, query, limit }),
+    }).then((r) => asJson<{ hits: KnowledgeHit[] }>(r)),
+
+  listWorkspacePresets: () =>
+    fetch("/api/workspace-presets").then((r) =>
+      asJson<WorkspacePresetList>(r),
+    ),
+
+  createWorkspacePreset: (preset: WorkspacePresetInput) =>
+    fetch("/api/workspace-presets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(preset),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  updateWorkspacePreset: (preset: WorkspacePreset) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(preset.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expected_revision: preset.revision,
+        preset: {
+          name: preset.name,
+          project_id: preset.project_id,
+          preferred_model: preset.preferred_model,
+          permission: preset.permission,
+          optimization_profile: preset.optimization_profile,
+          knowledge_roots: preset.knowledge_roots,
+          hot_model_ids: preset.hot_model_ids,
+          enabled_mcp_servers: preset.enabled_mcp_servers,
+          instruction_text: preset.instruction_text,
+        },
+      }),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  deleteWorkspacePreset: (id: string, revision: number) =>
+    fetch(
+      `/api/workspace-presets/${encodeURIComponent(id)}?revision=${revision}`,
+      { method: "DELETE" },
+    ).then((r) => asJson<WorkspacePreset>(r)),
+
+  duplicateWorkspacePreset: (
+    id: string,
+    revision: number,
+    name: string,
+  ) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(id)}/duplicate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: revision, name }),
+    }).then((r) => asJson<WorkspacePreset>(r)),
+
+  applyWorkspacePreset: (
+    id: string,
+    revision: number,
+    projectId: string,
+  ) =>
+    fetch(`/api/workspace-presets/${encodeURIComponent(id)}/apply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project_id: projectId,
+        expected_revision: revision,
+      }),
+    }).then((r) =>
+      asJson<{ preset: WorkspacePreset; project_id: string }>(r),
+    ),
+
+  exportWorkspacePresets: () =>
+    fetch("/api/workspace-presets/export").then(async (r) => {
+      if (!r.ok) await asJson<never>(r);
+      return r.text();
+    }),
+
+  importWorkspacePresets: (
+    json: string,
+    mode: "merge" | "replace",
+    expectedStoreRevision: number,
+  ) =>
+    fetch("/api/workspace-presets/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        json,
+        mode,
+        expected_store_revision: expectedStoreRevision,
+      }),
+    }).then((r) => asJson<{ presets: WorkspacePreset[] }>(r)),
 
   listProjects: () => fetch("/api/projects").then((r) => asJson<{ projects: Project[] }>(r)),
 
@@ -452,6 +888,80 @@ export const api = {
       body: JSON.stringify({ message }),
     }).then((r) => asJson<GitCommitResult>(r)),
 
+  gitWorkflowState: (projectId: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/state`,
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowDiff: (
+    projectId: string,
+    scope: GitDiffPreview["scope"] = "all",
+    paths: string[] = [],
+  ) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/diff`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ scope, paths }),
+      },
+    ).then((r) => asJson<GitDiffPreview>(r)),
+
+  gitWorkflowBranches: (projectId: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches`,
+    ).then((r) => asJson<{ branches: GitBranchInfo[] }>(r)),
+
+  gitWorkflowCreateBranch: (projectId: string, name: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      },
+    ).then((r) => asJson<GitBranchInfo>(r)),
+
+  gitWorkflowSwitchBranch: (projectId: string, name: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/branches/switch`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      },
+    ).then((r) => asJson<GitBranchInfo>(r)),
+
+  gitWorkflowStage: (projectId: string, paths: string[]) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/stage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paths }),
+      },
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowUnstage: (projectId: string, paths: string[]) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/unstage`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paths }),
+      },
+    ).then((r) => asJson<GitRepositoryState>(r)),
+
+  gitWorkflowCommit: (projectId: string, message: string) =>
+    fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/git/workflow/commit`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message }),
+      },
+    ).then((r) => asJson<GitCommitResult>(r)),
+
   // Server-side generation state for a chat session: buffered-so-far
   // text + whether it's still running,
   // independent of any open connection. Always 200, empty/not-running
@@ -473,6 +983,18 @@ export const api = {
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}/generation`, { method: "DELETE" }).then(
       (r) => asJson<void>(r),
     ),
+
+  listApprovals: (chatId?: string) =>
+    fetch(`/api/approvals${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ""}`).then((r) =>
+      asJson<{ approvals: PendingApproval[] }>(r),
+    ),
+
+  resolveApproval: (id: string, decision: ApprovalDecision) =>
+    fetch(`/api/approvals/${encodeURIComponent(id)}/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ decision }),
+    }).then((r) => asJson<void>(r)),
 
   listSkills: () => fetch("/api/skills").then((r) => asJson<{ skills: Skill[] }>(r)),
 
@@ -608,7 +1130,12 @@ export interface GenerationState {
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content:
+    | string
+    | Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      >;
 }
 
 // One real tool call the daemon made while producing a turn -- the
@@ -622,6 +1149,16 @@ export interface ToolStep {
   // src/tools.rs's FileEdit), present only on that step -- what the
   // Diff tab's real per-turn diff is built from.
   file_edit?: { path: string; before: string | null; after: string } | null;
+  checkpoint?: {
+    operation: string;
+    entries: {
+      path: string;
+      kind: string;
+      content?: number[];
+      link_target?: string;
+      unix_mode?: number;
+    }[];
+  } | null;
 }
 
 // Streams an OpenAI-shaped SSE response, calling onToken per delta. The
@@ -638,7 +1175,7 @@ export async function streamChat(
   onToken: (text: string) => void,
   signal?: AbortSignal,
   projectId?: string,
-  permission?: "read-only" | "full-access",
+  permission?: PermissionMode,
   onSteps?: (steps: ToolStep[]) => void,
   // llama-server-specific: "thinking" (a Qwen3-style hidden <think>
   // pass before the real answer) is off by default so tool-loop turns

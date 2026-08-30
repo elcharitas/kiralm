@@ -14,6 +14,7 @@ use std::path::Path;
 use super::openai::{
     ChatCompletionRequest, ChatCompletionResponse, ChatContent, ChatMessage, ToolCall, ToolCallFunction,
 };
+use crate::approvals::{self, ApprovalManager, ApprovalOutcome};
 use crate::mcp::McpRegistry;
 use crate::tools::{self, Permission, ToolStep};
 
@@ -29,13 +30,16 @@ pub enum AgentError {
 /// local or cloud) and returns the final assistant response plus every
 /// tool call made along the way, in order -- the real step data behind
 /// the UI's "Worked for Xm Ys" collapsible.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     http: &reqwest::Client,
     url: &str,
     bearer: Option<&str>,
     mut req: ChatCompletionRequest,
     project_root: &Path,
+    chat_id: &str,
     permission: Permission,
+    approvals: &ApprovalManager,
     enable_thinking: bool,
     mcp: &McpRegistry,
     dsh_bin: &str,
@@ -98,8 +102,30 @@ pub async fn run(
             tool_call_id: None,
         });
         for call in &calls {
-            let (content, step) =
-                tools::execute(&call.function.name, &call.function.arguments, project_root, permission, mcp, dsh_bin).await;
+            let authorization = approvals::authorize(
+                approvals,
+                chat_id,
+                permission,
+                &call.function.name,
+                &call.function.arguments,
+            )
+            .await;
+            let (content, step) = match authorization {
+                ApprovalOutcome::Allowed => {
+                    tools::execute(
+                        &call.function.name,
+                        &call.function.arguments,
+                        project_root,
+                        Permission::FullAccess,
+                        mcp,
+                        dsh_bin,
+                    )
+                    .await
+                }
+                ApprovalOutcome::Denied(reason) => {
+                    tools::denied_step(&call.function.name, &call.function.arguments, &reason)
+                }
+            };
             // A skill's own `allowed-tools` frontmatter is only honored
             // once it's actually loaded (a model can't be scoped down
             // before it picks a skill), and for the rest of this turn --

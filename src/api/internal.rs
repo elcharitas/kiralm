@@ -43,7 +43,6 @@ fn serve_asset(path: &str) -> Option<Response> {
 
 use super::{ensure_loaded, GatewayError, SharedState};
 use crate::cloud;
-use crate::engine;
 use crate::registry::{ModelSource, ModelState, ModelStatus};
 use crate::residency;
 use crate::state::ModelManifest;
@@ -76,10 +75,44 @@ pub fn routes() -> Router<SharedState> {
         .route("/api/projects/:id/git/log", get(git_log))
         .route("/api/projects/:id/git/commit", post(git_commit))
         .route(
+            "/api/projects/:id/git/workflow/state",
+            get(git_workflow_state),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/diff",
+            post(git_workflow_diff),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/branches",
+            get(git_workflow_branches).post(git_workflow_create_branch),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/branches/switch",
+            post(git_workflow_switch_branch),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/stage",
+            post(git_workflow_stage),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/unstage",
+            post(git_workflow_unstage),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/commit",
+            post(git_workflow_commit),
+        )
+        .route(
+            "/api/projects/:id/git/workflow/audit",
+            get(git_workflow_audit),
+        )
+        .route(
             "/api/sessions/:id/generation",
             get(get_generation).delete(stop_generation),
         )
         .route("/api/generations", get(list_generations))
+        .route("/api/approvals", get(list_approvals))
+        .route("/api/approvals/:id/resolve", post(resolve_approval))
         .route("/api/chats", get(list_chats).post(create_chat))
         .route(
             "/api/chats/:id",
@@ -124,6 +157,8 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
         "config": {
             "ram_headroom_gb": app.config.ram_headroom_gb,
             "model_dir": app.config.model_dir,
+            "cache_quota_gb": app.config.cache_quota_gb,
+            "optimization_profile": app.config.optimization_profile,
         },
     }))
 }
@@ -132,10 +167,12 @@ async fn status(State(app): State<SharedState>) -> Json<serde_json::Value> {
 struct UpdateConfigRequest {
     ram_headroom_gb: Option<f64>,
     model_dir: String,
+    cache_quota_gb: Option<f64>,
+    optimization_profile: Option<String>,
 }
 
-/// Writes `ram_headroom_gb`/`model_dir` into `~/.kiralm/config.toml`,
-/// editing just those two keys of whatever's already on disk (a
+/// Writes managed runtime keys into `~/.kiralm/config.toml`,
+/// editing just those keys of whatever's already on disk (a
 /// generic TOML table, not `Config`'s resolved-with-defaults shape, so
 /// unrelated hand-edited fields -- cloud/tunnel included -- survive
 /// untouched). `Config` itself is loaded once at startup and treated
@@ -168,6 +205,23 @@ async fn update_config(State(_app): State<SharedState>, Json(body): Json<UpdateC
         table.remove("model_dir");
     } else {
         table.insert("model_dir".to_string(), toml::Value::String(model_dir.to_string()));
+    }
+    if let Some(quota) = body.cache_quota_gb {
+        if quota < 1.0 {
+            return err(StatusCode::BAD_REQUEST, "cache quota must be at least 1GB");
+        }
+        table.insert("cache_quota_gb".to_string(), toml::Value::Float(quota));
+    }
+    if let Some(profile) = body.optimization_profile {
+        if crate::engine::optimization::OptimizationProfile::parse(&profile)
+            .is_none()
+        {
+            return err(StatusCode::BAD_REQUEST, "unknown optimization profile");
+        }
+        table.insert(
+            "optimization_profile".to_string(),
+            toml::Value::String(profile.to_ascii_lowercase()),
+        );
     }
 
     let out = match toml::to_string_pretty(&doc) {
@@ -239,6 +293,7 @@ fn model_json(app: &SharedState, m: &ModelState) -> serde_json::Value {
         "quant": m.canonical_id.rsplit(':').next().unwrap_or(""),
         "hot": m.hot,
         "context_length": m.context_length,
+        "vision_capable": m.vision_capable,
         "loaded": matches!(m.status, ModelStatus::Loaded),
         "rss_bytes": m.pid.and_then(residency::read_rss_bytes),
         "verdict": m.verdict.as_ref().map(|v| v.tier.as_str()),
@@ -297,6 +352,9 @@ async fn start_pull(State(app): State<SharedState>, Json(body): Json<PullRequest
                     ModelManifest::load(&app_for_task.config.model_dir.join(&resolved.filename))
                 {
                     super::register_model(&app_for_task, &manifest);
+                }
+                if let Err(error) = super::prune_artifact_cache(&app_for_task) {
+                    tracing::warn!("failed to enforce artifact cache quota: {error}");
                 }
             }
             Err(e) => {
@@ -377,6 +435,9 @@ async fn set_hot(
 
     ms.hot = body.on;
     app.registry.insert(ms);
+    if let Err(error) = app.supervisor.set_hot(&canonical, body.on).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
 
     {
         let mut state = app.state.write();
@@ -415,19 +476,26 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
         return err(StatusCode::NOT_FOUND, format!("model '{id}' not found"));
     };
 
-    // Unload if running (SIGTERM/SIGKILL), by pid. This stub
-    // registry doesn't hold the tokio::process::Child handle, only the
-    // pid, which is enough to signal it directly.
-    if let (ModelStatus::Loaded, Some(pid)) = (&ms.status, ms.pid) {
-        engine::kill_pid_graceful(pid).await;
+    if let Err(error) = app.supervisor.unload(&canonical).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
 
+    let manifest = ModelManifest::load(&ms.gguf_path).ok();
     if let Err(e) = std::fs::remove_file(&ms.gguf_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     }
     let _ = std::fs::remove_file(ModelManifest::sidecar_path_for(&ms.gguf_path));
+    if let Some(manifest) = manifest {
+        if let Ok(cache) = crate::pull::artifact_cache() {
+            if let Err(error) =
+                cache.remove_reference(&manifest.sha256, &ms.gguf_path)
+            {
+                tracing::warn!("failed to update artifact cache: {error}");
+            }
+        }
+    }
 
     app.registry.remove(&canonical);
     {
@@ -436,6 +504,9 @@ async fn delete_model(State(app): State<SharedState>, Path(id): Path<String>) ->
         if let Err(e) = state.save() {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
+    }
+    if let Err(error) = super::prune_artifact_cache(&app) {
+        tracing::warn!("failed to enforce artifact cache quota: {error}");
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -645,8 +716,21 @@ async fn delete_project(State(app): State<SharedState>, Path(id): Path<String>) 
     // Its chats go with it -- an orphaned chat pointing at a deleted
     // project would just 404 on every subsequent touch/git-status call.
     let mut chats = app.chats.write();
+    let removed_chat_ids: Vec<_> = chats
+        .chats
+        .iter()
+        .filter(|chat| chat.project_id == id)
+        .map(|chat| chat.id.clone())
+        .collect();
     chats.chats.retain(|c| c.project_id != id);
     let _ = chats.save();
+    drop(chats);
+    for chat_id in removed_chat_ids {
+        let _ = app
+            .attachments
+            .release_reference(&format!("chat:{chat_id}"));
+    }
+    app.git_workflows.write().remove(&id);
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -671,7 +755,9 @@ async fn create_chat(State(app): State<SharedState>, Json(body): Json<CreateChat
         created_at: now.clone(),
         updated_at: now,
         project_id: body.project_id,
-        permission: body.permission,
+        permission: crate::tools::Permission::parse(&body.permission)
+            .as_str()
+            .to_string(),
         messages: json!([]),
     };
     let mut chats = app.chats.write();
@@ -698,7 +784,9 @@ async fn update_chat(State(app): State<SharedState>, Path(id): Path<String>, Jso
         chat.title = title;
     }
     if let Some(permission) = body.permission {
-        chat.permission = permission;
+        chat.permission = crate::tools::Permission::parse(&permission)
+            .as_str()
+            .to_string();
     }
     if let Some(messages) = body.messages {
         chat.messages = messages;
@@ -721,6 +809,10 @@ async fn delete_chat(State(app): State<SharedState>, Path(id): Path<String>) -> 
     if let Err(e) = chats.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    app.approvals.forget_chat(&id);
+    let _ = app
+        .attachments
+        .release_reference(&format!("chat:{id}"));
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -752,8 +844,39 @@ async fn list_generations(State(app): State<SharedState>) -> Json<serde_json::Va
     Json(json!({"running": app.running_generation_ids()}))
 }
 
+#[derive(Deserialize)]
+struct ApprovalQuery {
+    chat_id: Option<String>,
+}
+
+async fn list_approvals(
+    State(app): State<SharedState>,
+    Query(query): Query<ApprovalQuery>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "approvals": app.approvals.list(query.chat_id.as_deref()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct ResolveApprovalRequest {
+    decision: crate::approvals::ApprovalDecision,
+}
+
+async fn resolve_approval(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveApprovalRequest>,
+) -> Response {
+    match app.approvals.resolve(&id, body.decision) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(message) => err(StatusCode::NOT_FOUND, message),
+    }
+}
+
 /// Looks up a registered project's real directory by id, 404ing if it
 /// isn't registered rather than falling back to any default path.
+#[allow(clippy::result_large_err)]
 fn project_path(app: &SharedState, id: &str) -> Result<std::path::PathBuf, Response> {
     let state = app.state.read();
     match state.projects.get(id) {
@@ -805,6 +928,240 @@ async fn git_commit(
         Ok(result) => Json(result).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e),
     }
+}
+
+async fn git_workflow_service(
+    app: &SharedState,
+    id: &str,
+) -> Result<std::sync::Arc<crate::git_workflows::GitWorkflowService>, Response> {
+    if let Some(service) = app.git_workflows.read().get(id).cloned() {
+        return Ok(service);
+    }
+    let root = project_path(app, id)?;
+    let service = crate::git_workflows::GitWorkflowService::open(
+        root,
+        crate::git_workflows::GitWorkflowLimits::default(),
+    )
+    .await
+    .map_err(git_workflow_error)?;
+    let service = std::sync::Arc::new(service);
+    let mut services = app.git_workflows.write();
+    Ok(services
+        .entry(id.to_string())
+        .or_insert_with(|| service.clone())
+        .clone())
+}
+
+fn git_workflow_error(error: crate::git_workflows::GitWorkflowError) -> Response {
+    use crate::git_workflows::GitWorkflowError;
+
+    let status = match &error {
+        GitWorkflowError::InvalidConfiguration
+        | GitWorkflowError::InvalidPath { .. }
+        | GitWorkflowError::PathEscape { .. }
+        | GitWorkflowError::SymlinkEscape { .. }
+        | GitWorkflowError::InvalidBranch { .. }
+        | GitWorkflowError::InvalidCommitMessage { .. }
+        | GitWorkflowError::NotRepository => StatusCode::BAD_REQUEST,
+        GitWorkflowError::RepositoryChanged
+        | GitWorkflowError::BranchExists { .. }
+        | GitWorkflowError::BranchNotFound { .. }
+        | GitWorkflowError::DirtyWorktree
+        | GitWorkflowError::Conflicts { .. }
+        | GitWorkflowError::NothingToCommit => StatusCode::CONFLICT,
+        GitWorkflowError::Busy => StatusCode::TOO_MANY_REQUESTS,
+        GitWorkflowError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        GitWorkflowError::OutputLimitExceeded
+        | GitWorkflowError::Io { .. }
+        | GitWorkflowError::Git { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let code = error.code().to_string();
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": error.to_string(),
+                "code": code,
+                "detail": error,
+            }
+        })),
+    )
+        .into_response()
+}
+
+async fn git_workflow_state(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.repository_state().await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitPathsRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct GitDiffRequest {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+async fn git_workflow_diff(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitDiffRequest>,
+) -> Response {
+    let scope = match body.scope.as_deref().unwrap_or("all") {
+        "all" => crate::git_workflows::DiffScope::All,
+        "staged" => crate::git_workflows::DiffScope::Staged,
+        "unstaged" => crate::git_workflows::DiffScope::Unstaged,
+        _ => return err(StatusCode::BAD_REQUEST, "invalid diff scope"),
+    };
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.diff_preview(scope, &body.paths).await {
+        Ok(preview) => Json(preview).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_branches(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.list_branches().await {
+        Ok(branches) => Json(json!({"branches": branches})).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitBranchRequest {
+    name: String,
+}
+
+async fn git_workflow_create_branch(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitBranchRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.create_branch(&body.name).await {
+        Ok(branch) => (StatusCode::CREATED, Json(branch)).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_switch_branch(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitBranchRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.switch_branch(&body.name).await {
+        Ok(branch) => Json(branch).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_stage(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitPathsRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.stage_paths(&body.paths).await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+async fn git_workflow_unstage(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitPathsRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.unstage_paths(&body.paths).await {
+        Ok(state) => Json(state).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitWorkflowCommitRequest {
+    message: String,
+}
+
+async fn git_workflow_commit(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<GitWorkflowCommitRequest>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    match service.commit(&body.message).await {
+        Ok(commit) => Json(commit).into_response(),
+        Err(error) => git_workflow_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct GitAuditQuery {
+    #[serde(default)]
+    after_sequence: u64,
+    #[serde(default = "default_git_audit_limit")]
+    limit: usize,
+}
+
+fn default_git_audit_limit() -> usize {
+    50
+}
+
+async fn git_workflow_audit(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Query(query): Query<GitAuditQuery>,
+) -> Response {
+    let service = match git_workflow_service(&app, &id).await {
+        Ok(service) => service,
+        Err(error) => return error,
+    };
+    Json(json!({
+        "records": service.audit_records(query.after_sequence, query.limit),
+    }))
+    .into_response()
 }
 
 async fn list_skills(State(_app): State<SharedState>) -> Json<serde_json::Value> {

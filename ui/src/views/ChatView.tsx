@@ -3,18 +3,33 @@ import {
   ArrowUp,
   Brain,
   Check,
-  ChevronDown,
   ChevronRight,
+  Database,
   Eye,
   GitBranch,
   Lock,
   MoreHorizontal,
+  Paperclip,
   Pencil,
+  ShieldQuestion,
   Sparkles,
   Unlock,
   X,
 } from "lucide-react";
-import { api, streamChat, type GitStatus, type StatusResponse, type ToolStep } from "../api";
+import {
+  api,
+  streamChat,
+  type AttachmentDescriptor,
+  type ApprovalDecision,
+  type ChatMessage,
+  type GitStatus,
+  type KnowledgeStatus,
+  type PendingApproval,
+  type PermissionMode,
+  type StatusResponse,
+  type ToolStep,
+  type WorkspacePresetList,
+} from "../api";
 import { compactMessages, shouldAutoCompact } from "../compact";
 import { formatContextLength, formatDuration, groupBySection, modelName } from "../format";
 import { changedFilesOf, codeBlockCountOf, stripCodeBlocks } from "../diff";
@@ -22,6 +37,45 @@ import type { ChatSession, StoredMessage } from "../sessions";
 import { useSettings } from "../settings";
 import { Select } from "../components/Select";
 import { Markdown } from "../components/Markdown";
+
+function blobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("File read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function messageForInference(message: StoredMessage): Promise<ChatMessage> {
+  if (!message.attachments?.length) {
+    return { role: message.role, content: message.content };
+  }
+  let text = message.content;
+  const images: Array<{
+    type: "image_url";
+    image_url: { url: string };
+  }> = [];
+  for (const attachment of message.attachments) {
+    const response = await fetch(api.attachmentUrl(attachment.id));
+    if (!response.ok) throw new Error(`Could not read ${attachment.filename}`);
+    if (attachment.kind === "image") {
+      images.push({
+        type: "image_url",
+        image_url: { url: await blobAsDataUrl(await response.blob()) },
+      });
+    } else if (attachment.kind === "text") {
+      const content = (await response.text()).slice(0, 100_000);
+      text += `\n\n[Attached text: ${attachment.filename}]\n${content}`;
+    } else {
+      text += `\n\n[Attached document: ${attachment.filename}]`;
+    }
+  }
+  return {
+    role: message.role,
+    content: [{ type: "text", text }, ...images],
+  };
+}
 
 function openRaw(text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
@@ -40,7 +94,7 @@ export function ChatView({
   onUpdateMessages,
   onEnsureSession,
   onStreamingChange,
-  onTogglePermission,
+  onSetPermission,
 }: {
   status: StatusResponse | null;
   session: ChatSession | null;
@@ -48,7 +102,7 @@ export function ChatView({
   onUpdateMessages: (id: string, messages: StoredMessage[]) => void;
   onEnsureSession: () => Promise<ChatSession>;
   onStreamingChange: (id: string | null) => void;
-  onTogglePermission: (id: string) => void;
+  onSetPermission: (id: string, permission: PermissionMode) => void;
 }) {
   const { settings } = useSettings();
   const models = status?.models ?? [];
@@ -68,6 +122,12 @@ export function ChatView({
   const [openFiles, setOpenFiles] = useState<Record<number, boolean>>({});
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({});
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
+  const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
+  const [attachments, setAttachments] = useState<AttachmentDescriptor[]>([]);
+  const [attachmentReference, setAttachmentReference] = useState<string | null>(null);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -95,7 +155,14 @@ export function ChatView({
 
   const send = async () => {
     const text = input.trim();
-    if (!text || !effectiveModel || sending) return;
+    if ((!text && attachments.length === 0) || !effectiveModel || sending) return;
+    if (
+      attachments.some((attachment) => attachment.kind === "image") &&
+      !effectiveModelObj?.vision_capable
+    ) {
+      setError("The selected model does not support image attachments");
+      return;
+    }
     if (text.toLowerCase() === "/compact") {
       await compact();
       return;
@@ -114,8 +181,17 @@ export function ChatView({
         // Best-effort: send the uncompacted history rather than block the turn over it.
       }
     }
-    const startMessages: StoredMessage[] = [...baseMessages, { role: "user", content: text }];
+    const startMessages: StoredMessage[] = [
+      ...baseMessages,
+      {
+        role: "user",
+        content: text || "Please analyze the attached files.",
+        attachments,
+      },
+    ];
     onUpdateMessages(target.id, startMessages);
+    setAttachments([]);
+    setAttachmentReference(null);
 
     setSending(true);
     setStreamingSessionId(target.id);
@@ -126,9 +202,12 @@ export function ChatView({
     let assistantText = "";
     liveStepsRef.current = [];
     try {
+      const inferenceMessages = await Promise.all(
+        startMessages.map(messageForInference),
+      );
       await streamChat(
         effectiveModel,
-        startMessages.map(({ role, content }) => ({ role, content })),
+        inferenceMessages,
         target.id,
         (token) => {
           assistantText += token;
@@ -164,6 +243,44 @@ export function ChatView({
     // Generation itself is server-side now (decoupled from this
     // connection) -- actually stop it too, not just look away.
     if (streamingSessionId) api.stopGeneration(streamingSessionId).catch(() => {});
+  };
+
+  const uploadAttachments = async (files: FileList | null) => {
+    if (!files?.length || uploadingAttachment) return;
+    if (attachments.length + files.length > 8) {
+      setError("A message can contain at most 8 attachments");
+      return;
+    }
+    const target = session ?? (await onEnsureSession());
+    const reference = `chat:${target.id}`;
+    setAttachmentReference(reference);
+    setUploadingAttachment(true);
+    setError(null);
+    try {
+      for (const file of Array.from(files)) {
+        const descriptor = await api.uploadAttachment(
+          reference,
+          file.name,
+          await blobAsDataUrl(file),
+        );
+        setAttachments((current) => [...current, descriptor]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+
+  const removeAttachment = (attachment: AttachmentDescriptor) => {
+    setAttachments((current) =>
+      current.filter((item) => item.id !== attachment.id),
+    );
+    if (attachmentReference) {
+      api
+        .releaseOneAttachment(attachment.id, attachmentReference)
+        .catch(() => {});
+    }
   };
 
   // Catches this session up with the daemon's server-side generation
@@ -213,8 +330,114 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.messages.length]);
 
+  useEffect(() => {
+    if (!session) {
+      setApprovals([]);
+      return;
+    }
+    const chatId = session.id;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const result = await api.listApprovals(chatId).catch(() => null);
+      if (cancelled) return;
+      if (result) setApprovals(result.approvals);
+      timer = window.setTimeout(poll, 400);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [session?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const result = await api.knowledgeStatus().catch(() => null);
+      if (cancelled || !result) return;
+      setKnowledgeStatus(result);
+      if (result.running) timer = window.setTimeout(poll, 600);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    api.listWorkspacePresets().then(setPresetState, () => {});
+  }, [session?.projectId]);
+
+  useEffect(() => {
+    const currentReference = session ? `chat:${session.id}` : null;
+    if (!attachmentReference || attachmentReference === currentReference) return;
+    for (const attachment of attachments) {
+      api
+        .releaseOneAttachment(attachment.id, attachmentReference)
+        .catch(() => {});
+    }
+    setAttachments([]);
+    setAttachmentReference(null);
+  }, [session?.id]);
+
+  const toggleKnowledgeIndex = async () => {
+    setError(null);
+    try {
+      if (knowledgeStatus?.running) {
+        await api.cancelKnowledgeIndex();
+      } else {
+        await api.startKnowledgeIndex();
+      }
+      setKnowledgeStatus(await api.knowledgeStatus());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const applyWorkspacePreset = async (presetId: string) => {
+    if (!presetId || !presetState) return;
+    const preset = presetState.presets.find((item) => item.id === presetId);
+    if (!preset) return;
+    const target = session ?? (await onEnsureSession());
+    setError(null);
+    try {
+      await api.applyWorkspacePreset(
+        preset.id,
+        preset.revision,
+        target.projectId,
+      );
+      onSetPermission(target.id, preset.permission);
+      if (preset.preferred_model) setModel(preset.preferred_model);
+      setPresetState(await api.listWorkspacePresets());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const decideApproval = async (approval: PendingApproval, decision: ApprovalDecision) => {
+    setApprovals((current) => current.filter((item) => item.id !== approval.id));
+    try {
+      await api.resolveApproval(approval.id, decision);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const isStreamingThisSession = sending && streamingSessionId === session?.id;
   const messages = session?.messages ?? [];
+  const presetBinding = session
+    ? presetState?.bindings[session.projectId]
+    : undefined;
+  const activePresetId = presetState?.presets.some(
+    (preset) =>
+      preset.id === presetBinding?.preset_id &&
+      preset.revision === presetBinding.preset_revision,
+  )
+    ? presetBinding?.preset_id ?? ""
+    : "";
 
   // Everything except the model picker: collapses into the "..."
   // overflow menu on a narrow composer instead of wrapping/overflowing
@@ -243,22 +466,57 @@ export function ChatView({
       <button
         type="button"
         className={
-          session?.permission === "full-access" ? "chip-select chip-toggle chip-toggle-on" : "chip-select chip-toggle"
+          knowledgeStatus?.running
+            ? "chip-select chip-toggle chip-toggle-on"
+            : "chip-select chip-toggle"
         }
-        title="Whether the model can write files or run commands in this workspace, or only read them"
-        onClick={() => session && onTogglePermission(session.id)}
+        title={
+          knowledgeStatus
+            ? `${knowledgeStatus.snapshot.files} indexed workspace files`
+            : "Index workspace files for retrieval"
+        }
+        onClick={() => void toggleKnowledgeIndex()}
       >
-        {session?.permission === "full-access" ? (
-          <>
-            <Unlock size={12} /> Full access
-          </>
-        ) : (
-          <>
-            <Lock size={12} /> Read only
-          </>
-        )}
-        <ChevronDown size={12} />
+        <Database size={12} />
+        {knowledgeStatus?.running ? "Cancel indexing" : "Index knowledge"}
       </button>
+      {presetState && presetState.presets.length > 0 && (
+        <Select
+          triggerClassName="chip-select"
+          value={activePresetId}
+          onChange={(value) => void applyWorkspacePreset(value)}
+          options={[
+            { value: "", label: "Workspace preset" },
+            ...presetState.presets.map((preset) => ({
+              value: preset.id,
+              label: preset.name,
+            })),
+          ]}
+        />
+      )}
+      <Select
+        triggerClassName={
+          session?.permission === "full-access"
+            ? "chip-select chip-toggle chip-toggle-on"
+            : "chip-select chip-toggle"
+        }
+        icon={
+          session?.permission === "full-access" ? (
+            <Unlock size={12} />
+          ) : session?.permission === "ask" ? (
+            <ShieldQuestion size={12} />
+          ) : (
+            <Lock size={12} />
+          )
+        }
+        value={session?.permission ?? "read-only"}
+        onChange={(permission) => session && onSetPermission(session.id, permission as PermissionMode)}
+        options={[
+          { value: "read-only", label: "Read only" },
+          { value: "ask", label: "Ask before changes" },
+          { value: "full-access", label: "Full access" },
+        ]}
+      />
     </>
   );
 
@@ -273,6 +531,23 @@ export function ChatView({
             <div key={i} className="turn-user">
               <div className="chat-bubble chat-bubble-user">
                 <Markdown>{m.content}</Markdown>
+                {m.attachments && m.attachments.length > 0 && (
+                  <div className="message-attachments">
+                    {m.attachments.map((attachment) =>
+                      attachment.kind === "image" ? (
+                        <img
+                          key={attachment.id}
+                          src={api.attachmentUrl(attachment.id)}
+                          alt={attachment.filename}
+                        />
+                      ) : (
+                        <span className="attachment-chip" key={attachment.id}>
+                          {attachment.filename}
+                        </span>
+                      ),
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -388,6 +663,42 @@ export function ChatView({
       {error && <div className="banner banner-bad">{error}</div>}
 
       <div className="composer">
+        {approvals[0] && (
+          <div className="approval-card" role="alert">
+            <div className="approval-card-head">
+              <span className="approval-card-title">
+                <ShieldQuestion size={14} /> Approval required
+              </span>
+              <span className="approval-risk">{approvals[0].risk.replaceAll("_", " ")}</span>
+            </div>
+            <div className="approval-tool mono">{approvals[0].tool_name}</div>
+            <div className="approval-target mono">{approvals[0].target}</div>
+            <pre className="approval-args mono">{JSON.stringify(approvals[0].arguments, null, 2)}</pre>
+            <div className="approval-actions">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => decideApproval(approvals[0], "deny")}
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => decideApproval(approvals[0], "allow_once")}
+              >
+                Allow once
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => decideApproval(approvals[0], "allow_for_chat")}
+              >
+                Allow for this chat
+              </button>
+            </div>
+          </div>
+        )}
         <form
           className="composer-box"
           onSubmit={(e) => {
@@ -403,6 +714,22 @@ export function ChatView({
               <button type="button" className="btn btn-ghost" onClick={stop}>
                 Stop
               </button>
+            </div>
+          )}
+          {attachments.length > 0 && (
+            <div className="composer-attachments">
+              {attachments.map((attachment) => (
+                <span className="attachment-chip" key={attachment.id}>
+                  {attachment.filename}
+                  <button
+                    type="button"
+                    title={`Remove ${attachment.filename}`}
+                    onClick={() => removeAttachment(attachment)}
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
             </div>
           )}
           {previewing ? (
@@ -437,6 +764,23 @@ export function ChatView({
           )}
           <div className="composer-toolbar">
             <div className="composer-chips">
+              <label
+                className="chip-select composer-attach"
+                title="Attach an image, PDF, or text file"
+              >
+                <Paperclip size={12} />
+                {uploadingAttachment ? "Uploading…" : "Attach"}
+                <input
+                  type="file"
+                  multiple
+                  disabled={uploadingAttachment}
+                  accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,application/json"
+                  onChange={(event) => {
+                    void uploadAttachments(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
               <button
                 type="button"
                 className="chip-select composer-preview-toggle"

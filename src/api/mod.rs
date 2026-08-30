@@ -4,13 +4,18 @@
 pub mod agent;
 pub mod agent_plugin;
 pub mod anthropic;
+pub mod attachments;
 pub mod dsh;
+pub mod diagnostics;
+pub mod evals;
 pub mod internal;
+pub mod knowledge;
 pub mod marketplace;
 pub mod mcp;
 pub mod openai;
 pub mod plugin_catalog;
 pub mod tunnel;
+pub mod workspace_presets;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,9 +28,17 @@ use tokio::sync::broadcast;
 use crate::chats::Chats;
 use crate::cloud::LoginProgressTx;
 use crate::config::Config;
-use crate::engine;
-use crate::pull::{PullProgress, ProgressTx};
-use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource, ModelStatus};
+use crate::engine::supervisor::{
+    EngineSupervisor, SupervisorError, SupervisorOptions,
+};
+use crate::engine::optimization::OptimizationProfile;
+use crate::engine::{self, EngineCapabilities};
+use crate::events::{EventBus, EventTopic};
+use crate::knowledge::{
+    DeterministicEmbedder, IndexCancellation, IndexLimits, KnowledgeIndex,
+};
+use crate::pull::{ProgressTx, PullProgress};
+use crate::registry::{self, ModelRegistry, ModelRoute, ModelSource};
 use crate::residency;
 use crate::settings::Settings;
 use crate::state::{ModelManifest, State};
@@ -73,7 +86,7 @@ pub struct SessionGeneration {
     /// just a dropped response) can actually cancel the upstream
     /// connection -- aborting it is what tells llama-server to stop
     /// generating, same as dropping the connection always did before.
-    pub task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub task: parking_lot::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -121,6 +134,19 @@ pub struct AppState {
     /// only, `mcp_servers.json` is the on-disk record of what *should*
     /// be connected.
     pub mcp: crate::mcp::McpRegistry,
+    pub events: Arc<EventBus>,
+    pub approvals: Arc<crate::approvals::ApprovalManager>,
+    pub engine_capabilities: EngineCapabilities,
+    pub supervisor: EngineSupervisor,
+    pub knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+    pub knowledge_job: parking_lot::Mutex<Option<IndexCancellation>>,
+    pub workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+    pub attachments: Arc<crate::attachments::AttachmentStore>,
+    pub eval_store: Arc<crate::evals::EvalStore>,
+    pub eval_jobs: RwLock<HashMap<String, crate::evals::EvalCancellation>>,
+    pub git_workflows:
+        RwLock<HashMap<String, Arc<crate::git_workflows::GitWorkflowService>>>,
+    pub telemetry: Arc<crate::telemetry::TelemetryRegistry>,
 }
 
 impl AppState {
@@ -132,6 +158,211 @@ impl AppState {
         chats: Chats,
         tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
     ) -> AppState {
+        Self::new_with_engine_capabilities(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            EngineCapabilities::default(),
+        )
+    }
+
+    pub fn new_with_engine_capabilities(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+    ) -> AppState {
+        let path = std::env::temp_dir().join(format!(
+            "kiralm-knowledge-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let knowledge = Arc::new(
+            KnowledgeIndex::open(
+                path,
+                DeterministicEmbedder::default(),
+                IndexLimits::default(),
+            )
+            .expect("temporary knowledge index must open"),
+        );
+        let preset_path = std::env::temp_dir().join(format!(
+            "kiralm-workspace-presets-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_presets = Arc::new(
+            crate::workspace_presets::WorkspacePresetStore::open(preset_path)
+                .expect("temporary workspace preset store must open"),
+        );
+        Self::new_with_services(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_knowledge(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+    ) -> AppState {
+        let preset_path = std::env::temp_dir().join(format!(
+            "kiralm-workspace-presets-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace_presets = Arc::new(
+            crate::workspace_presets::WorkspacePresetStore::open(preset_path)
+                .expect("temporary workspace preset store must open"),
+        );
+        Self::new_with_services(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_services(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+    ) -> AppState {
+        let attachment_path = std::env::temp_dir().join(format!(
+            "kiralm-attachments-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let attachments = Arc::new(
+            crate::attachments::AttachmentStore::open(
+                attachment_path,
+                crate::attachments::AttachmentLimits::default(),
+            )
+            .expect("temporary attachment store must open"),
+        );
+        Self::new_with_stores(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+            attachments,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_stores(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+    ) -> AppState {
+        let eval_path =
+            std::env::temp_dir().join(format!("kiralm-evals-test-{}", uuid::Uuid::new_v4()));
+        Self::new_with_all_stores(
+            config,
+            registry,
+            state,
+            settings,
+            chats,
+            tunnel_listener,
+            engine_capabilities,
+            knowledge,
+            workspace_presets,
+            attachments,
+            Arc::new(crate::evals::EvalStore::new(eval_path)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_all_stores(
+        config: Config,
+        registry: Arc<ModelRegistry>,
+        state: State,
+        settings: Settings,
+        chats: Chats,
+        tunnel_listener: tokio::sync::mpsc::Sender<crate::TunnelListenerCommand>,
+        engine_capabilities: EngineCapabilities,
+        knowledge: Arc<KnowledgeIndex<DeterministicEmbedder>>,
+        workspace_presets: Arc<crate::workspace_presets::WorkspacePresetStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+        eval_store: Arc<crate::evals::EvalStore>,
+    ) -> AppState {
+        let events = Arc::new(EventBus::default());
+        let telemetry = Arc::new(crate::telemetry::TelemetryRegistry::default());
+        for component in [
+            crate::telemetry::HealthComponent::Daemon,
+            crate::telemetry::HealthComponent::Engine,
+            crate::telemetry::HealthComponent::Cache,
+            crate::telemetry::HealthComponent::Storage,
+            crate::telemetry::HealthComponent::Knowledge,
+            crate::telemetry::HealthComponent::Evaluation,
+            crate::telemetry::HealthComponent::Attachments,
+        ] {
+            telemetry.set_health(crate::telemetry::HealthInput {
+                component,
+                status: crate::telemetry::HealthStatus::Healthy,
+                ready: true,
+                required: matches!(
+                    component,
+                    crate::telemetry::HealthComponent::Daemon
+                        | crate::telemetry::HealthComponent::Storage
+                ),
+                detail: None,
+            });
+        }
+        let approvals = Arc::new(crate::approvals::ApprovalManager::new(events.clone()));
+        let supervisor = EngineSupervisor::production(
+            registry.clone(),
+            events.clone(),
+            config.llama_server_bin.clone(),
+            config.llama_server_port_range,
+            SupervisorOptions {
+                configured_headroom_gb: config.ram_headroom_gb,
+                engine_capabilities: engine_capabilities.clone(),
+                optimization_profile: OptimizationProfile::parse(
+                    &config.optimization_profile,
+                )
+                .unwrap_or(OptimizationProfile::Balanced),
+                ..SupervisorOptions::default()
+            },
+        );
         AppState {
             config,
             registry,
@@ -144,7 +375,34 @@ impl AppState {
             tunnel_listener,
             generations: RwLock::new(HashMap::new()),
             mcp: crate::mcp::McpRegistry::new(),
+            events,
+            approvals,
+            engine_capabilities,
+            supervisor,
+            knowledge,
+            knowledge_job: parking_lot::Mutex::new(None),
+            workspace_presets,
+            attachments,
+            eval_store,
+            eval_jobs: RwLock::new(HashMap::new()),
+            git_workflows: RwLock::new(HashMap::new()),
+            telemetry,
         }
+    }
+
+    pub fn workspace_preset_for(
+        &self,
+        project_id: &str,
+    ) -> Option<crate::workspace_presets::WorkspacePreset> {
+        let binding = self
+            .state
+            .read()
+            .workspace_preset_bindings
+            .get(project_id)
+            .cloned()?;
+        self.workspace_presets
+            .get(&binding.preset_id)
+            .filter(|preset| preset.revision == binding.preset_revision)
     }
 
     /// Starts a fresh generation record for `session_id`, replacing any
@@ -157,6 +415,7 @@ impl AppState {
         session_id: &str,
         model: &str,
     ) -> (Arc<SessionGeneration>, broadcast::Receiver<Bytes>) {
+        self.stop_generation(session_id);
         let (tx, rx) = broadcast::channel(256);
         let sg = Arc::new(SessionGeneration {
             state: RwLock::new(GenerationState {
@@ -183,6 +442,7 @@ impl AppState {
         let Some(sg) = self.generations.read().get(session_id).cloned() else {
             return false;
         };
+        self.approvals.cancel_chat(session_id);
         if let Some(handle) = sg.task.lock().take() {
             handle.abort();
         }
@@ -282,10 +542,16 @@ pub fn register_model(app: &SharedState, manifest: &ModelManifest) {
 /// Assembles the full route table: OpenAI-compatible, Anthropic-compatible,
 /// and internal `/api/*` routes.
 pub fn build_router(state: SharedState) -> Router {
+    let telemetry_state = state.clone();
     Router::new()
         .merge(openai::routes())
         .merge(anthropic::routes())
+        .merge(attachments::routes())
+        .merge(diagnostics::routes())
+        .merge(evals::routes())
         .merge(internal::routes())
+        .merge(knowledge::routes())
+        .merge(workspace_presets::routes())
         .merge(tunnel::routes())
         .merge(mcp::routes())
         .merge(marketplace::routes())
@@ -293,7 +559,53 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(dsh::routes())
         .merge(plugin_catalog::routes())
         .fallback(internal::static_handler)
+        .layer(axum::middleware::from_fn_with_state(
+            telemetry_state,
+            observe_request,
+        ))
         .with_state(state)
+}
+
+async fn observe_request(
+    axum::extract::State(app): axum::extract::State<SharedState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let started = std::time::Instant::now();
+    let operation = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| format!("{} {}", request.method(), path.as_str()))
+        .unwrap_or_else(|| format!("{} fallback", request.method()));
+    let correlation_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| crate::telemetry::CorrelationId::parse(value).ok())
+        .unwrap_or_else(|| app.telemetry.next_correlation_id());
+    let mut response = next.run(request).await;
+    let status = response.status();
+    let operation_status = if status.is_success() || status.is_redirection() {
+        crate::telemetry::OperationStatus::Success
+    } else if status.is_client_error() {
+        crate::telemetry::OperationStatus::Rejected
+    } else {
+        crate::telemetry::OperationStatus::Error
+    };
+    let error = (!status.is_success()).then(|| format!("HTTP {}", status.as_u16()));
+    if let Err(record_error) = app.telemetry.record_request(
+        &operation,
+        operation_status,
+        Some(started.elapsed()),
+        Some(&correlation_id),
+        error.as_deref(),
+    ) {
+        tracing::warn!("failed to record request telemetry: {record_error}");
+    }
+    if let Ok(value) = axum::http::HeaderValue::from_str(correlation_id.as_str()) {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
 }
 
 /// Resolves a name (alias or canonical) via the registry + state.json's
@@ -301,6 +613,46 @@ pub fn build_router(state: SharedState) -> Router {
 pub fn resolve_model(app: &SharedState, name: &str) -> Option<String> {
     let aliases = app.state.read().aliases.clone();
     app.registry.resolve(name, &aliases)
+}
+
+pub fn prune_artifact_cache(
+    app: &SharedState,
+) -> anyhow::Result<crate::pull::cache::PruneReport> {
+    let cache = crate::pull::artifact_cache()?;
+    let mut protections = crate::pull::cache::PruneProtections {
+        downloading: cache.active_artifact_hashes()?,
+        ..crate::pull::cache::PruneProtections::default()
+    };
+    for model in app.registry.list() {
+        if model.source != ModelSource::Local {
+            continue;
+        }
+        let Ok(manifest) = ModelManifest::load(&model.gguf_path) else {
+            continue;
+        };
+        if model.hot {
+            protections.hot.insert(manifest.sha256.clone());
+        }
+        if model.active_requests > 0 {
+            protections.active.insert(manifest.sha256);
+        }
+    }
+    let quota =
+        (app.config.cache_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+    let report = cache.prune_to_quota(quota, &protections)?;
+    app.events.publish(
+        EventTopic::Cache,
+        "pruned",
+        None,
+        serde_json::json!({
+            "removed": &report.removed,
+            "bytes_removed": report.bytes_removed,
+            "bytes_remaining": report.bytes_remaining,
+            "quota_bytes": quota,
+            "root": cache.root(),
+        }),
+    );
+    Ok(report)
 }
 
 pub enum GatewayError {
@@ -316,16 +668,7 @@ pub enum GatewayError {
     AuthRequired(String),
 }
 
-/// Ensures `canonical_id` has a live `llama-server` child, spawning one
-/// synchronously if cold (admission control applies), and
-/// returns its port. Reuses an already-loaded child on repeat calls,
-/// this is what keeps the model resident across requests.
-///
-/// STUB NOTE: no LRU eviction of cold models to make room, and no
-/// automatic-flag matrix beyond the always-on set. See
-/// engine.rs's module note. The owning residency agent should extend
-/// this rather than replace it wholesale; the admission math and
-/// registry bookkeeping here are real.
+/// Returns a cloud route or a lease on a supervised local engine.
 pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<ModelRoute, GatewayError> {
     let Some(existing) = app.registry.get_clone(canonical_id) else {
         return Err(GatewayError::LoadFailed(format!(
@@ -341,12 +684,6 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
         return Ok(ModelRoute::Cloud);
     }
 
-    if let ModelStatus::Loaded = existing.status {
-        if let Some(port) = existing.port {
-            return Ok(ModelRoute::Local(port));
-        }
-    }
-
     if let Some(entry) = app.state.read().models.get(canonical_id) {
         if let Some(vc) = &entry.verdict_cache {
             if vc.status == "unsupported" {
@@ -357,88 +694,21 @@ pub async fn ensure_loaded(app: &SharedState, canonical_id: &str) -> Result<Mode
         }
     }
 
-    let ram = residency::read_ram_info();
-    let headroom = residency::headroom_bytes(ram.total_bytes, app.config.ram_headroom_gb);
-    // Cloud entries are always `Loaded` but occupy zero local RAM. The
-    // admission budget only ever tracks locally-spawned children.
-    let loaded_bytes: u64 = app
-        .registry
-        .list()
-        .into_iter()
-        .filter(|m| {
-            m.source == ModelSource::Local
-                && matches!(m.status, ModelStatus::Loaded)
-                && m.canonical_id != canonical_id
-        })
-        .map(|m| m.size_bytes)
-        .sum();
-    if let Err(shortfall) =
-        residency::check_admission(loaded_bytes, existing.size_bytes, ram.total_bytes, headroom)
-    {
-        return Err(GatewayError::InsufficientRam(format!(
-            "need {shortfall} more bytes free to load '{canonical_id}'"
-        )));
+    app.supervisor
+        .acquire(canonical_id)
+        .await
+        .map(ModelRoute::Local)
+        .map_err(map_supervisor_error)
+}
+
+fn map_supervisor_error(error: SupervisorError) -> GatewayError {
+    match error {
+        SupervisorError::InsufficientRam {
+            canonical_id,
+            shortfall_bytes,
+        } => GatewayError::InsufficientRam(format!(
+            "need {shortfall_bytes} more bytes free to load '{canonical_id}'"
+        )),
+        other => GatewayError::LoadFailed(other.to_string()),
     }
-
-    let mut loading = existing.clone();
-    loading.status = ModelStatus::Loading;
-    app.registry.insert(loading);
-
-    let port = match engine::allocate_port(app.config.llama_server_port_range) {
-        Ok(p) => p,
-        Err(e) => {
-            let mut failed = existing.clone();
-            failed.status = ModelStatus::Failed(e.to_string());
-            app.registry.insert(failed);
-            return Err(GatewayError::LoadFailed(e.to_string()));
-        }
-    };
-
-    let spawn_result = engine::spawn(
-        &app.config.llama_server_bin,
-        &existing.gguf_path,
-        canonical_id,
-        port,
-        &[],
-    )
-    .await;
-
-    let mut child = match spawn_result {
-        Ok(c) => c,
-        Err(e) => {
-            let mut failed = existing.clone();
-            failed.status = ModelStatus::Failed(e.to_string());
-            app.registry.insert(failed);
-            return Err(GatewayError::LoadFailed(e.to_string()));
-        }
-    };
-    let pid = child.id();
-
-    if let Err(e) = engine::wait_healthy(port, std::time::Duration::from_secs(30)).await {
-        engine::shutdown(child).await;
-        let msg = format!("{e}: {}", engine::tail_log(canonical_id, 50));
-        let mut failed = existing.clone();
-        failed.status = ModelStatus::Failed(msg.clone());
-        app.registry.insert(failed);
-        return Err(GatewayError::LoadFailed(msg));
-    }
-
-    // Detach: `kill_on_drop(true)` means simply letting `child` fall out
-    // of scope here would kill the server we just started, and
-    // `mem::forget` would leak a zombie once it exits. Instead hand it
-    // to a reaper task that just waits (never kills). The registry only
-    // tracks the pid, which is enough for `DELETE`'s graceful-kill path.
-    // No supervising/restart task yet. See module STUB NOTE.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-
-    let mut loaded = existing;
-    loaded.status = ModelStatus::Loaded;
-    loaded.pid = pid;
-    loaded.port = Some(port);
-    loaded.last_used = std::time::Instant::now();
-    app.registry.insert(loaded);
-
-    Ok(ModelRoute::Local(port))
 }

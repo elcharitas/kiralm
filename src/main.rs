@@ -2,6 +2,8 @@
 //! `serve` daemon.
 
 mod agent_plugin;
+mod approvals;
+mod attachments;
 mod api;
 mod chats;
 mod cli;
@@ -9,10 +11,15 @@ mod cloud;
 mod config;
 mod dsh;
 mod engine;
+mod evals;
+mod events;
 mod gguf;
 mod git;
+mod git_workflows;
+mod knowledge;
 mod marketplace;
 mod mcp;
+pub mod platform;
 mod plugin_catalog;
 mod pull;
 mod registry;
@@ -20,15 +27,21 @@ mod residency;
 mod settings;
 mod skills;
 mod state;
+mod storage;
+mod telemetry;
 mod tools;
 mod tunnel;
 mod tunnel_auth;
+mod workspace_presets;
 
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+#[cfg(unix)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
+#[cfg(unix)]
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+#[cfg(unix)]
 use hyper_util::service::TowerToHyperService;
 
 use crate::api::AppState;
@@ -76,6 +89,8 @@ enum Command {
     Logout,
     /// Shows this machine's registered device identity.
     Device,
+    /// Checks platform, storage, listener, and executable readiness.
+    Doctor,
     /// Enable/disable/check the Cloudflare Tunnel remote connection.
     Tunnel {
         #[command(subcommand)]
@@ -125,6 +140,19 @@ async fn main() -> anyhow::Result<()> {
         Command::Login => cloud::login(&config).await,
         Command::Logout => cloud::logout(),
         Command::Device => cloud::device_info(),
+        Command::Doctor => {
+            let options = api::diagnostics::preflight_options(&config);
+            let report = platform::run_preflight(&options);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report
+                .findings
+                .iter()
+                .any(|finding| finding.severity == platform::Severity::Error)
+            {
+                anyhow::bail!("platform preflight found blocking issues");
+            }
+            Ok(())
+        }
         Command::Tunnel { cmd } => match cmd {
             TunnelCommand::Enable => cli::tunnel_enable(&config).await,
             TunnelCommand::Disable => cli::tunnel_disable(&config).await,
@@ -162,6 +190,13 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     std::fs::create_dir_all(&config.model_dir)?;
     std::fs::create_dir_all(home.join("logs"))?;
     std::fs::write(home.join("kiralm.pid"), std::process::id().to_string())?;
+    if let Ok(cache) = pull::artifact_cache() {
+        if let Err(error) =
+            cache.cleanup_stale_partials(std::time::Duration::from_secs(86_400))
+        {
+            tracing::warn!("failed to clean stale cache partials: {error}");
+        }
+    }
 
     let state = State::load()?;
 
@@ -171,34 +206,88 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
     // a model is loadable identically whether it was there at boot or
     // just finished downloading.
     let (tunnel_listener, tunnel_commands) = tokio::sync::mpsc::channel(2);
-    let app_state = Arc::new(AppState::new(
+    let engine_capabilities = engine::EngineCapabilities::probe(&config.llama_server_bin);
+    let knowledge = Arc::new(knowledge::KnowledgeIndex::open(
+        home.join("knowledge/index.json"),
+        knowledge::DeterministicEmbedder::default(),
+        knowledge::IndexLimits::default(),
+    )?);
+    let workspace_presets = Arc::new(workspace_presets::WorkspacePresetStore::load()?);
+    let attachments = Arc::new(attachments::AttachmentStore::from_home(&home)?);
+    attachments.cleanup_stale_partials(std::time::Duration::from_secs(86_400))?;
+    let eval_store = Arc::new(evals::EvalStore::new(home.join("evals")));
+    let app_state = Arc::new(AppState::new_with_all_stores(
         config.clone(),
         Arc::new(ModelRegistry::new()),
         state,
-        settings::Settings::load(),
-        chats::Chats::load(),
+        settings::Settings::load()?,
+        chats::Chats::load()?,
         tunnel_listener,
+        engine_capabilities,
+        knowledge,
+        workspace_presets,
+        attachments,
+        eval_store,
     ));
     for manifest in ModelManifest::load_all(&config.model_dir)? {
         api::register_model(&app_state, &manifest);
     }
+    let bindings = app_state.state.read().workspace_preset_bindings.clone();
+    for binding in bindings.values() {
+        let Some(preset) = app_state.workspace_presets.get(&binding.preset_id)
+        else {
+            continue;
+        };
+        if preset.revision != binding.preset_revision {
+            continue;
+        }
+        let Some(profile) = engine::optimization::OptimizationProfile::parse(
+            preset.optimization_profile.as_str(),
+        ) else {
+            continue;
+        };
+        let mut models = preset.hot_model_ids;
+        if let Some(model) = preset.preferred_model {
+            models.push(model);
+        }
+        for model in models {
+            let _ = app_state
+                .supervisor
+                .set_optimization_profile(&model, profile);
+        }
+    }
+    if let Err(error) = api::prune_artifact_cache(&app_state) {
+        tracing::warn!("failed to enforce artifact cache quota: {error}");
+    }
+    let engine_watcher = app_state.supervisor.start_watcher();
 
     let cloud_config = app_state.config.cloud.clone();
     let registry_for_sync = app_state.registry.clone();
     let app_state_for_tunnel = app_state.clone();
     let app_state_for_mcp = app_state.clone();
+    let app_state_for_shutdown = app_state.clone();
     let router = api::build_router(app_state);
 
-    if config.unix_socket.exists() {
-        std::fs::remove_file(&config.unix_socket)?;
-    }
-    if let Some(parent) = config.unix_socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let unix_listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
+    #[cfg(unix)]
+    let local_task = {
+        if config.unix_socket.exists() {
+            std::fs::remove_file(&config.unix_socket)?;
+        }
+        if let Some(parent) = config.unix_socket.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let listener = tokio::net::UnixListener::bind(&config.unix_socket)?;
+        tracing::info!("kiralm serving on {} (unix)", config.unix_socket.display());
+        Some(tokio::spawn(serve_unix(listener, router.clone())))
+    };
+    #[cfg(not(unix))]
+    let local_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    tracing::info!("kiralm serving on {} (unix)", config.unix_socket.display());
-
+    let http_listen = if cfg!(unix) {
+        http_listen
+    } else {
+        Some(http_listen.unwrap_or_else(|| config.http_listen.clone()))
+    };
     let http_task = if let Some(addr) = http_listen {
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!("browser target available at http://{addr}");
@@ -217,8 +306,6 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         config.tunnel.listen.clone(),
         router.clone(),
     ));
-
-    let unix_task = tokio::spawn(serve_unix(unix_listener, router));
 
     // Re-spawn `cloudflared` if it was left enabled across a restart,
     // after listeners are already bound, same ordering
@@ -243,11 +330,22 @@ async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Resul
         });
     }
 
-    if let Some(http_task) = http_task {
-        let _ = tokio::join!(http_task, unix_task, tunnel_task);
-    } else {
-        let _ = tokio::join!(unix_task, tunnel_task);
+    match (http_task, local_task) {
+        (Some(http_task), Some(local_task)) => {
+            let _ = tokio::join!(http_task, local_task, tunnel_task);
+        }
+        (Some(http_task), None) => {
+            let _ = tokio::join!(http_task, tunnel_task);
+        }
+        (None, Some(local_task)) => {
+            let _ = tokio::join!(local_task, tunnel_task);
+        }
+        (None, None) => {
+            let _ = tunnel_task.await;
+        }
     }
+    engine_watcher.stop().await;
+    app_state_for_shutdown.supervisor.shutdown_all().await;
     Ok(())
 }
 
@@ -293,6 +391,7 @@ async fn manage_tunnel_listener(
 /// Both listeners route to the same handlers. axum 0.7's
 /// `serve()` only accepts `TcpListener`, so the Unix socket gets its own
 /// small accept loop mirroring axum's own TCP implementation.
+#[cfg(unix)]
 async fn serve_unix(listener: tokio::net::UnixListener, router: axum::Router) {
     loop {
         let (stream, _addr) = match listener.accept().await {
