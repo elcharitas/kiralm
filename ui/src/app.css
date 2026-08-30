@@ -985,9 +985,15 @@
   padding: 0 7px;
 }
 
-.right-panel-body-preview {
+.right-panel-body.right-panel-body-preview {
+  display: flex;
   overflow: hidden;
   padding: 0;
+}
+
+.right-panel-body-preview .preview-island {
+  width: 100%;
+  height: 100%;
 }
 
 .right-panel-body-preview .preview-toolbar {
@@ -1048,6 +1054,7 @@
 
 .preview-stage {
   flex: 1;
+  width: 100%;
   min-height: 0;
   display: flex;
   justify-content: center;
@@ -1071,6 +1078,7 @@
 }
 
 .preview-frame iframe {
+  display: block;
   width: 100%;
   height: 100%;
   border: 0;
