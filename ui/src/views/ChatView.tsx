@@ -1,18 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import {
   ArrowUp,
   Brain,
   Check,
   ChevronRight,
+  Cloud,
+  Copy,
+  Cpu,
   Database,
-  Eye,
   GitBranch,
   Lock,
   MoreHorizontal,
   Paperclip,
   Pencil,
   ShieldQuestion,
-  Sparkles,
   Unlock,
   X,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import {
   type AttachmentDescriptor,
   type ApprovalDecision,
   type ChatMessage,
+  type GitBranchInfo,
   type GitStatus,
   type KnowledgeStatus,
   type PendingApproval,
@@ -37,6 +39,7 @@ import type { ChatSession, StoredMessage } from "../sessions";
 import { useSettings } from "../settings";
 import { Select } from "../components/Select";
 import { Markdown } from "../components/Markdown";
+import { useDialogs } from "../components/Dialogs";
 
 function blobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -87,6 +90,12 @@ function openDiff(files: { filename: string; body: string }[]) {
   openRaw(text);
 }
 
+function modelIcon(source: "local" | "cloud") {
+  return source === "cloud"
+    ? <Cloud size={12} />
+    : <Cpu size={12} />;
+}
+
 export function ChatView({
   status,
   session,
@@ -95,6 +104,7 @@ export function ChatView({
   onEnsureSession,
   onStreamingChange,
   onSetPermission,
+  onGitRefresh,
 }: {
   status: StatusResponse | null;
   session: ChatSession | null;
@@ -103,15 +113,16 @@ export function ChatView({
   onEnsureSession: () => Promise<ChatSession>;
   onStreamingChange: (id: string | null) => void;
   onSetPermission: (id: string, permission: PermissionMode) => void;
+  onGitRefresh: () => Promise<void>;
 }) {
   const { settings } = useSettings();
+  const { toast } = useDialogs();
   const models = status?.models ?? [];
   const [model, setModel] = useState("");
   // Off by default (matches the daemon's default): a Qwen3-style hidden
   // <think> pass before the real answer, only useful for reasoning models.
   const [thinking, setThinking] = useState(false);
   const [input, setInput] = useState("");
-  const [previewing, setPreviewing] = useState(false);
   const [liveText, setLiveText] = useState("");
   const [sending, setSending] = useState(false);
   const [compacting, setCompacting] = useState(false);
@@ -128,6 +139,13 @@ export function ChatView({
   const [attachments, setAttachments] = useState<AttachmentDescriptor[]>([]);
   const [attachmentReference, setAttachmentReference] = useState<string | null>(null);
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<number | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [copiedMessage, setCopiedMessage] = useState<number | null>(null);
+  const [gitBranches, setGitBranches] = useState<GitBranchInfo[]>([]);
+  const [switchingBranch, setSwitchingBranch] = useState(false);
+  const dragDepthRef = useRef(0);
   const liveStepsRef = useRef<ToolStep[]>([]);
 
   const effectiveModel = models.find((m) => m.id === model)?.id || models[0]?.id || "";
@@ -141,7 +159,6 @@ export function ChatView({
   const compact = async () => {
     if (!effectiveModel || !session || compacting) return;
     setInput("");
-    setPreviewing(false);
     setError(null);
     setCompacting(true);
     try {
@@ -170,7 +187,6 @@ export function ChatView({
     const target = session ?? (await onEnsureSession());
     setError(null);
     setInput("");
-    setPreviewing(false);
 
     let baseMessages = target.messages;
     if (settings.auto_compact && shouldAutoCompact(baseMessages, effectiveModelObj?.context_length)) {
@@ -245,9 +261,12 @@ export function ChatView({
     if (streamingSessionId) api.stopGeneration(streamingSessionId).catch(() => {});
   };
 
-  const uploadAttachments = async (files: FileList | null) => {
+  const uploadAttachments = async (
+    files: FileList | readonly File[] | null,
+  ) => {
     if (!files?.length || uploadingAttachment) return;
-    if (attachments.length + files.length > 8) {
+    const pendingFiles = Array.from(files);
+    if (attachments.length + pendingFiles.length > 8) {
       setError("A message can contain at most 8 attachments");
       return;
     }
@@ -257,7 +276,7 @@ export function ChatView({
     setUploadingAttachment(true);
     setError(null);
     try {
-      for (const file of Array.from(files)) {
+      for (const file of pendingFiles) {
         const descriptor = await api.uploadAttachment(
           reference,
           file.name,
@@ -281,6 +300,63 @@ export function ChatView({
         .releaseOneAttachment(attachment.id, attachmentReference)
         .catch(() => {});
     }
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setDropActive(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDropActive(false);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.files.length) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setDropActive(false);
+    void uploadAttachments(event.dataTransfer.files);
+  };
+
+  const copyMessage = async (index: number, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessage(index);
+      window.setTimeout(() => {
+        setCopiedMessage((current) => current === index ? null : current);
+      }, 1500);
+    } catch {
+      setError("Could not copy the message");
+    }
+  };
+
+  const beginEditMessage = (index: number, content: string) => {
+    setEditingMessage(index);
+    setEditingText(content);
+  };
+
+  const saveEditedMessage = () => {
+    if (editingMessage == null || !session || !editingText.trim()) return;
+    onUpdateMessages(
+      session.id,
+      session.messages.map((message, index) => index === editingMessage
+        ? { ...message, content: editingText.trim() }
+        : message),
+    );
+    setEditingMessage(null);
+    setEditingText("");
   };
 
   // Catches this session up with the daemon's server-side generation
@@ -372,6 +448,25 @@ export function ChatView({
   }, [session?.projectId]);
 
   useEffect(() => {
+    if (!session || !gitStatus?.is_repo) {
+      setGitBranches([]);
+      return;
+    }
+    let cancelled = false;
+    api.gitWorkflowBranches(session.projectId).then(
+      (result) => {
+        if (!cancelled) setGitBranches(result.branches);
+      },
+      () => {
+        if (!cancelled) setGitBranches([]);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [gitStatus?.branch, gitStatus?.is_repo, session?.projectId]);
+
+  useEffect(() => {
     const currentReference = session ? `chat:${session.id}` : null;
     if (!attachmentReference || attachmentReference === currentReference) return;
     for (const attachment of attachments) {
@@ -417,6 +512,23 @@ export function ChatView({
     }
   };
 
+  const switchBranch = async (name: string) => {
+    if (!session || !name || name === gitStatus?.branch) return;
+    setSwitchingBranch(true);
+    setError(null);
+    try {
+      await api.gitWorkflowSwitchBranch(session.projectId, name);
+      await onGitRefresh();
+      const result = await api.gitWorkflowBranches(session.projectId);
+      setGitBranches(result.branches);
+      toast(`Switched to ${name}`, "success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSwitchingBranch(false);
+    }
+  };
+
   const decideApproval = async (approval: PendingApproval, decision: ApprovalDecision) => {
     setApprovals((current) => current.filter((item) => item.id !== approval.id));
     try {
@@ -438,26 +550,21 @@ export function ChatView({
   )
     ? presetBinding?.preset_id ?? ""
     : "";
+  const modelGroups = groupBySection(models, (item) => item.id).map(
+    (group) => ({
+      section: group.section,
+      options: group.items.map((item) => ({
+        value: item.id,
+        label: modelName(item.id),
+        icon: modelIcon(item.source),
+      })),
+    }),
+  );
 
-  // Everything except the model picker: collapses into the "..."
-  // overflow menu on a narrow composer instead of wrapping/overflowing
-  // (see .composer-chips-wide / .composer-overflow in app.css).
+  // Secondary controls collapse into the overflow menu on a narrow
+  // composer while model and chat mode stay directly reachable.
   const renderConfigChips = () => (
     <>
-      <button
-        type="button"
-        className={thinking ? "chip-select chip-toggle chip-toggle-on" : "chip-select chip-toggle"}
-        title="Let the model think before answering (reasoning models only)"
-        onClick={() => setThinking((t) => !t)}
-      >
-        {thinking ? (
-          <>
-            <Brain size={12} /> Thinking
-          </>
-        ) : (
-          "Thinking: off"
-        )}
-      </button>
       {effectiveModelObj && (
         <span className="chip-select chip-static" title="Trained context window, from the model's GGUF metadata">
           {formatContextLength(effectiveModelObj.context_length)}
@@ -494,6 +601,11 @@ export function ChatView({
           ]}
         />
       )}
+    </>
+  );
+
+  const renderChatModeControls = () => (
+    <div className="composer-mode-group">
       <Select
         triggerClassName={
           session?.permission === "full-access"
@@ -517,11 +629,88 @@ export function ChatView({
           { value: "full-access", label: "Full access" },
         ]}
       />
-    </>
+      <button
+        type="button"
+        className={thinking
+          ? "chip-select chip-toggle chip-toggle-on"
+          : "chip-select chip-toggle"}
+        title="Let reasoning models think before answering"
+        onClick={() => setThinking((current) => !current)}
+      >
+        <Brain size={12} /> {thinking ? "Thinking" : "Think"}
+      </button>
+    </div>
+  );
+
+  const renderMessageActions = (message: StoredMessage, index: number) => (
+    <div className="message-actions">
+      <button
+        type="button"
+        title="Copy message"
+        aria-label="Copy message"
+        onClick={() => void copyMessage(index, message.content)}
+      >
+        {copiedMessage === index ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+      <button
+        type="button"
+        title="Edit message"
+        aria-label="Edit message"
+        onClick={() => beginEditMessage(index, message.content)}
+      >
+        <Pencil size={13} />
+      </button>
+    </div>
+  );
+
+  const renderMessageEditor = () => (
+    <div className="message-editor">
+      <textarea
+        value={editingText}
+        onChange={(event) => setEditingText(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setEditingMessage(null);
+          if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            saveEditedMessage();
+          }
+        }}
+        autoFocus
+      />
+      <div className="message-editor-actions">
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => setEditingMessage(null)}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn btn-accent"
+          disabled={!editingText.trim()}
+          onClick={saveEditedMessage}
+        >
+          Save
+        </button>
+      </div>
+    </div>
   );
 
   return (
-    <div className="thread-col">
+    <div
+      className={dropActive ? "thread-col thread-col-drop-active" : "thread-col"}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dropActive && (
+        <div className="chat-drop-overlay">
+          <Paperclip size={20} />
+          <span>Drop files to attach</span>
+        </div>
+      )}
       <div className="chat-log">
         {messages.length === 0 && !isStreamingThisSession && (
           <div className="chat-empty">Send a message to start a new chat.</div>
@@ -530,7 +719,9 @@ export function ChatView({
           m.role === "user" ? (
             <div key={i} className="turn-user">
               <div className="chat-bubble chat-bubble-user">
-                <Markdown>{m.content}</Markdown>
+                {editingMessage === i
+                  ? renderMessageEditor()
+                  : <Markdown>{m.content}</Markdown>}
                 {m.attachments && m.attachments.length > 0 && (
                   <div className="message-attachments">
                     {m.attachments.map((attachment) =>
@@ -549,10 +740,13 @@ export function ChatView({
                   </div>
                 )}
               </div>
+              {editingMessage !== i && renderMessageActions(m, i)}
             </div>
           ) : (
             <div key={i} className="turn-assistant">
-              {stripCodeBlocks(m.content) && (
+              {editingMessage === i
+                ? renderMessageEditor()
+                : stripCodeBlocks(m.content) && (
                 <Markdown className="chat-text">{stripCodeBlocks(m.content)}</Markdown>
               )}
               {typeof m.durationMs === "number" && (
@@ -650,6 +844,7 @@ export function ChatView({
                 </div>
               )}
               {openCode[i] && <pre className="changed-block-code mono">{m.content}</pre>}
+              {editingMessage !== i && renderMessageActions(m, i)}
             </div>
           ),
         )}
@@ -732,44 +927,42 @@ export function ChatView({
               ))}
             </div>
           )}
-          {previewing ? (
-            <Markdown className="composer-input composer-preview">
-              {input || "Nothing to preview yet."}
-            </Markdown>
-          ) : (
-            <textarea
-              className="composer-input"
-              placeholder={
-                compacting
-                  ? "Compacting chat…"
-                  : effectiveModel
-                    ? "Ask about your project, a file, or some connected tool… ('/compact' to summarize older messages)"
-                    : "Pull a model first"
+          <textarea
+            className="composer-input"
+            placeholder={
+              compacting
+                ? "Compacting chat…"
+                : effectiveModel
+                  ? "Ask about your project, a file, or some connected tool… ('/compact' to summarize older messages)"
+                  : "Pull a model first"
+            }
+            value={input}
+            disabled={!effectiveModel || compacting}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              // Default: Enter sends and Shift+Enter adds a newline.
+              // The alternate setting uses Ctrl/Cmd+Enter to send.
+              const sends = settings.send_on_enter
+                ? !e.shiftKey
+                : e.metaKey || e.ctrlKey;
+              if (sends) {
+                e.preventDefault();
+                send();
               }
-              value={input}
-              disabled={!effectiveModel || compacting}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                // Default: Enter sends, Shift+Enter for a newline. If the
-                // user's flipped "Enter sends" off in Settings, it's the
-                // other way around: Enter is a newline, Ctrl/Cmd+Enter sends.
-                const sends = settings.send_on_enter ? !e.shiftKey : e.metaKey || e.ctrlKey;
-                if (sends) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-          )}
+            }}
+          />
           <div className="composer-toolbar">
             <div className="composer-chips">
               <label
-                className="chip-select composer-attach"
+                className="chip-select composer-attach composer-icon-control"
                 title="Attach an image, PDF, or text file"
+                aria-label="Attach files"
               >
-                <Paperclip size={12} />
-                {uploadingAttachment ? "Uploading…" : "Attach"}
+                <Paperclip
+                  size={14}
+                  className={uploadingAttachment ? "spin-icon" : undefined}
+                />
                 <input
                   type="file"
                   multiple
@@ -781,33 +974,17 @@ export function ChatView({
                   }}
                 />
               </label>
-              <button
-                type="button"
-                className="chip-select composer-preview-toggle"
-                title={previewing ? "Back to editing" : "Preview markdown"}
-                onClick={() => setPreviewing((p) => !p)}
-              >
-                {previewing ? <Pencil size={12} /> : <Eye size={12} />}
-                {previewing ? "Write" : "Preview"}
-              </button>
               <Select
                 triggerClassName="chip-select chip-select-model"
-                icon={<Sparkles size={12} className="chip-select-flare" />}
+                icon={effectiveModelObj
+                  ? modelIcon(effectiveModelObj.source)
+                  : <Cpu size={12} />}
                 value={effectiveModel}
                 onChange={setModel}
                 options={models.length === 0 ? [{ value: "", label: "no models" }] : undefined}
-                groups={
-                  models.length === 0
-                    ? undefined
-                    : groupBySection(models, (m) => m.id).map((g) => ({
-                        section: g.section,
-                        options: g.items.map((m) => ({
-                          value: m.id,
-                          label: modelName(m.id),
-                        })),
-                      }))
-                }
+                groups={models.length === 0 ? undefined : modelGroups}
               />
+              {renderChatModeControls()}
               <div className="composer-chips-wide">{renderConfigChips()}</div>
               <div className="composer-overflow">
                 <button
@@ -831,7 +1008,12 @@ export function ChatView({
               <button
                 type="submit"
                 className="composer-send"
-                disabled={!effectiveModel || !input.trim() || sending || compacting}
+                disabled={
+                  !effectiveModel ||
+                  (!input.trim() && attachments.length === 0) ||
+                  sending ||
+                  compacting
+                }
                 title="Send"
               >
                 <ArrowUp size={14} />
@@ -848,10 +1030,18 @@ export function ChatView({
               </span>{" "}
               Local checkout
             </span>
-            <span className="composer-git-branch mono truncate">
-              {gitStatus.branch ?? "detached HEAD"}
-              {gitStatus.dirty ? " •" : ""}
-            </span>
+            <Select
+              triggerClassName="composer-git-branch-select mono"
+              value={gitStatus.branch ?? ""}
+              disabled={switchingBranch || !gitStatus.branch}
+              onChange={(name) => void switchBranch(name)}
+              options={gitBranches.map((branch) => ({
+                value: branch.name,
+                label: `${branch.name}${
+                  branch.current && gitStatus.dirty ? " •" : ""
+                }`,
+              }))}
+            />
           </div>
         )}
       </div>

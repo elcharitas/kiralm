@@ -5,6 +5,7 @@ import { Check, ChevronDown } from "lucide-react";
 export interface SelectOption<T extends string> {
   value: T;
   label: ReactNode;
+  icon?: ReactNode;
 }
 
 export interface SelectGroup<T extends string> {
@@ -97,7 +98,10 @@ export function Select<T extends string>({
         setOpen(false);
       }}
     >
-      <span className="select-menu-option-label truncate">{o.label}</span>
+      <span className="select-menu-option-label truncate">
+        {o.icon}
+        <span className="truncate">{o.label}</span>
+      </span>
       {o.value === value && <Check size={13} className="select-menu-check" />}
     </button>
   );
@@ -111,7 +115,7 @@ export function Select<T extends string>({
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
       >
-        {icon}
+        {icon ?? current?.icon}
         <span className="select-value truncate">{current?.label ?? value}</span>
         <ChevronDown size={12} className="select-chevron" />
       </button>

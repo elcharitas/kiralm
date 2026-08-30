@@ -48,7 +48,9 @@ export default function App() {
   } = useSessions();
   const { projects, createProject, cloneProject, deleteProject, refresh: refreshProjects } = useProjects();
   const runningGenerations = useRunningGenerations();
-  const { status: gitStatus } = useGitStatus(active?.projectId);
+  const { status: gitStatus, refresh: refreshGitStatus } = useGitStatus(
+    active?.projectId,
+  );
 
   // No chat selected (fresh launch, or the active one got cleared) and
   // not in settings -> the project-home screen, not an empty ChatView.
@@ -173,6 +175,7 @@ export default function App() {
             onEnsureSession={newChat}
             onStreamingChange={setStreamingId}
             onSetPermission={setPermission}
+            onGitRefresh={refreshGitStatus}
           />
         )}
       </main>

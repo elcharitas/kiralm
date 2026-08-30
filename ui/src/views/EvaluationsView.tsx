@@ -244,6 +244,7 @@ function suiteFromDraft(draft: SuiteDraft): EvalSuite {
 
 export function EvaluationsView({ status }: { status: StatusResponse | null }) {
   const { toast } = useDialogs();
+  const firstModelId = status?.models[0]?.id ?? "";
   const [suites, setSuites] = useState<EvalSuite[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<SuiteDraft | null>(null);
@@ -282,14 +283,14 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
         if (loaded.length > 0) {
           setSelectedId(loaded[0].id);
         } else {
-          setDraft(starterDraft(status?.models[0]?.id ?? ""));
+          setDraft(starterDraft(firstModelId));
         }
       })
       .catch((error) =>
         toast(error instanceof Error ? error.message : String(error), "error"),
       )
       .finally(() => setLoading(false));
-  }, [loadSuites, status?.models, toast]);
+  }, [firstModelId, loadSuites, toast]);
 
   useEffect(() => {
     const suite = suites.find((item) => item.id === selectedId);
@@ -357,7 +358,7 @@ export function EvaluationsView({ status }: { status: StatusResponse | null }) {
   const createSuite = () => {
     setSelectedId("");
     setRuns([]);
-    setDraft(starterDraft(status?.models[0]?.id ?? ""));
+    setDraft(starterDraft(firstModelId));
   };
 
   const updateCase = (index: number, patch: Partial<CaseDraft>) => {
