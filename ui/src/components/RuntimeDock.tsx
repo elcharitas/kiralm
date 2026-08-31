@@ -51,9 +51,7 @@ export function RuntimeDock({
   const { toast } = useDialogs();
   const [height, setHeight] = useState(settings.runtime_dock_height);
   const [dragging, setDragging] = useState(false);
-  // Expansion is deliberately session-local: every app launch starts
-  // collapsed, so Terminal cannot mount and auto-start until requested.
-  const [collapsed, setCollapsed] = useState(true);
+  const collapsed = settings.runtime_dock_collapsed;
   const tab: RuntimeDockTab = settings.runtime_dock_tab === "timeline" || settings.runtime_dock_tab === "safety"
     ? settings.runtime_dock_tab
     : "terminal";
@@ -67,10 +65,8 @@ export function RuntimeDock({
     [save, settings, toast],
   );
 
-  const selectTab = (next: RuntimeDockTab) => {
-    setCollapsed(false);
-    updateSettings({ runtime_dock_tab: next });
-  };
+  const selectTab = (next: RuntimeDockTab) =>
+    updateSettings({ runtime_dock_tab: next, runtime_dock_collapsed: false });
 
   const beginResize = (event: React.PointerEvent) => {
     event.preventDefault();
@@ -87,11 +83,10 @@ export function RuntimeDock({
       window.removeEventListener("pointerup", finish);
       setDragging(false);
       if (nextHeight < COLLAPSE_HEIGHT) {
-        setCollapsed(true);
+        updateSettings({ runtime_dock_collapsed: true });
       } else {
         setHeight(nextHeight);
-        setCollapsed(false);
-        updateSettings({ runtime_dock_height: Math.round(nextHeight) });
+        updateSettings({ runtime_dock_height: Math.round(nextHeight), runtime_dock_collapsed: false });
       }
     };
     window.addEventListener("pointermove", move);
@@ -114,7 +109,7 @@ export function RuntimeDock({
           className="runtime-icon-btn"
           type="button"
           title={collapsed ? "Expand runtime" : "Collapse runtime"}
-          onClick={() => setCollapsed((current) => !current)}
+          onClick={() => updateSettings({ runtime_dock_collapsed: !collapsed })}
         >
           {collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
         </button>
