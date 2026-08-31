@@ -14,6 +14,8 @@ type PromptOpts = {
   defaultValue?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  multiline?: boolean;
+  maxLength?: number;
 };
 type BrowseOpts = { title: string; startPath?: string };
 type ToastKind = "info" | "success" | "error";
@@ -219,19 +221,33 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
           <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
             <h2 className="modal-title">{dialog.title}</h2>
             {dialog.message && <p className="modal-message">{dialog.message}</p>}
-            {dialog.kind === "prompt" && (
+            {dialog.kind === "prompt" && (dialog.multiline ? (
+              <textarea
+                autoFocus
+                className="modal-input modal-textarea"
+                placeholder={dialog.placeholder}
+                value={promptValue}
+                maxLength={dialog.maxLength}
+                onChange={(e) => setPromptValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) closeWith(promptValue);
+                  if (e.key === "Escape") closeWith(null);
+                }}
+              />
+            ) : (
               <input
                 autoFocus
                 className="modal-input"
                 placeholder={dialog.placeholder}
                 value={promptValue}
+                maxLength={dialog.maxLength}
                 onChange={(e) => setPromptValue(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") closeWith(promptValue);
                   if (e.key === "Escape") closeWith(null);
                 }}
               />
-            )}
+            ))}
             <div className="modal-actions">
               <button type="button" className="btn" onClick={() => closeWith(dialog.kind === "confirm" ? false : null)}>
                 {dialog.cancelLabel ?? "Cancel"}

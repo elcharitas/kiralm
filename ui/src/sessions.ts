@@ -30,6 +30,9 @@ export interface ChatSession {
   // chip): "read-only" until explicitly flipped, same default a fresh
   // session gets server-side when the header is simply absent.
   permission: PermissionMode;
+  // Optional per-chat instructions, composed below global and
+  // workspace instructions by the daemon on every agent turn.
+  systemPrompt: string;
 }
 
 // Chat title and sidebar preview are single-line truncated labels, so

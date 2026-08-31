@@ -23,6 +23,7 @@ mod mcp;
 pub mod platform;
 mod plugin_catalog;
 mod policies;
+mod prompts;
 mod pull;
 mod registry;
 mod residency;

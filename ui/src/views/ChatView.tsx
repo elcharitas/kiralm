@@ -8,6 +8,7 @@ import {
   Copy,
   Cpu,
   Database,
+  FileText,
   GitBranch,
   Lock,
   MoreHorizontal,
@@ -109,6 +110,7 @@ export function ChatView({
   onEnsureSession,
   onStreamingChange,
   onSetPermission,
+  onSetSystemPrompt,
   onGitRefresh,
   gitBusy,
 }: {
@@ -119,11 +121,12 @@ export function ChatView({
   onEnsureSession: () => Promise<ChatSession>;
   onStreamingChange: (id: string | null) => void;
   onSetPermission: (id: string, permission: PermissionMode) => void;
+  onSetSystemPrompt: (id: string, systemPrompt: string) => Promise<void>;
   onGitRefresh: () => Promise<void>;
   gitBusy: boolean;
 }) {
   const { settings } = useSettings();
-  const { toast } = useDialogs();
+  const { prompt, toast } = useDialogs();
   const models = status?.models ?? [];
   const [model, setModel] = useState("");
   // Off by default (matches the daemon's default): a Qwen3-style hidden
@@ -589,6 +592,26 @@ export function ChatView({
     }
   };
 
+  const editChatInstructions = async () => {
+    const target = session ?? (await onEnsureSession());
+    const value = await prompt({
+      title: "Chat instructions",
+      message: "Applied only to this chat, after global and workspace instructions. Ctrl/Cmd+Enter saves.",
+      placeholder: "How should the agent approach this chat?",
+      defaultValue: target.systemPrompt,
+      confirmLabel: "Save instructions",
+      multiline: true,
+      maxLength: 16 * 1024,
+    });
+    if (value === null) return;
+    try {
+      await onSetSystemPrompt(target.id, value);
+      toast(value.trim() ? "Chat instructions saved" : "Chat instructions cleared", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
   const switchBranch = async (name: string) => {
     if (
       !session ||
@@ -726,6 +749,16 @@ export function ChatView({
         onClick={() => setThinking((current) => !current)}
       >
         <Brain size={12} /> {thinking ? "Thinking" : "Think"}
+      </button>
+      <button
+        type="button"
+        className={session?.systemPrompt.trim()
+          ? "chip-select chip-toggle chip-toggle-on"
+          : "chip-select chip-toggle"}
+        title="Edit instructions for this chat"
+        onClick={() => void editChatInstructions()}
+      >
+        <FileText size={12} /> Instructions
       </button>
     </div>
   );

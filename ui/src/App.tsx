@@ -79,6 +79,7 @@ export default function App() {
     createSession,
     setMessages,
     setPermission,
+    setSystemPrompt,
     renameSession,
     deleteSession,
     deleteSessionsByProject,
@@ -433,6 +434,7 @@ export default function App() {
               onEnsureSession={newChat}
               onStreamingChange={setStreamingId}
               onSetPermission={setPermission}
+              onSetSystemPrompt={setSystemPrompt}
               onGitRefresh={refreshGit}
               gitBusy={activeProjectBusy}
             />

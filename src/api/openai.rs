@@ -359,18 +359,6 @@ async fn run_tool_loop(
         .collect();
 
     let active_preset = app.workspace_preset_for(&project_id);
-    if let Some(preset) = &active_preset {
-        if !preset.instruction_text.is_empty() {
-            let instructions: String = preset.instruction_text.chars().take(16_000).collect();
-            messages.insert(
-                0,
-                ChatMessage::text(
-                    "system",
-                    format!("Workspace preset instructions:\n{instructions}"),
-                ),
-            );
-        }
-    }
 
     let query = messages
         .iter()
@@ -385,9 +373,10 @@ async fn run_tool_loop(
         })
         .unwrap_or_default();
     let mut knowledge_roots = vec![project_root.clone()];
-    if let Some(preset) = active_preset {
-        knowledge_roots.extend(preset.knowledge_roots);
+    if let Some(preset) = &active_preset {
+        knowledge_roots.extend(preset.knowledge_roots.clone());
     }
+    let mut knowledge_context = None;
     if let Ok(hits) = app.knowledge.search_roots(query, &knowledge_roots, 4) {
         if !hits.is_empty() {
             let mut context = String::from(
@@ -407,9 +396,34 @@ async fn run_tool_loop(
                 }
                 context.push_str(&excerpt);
             }
-            messages.insert(0, ChatMessage::text("system", context));
+            knowledge_context = Some(context);
         }
     }
+
+    let global_instructions = app.settings.read().custom_instructions.clone();
+    let chat_instructions = app
+        .chats
+        .read()
+        .chats
+        .iter()
+        .find(|chat| chat.id == session_id)
+        .map(|chat| chat.system_prompt.clone())
+        .unwrap_or_default();
+    let workspace_instructions = active_preset
+        .as_ref()
+        .map(|preset| preset.instruction_text.chars().take(16_000).collect::<String>());
+    let system_prompts = crate::prompts::compose(crate::prompts::PromptLayers {
+        global: Some(&global_instructions),
+        workspace: workspace_instructions.as_deref(),
+        chat: Some(&chat_instructions),
+        knowledge: knowledge_context.as_deref(),
+    });
+    let mut layered_messages = system_prompts
+        .into_iter()
+        .map(|prompt| ChatMessage::text("system", prompt))
+        .collect::<Vec<_>>();
+    layered_messages.append(&mut messages);
+    messages = layered_messages;
 
     let req = ChatCompletionRequest {
         model: canonical.clone(),

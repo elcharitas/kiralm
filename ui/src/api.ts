@@ -74,6 +74,7 @@ export interface CloudStatus {
 
 export interface AppSettings {
   default_permission: PermissionMode;
+  custom_instructions: string;
   send_on_enter: boolean;
   notify_on_finish: boolean;
   default_hot_on_pull: boolean;
@@ -305,6 +306,7 @@ export interface ChatDto {
   updated_at: string;
   project_id: string;
   permission: string;
+  system_prompt: string;
   messages: unknown;
 }
 
@@ -947,7 +949,7 @@ export const api = {
       body: JSON.stringify({ project_id: projectId, permission }),
     }).then((r) => asJson<ChatDto>(r)),
 
-  updateChat: (id: string, patch: { title?: string; permission?: string; messages?: unknown }) =>
+  updateChat: (id: string, patch: { title?: string; permission?: string; system_prompt?: string; messages?: unknown }) =>
     fetch(`/api/chats/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },

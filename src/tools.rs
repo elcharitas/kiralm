@@ -339,6 +339,146 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
     defs
 }
 
+const ROUTED_MCP_LIMIT: usize = 8;
+
+fn tool_name(definition: &serde_json::Value) -> &str {
+    definition["function"]["name"].as_str().unwrap_or_default()
+}
+
+fn contains_any(text: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| text.contains(term))
+}
+
+fn routing_terms(text: &str) -> std::collections::HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about", "after", "again", "also", "and", "are", "can", "could", "does", "for",
+        "from", "have", "into", "its", "please", "should", "that", "the", "their", "then",
+        "this", "through", "use", "using", "want", "what", "when", "where", "which", "with",
+        "would", "you", "your",
+    ];
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|term| {
+            let term = term.to_ascii_lowercase();
+            (term.len() >= 2 && !STOP_WORDS.contains(&term.as_str())).then_some(term)
+        })
+        .collect()
+}
+
+fn mcp_relevance(
+    definition: &serde_json::Value,
+    query_terms: &std::collections::HashSet<String>,
+) -> usize {
+    let function = &definition["function"];
+    let searchable = format!(
+        "{} {}",
+        function["name"].as_str().unwrap_or_default().replace("mcp__", ""),
+        function["description"].as_str().unwrap_or_default(),
+    );
+    routing_terms(&searchable)
+        .iter()
+        .filter(|term| query_terms.contains(*term))
+        .count()
+}
+
+fn route_tool_defs(
+    definitions: Vec<serde_json::Value>,
+    permission: Permission,
+    conversation: &str,
+) -> Vec<serde_json::Value> {
+    const ALWAYS: &[&str] = &[
+        "read_file",
+        "list_directory",
+        "search_files",
+        "glob",
+        "git_diff",
+        "load_skill",
+    ];
+    const CHANGE_TERMS: &[&str] = &[
+        " add ", " build ", " change ", " configure ", " create ", " edit ", " fix ",
+        " implement ", " improve ", " install ", " introduce ", " make ", " migrate ",
+        " optimize ", " refactor ", " replace ", " set up ", " setup ", " update ",
+        " upgrade ", " wire ", " write ",
+    ];
+    const RUN_TERMS: &[&str] = &[
+        " build ", " command ", " debug ", " lint ", " run ", " test ", " verify ",
+    ];
+    const DELETE_TERMS: &[&str] = &[" delete ", " remove "];
+    const MOVE_TERMS: &[&str] = &[" move ", " rename "];
+    const GIT_TERMS: &[&str] = &[" branch ", " commit ", " pull request ", " pr "];
+    const WEB_TERMS: &[&str] = &[
+        " browse ", " docs ", " documentation ", " fetch ", " internet ", " latest ",
+        " online ", " research ", " url ", " web ",
+    ];
+    const DSH_TERMS: &[&str] = &[" deepseek ", " dsh ", " harness ", " profile "];
+
+    let normalized_body = conversation
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let normalized = format!(" {normalized_body} ");
+    let change_intent = contains_any(&normalized, CHANGE_TERMS);
+    let run_intent = change_intent || contains_any(&normalized, RUN_TERMS);
+    let query_terms = routing_terms(&normalized);
+    let broad_mcp_request = normalized.contains(" mcp ") || normalized.contains(" connected tool ");
+    let mut selected = Vec::new();
+    let mut ranked_mcp = Vec::new();
+
+    for definition in definitions {
+        let name = tool_name(&definition);
+        if name.starts_with("mcp__") {
+            let score = mcp_relevance(&definition, &query_terms);
+            if score > 0 || broad_mcp_request {
+                ranked_mcp.push((score, name.to_string(), definition));
+            }
+            continue;
+        }
+
+        let include = ALWAYS.contains(&name)
+            || (permission != Permission::ReadOnly
+                && match name {
+                    "write_file" | "edit_file" => change_intent,
+                    "run_command" => run_intent,
+                    "delete_file" => contains_any(&normalized, DELETE_TERMS),
+                    "move_file" => contains_any(&normalized, MOVE_TERMS),
+                    "git_commit" => contains_any(&normalized, GIT_TERMS),
+                    "web_fetch" => contains_any(&normalized, WEB_TERMS),
+                    "run_dsh_profile" => contains_any(&normalized, DSH_TERMS),
+                    _ => false,
+                });
+        if include {
+            selected.push(definition);
+        }
+    }
+
+    ranked_mcp.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    selected.extend(
+        ranked_mcp
+            .into_iter()
+            .take(ROUTED_MCP_LIMIT)
+            .map(|(_, _, definition)| definition),
+    );
+    selected
+}
+
+/// Returns a prompt-relevant subset of the complete permission-scoped
+/// catalog, keeping the model's choice surface small without weakening
+/// the execution-time permission and policy checks.
+pub fn routed_tool_defs(
+    permission: Permission,
+    mcp: &crate::mcp::McpRegistry,
+    dsh_bin: &str,
+    conversation: &str,
+) -> Vec<serde_json::Value> {
+    route_tool_defs(tool_defs(permission, mcp, dsh_bin), permission, conversation)
+}
+
 fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     // Canonicalize root *before* joining (e.g. macOS's /var -> /private/var
     // symlink), so a legitimate in-root path doesn't get lexically
@@ -1608,11 +1748,21 @@ mod tests {
     #[test]
     fn read_only_sessions_are_not_offered_mutating_tools() {
         let defs = tool_defs(Permission::ReadOnly, &mcp(), "dsh");
-        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
         for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
             assert!(!names.contains(&mutating), "read-only session should not see '{mutating}'");
         }
-        for readable in ["read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill"] {
+        for readable in [
+            "read_file",
+            "list_directory",
+            "search_files",
+            "glob",
+            "git_diff",
+            "load_skill",
+        ] {
             assert!(names.contains(&readable), "'{readable}' should always be offered");
         }
     }
@@ -1624,5 +1774,69 @@ mod tests {
         for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
             assert!(names.contains(&mutating), "ask session should see '{mutating}'");
         }
+    }
+
+    #[test]
+    fn routed_tools_keep_inspection_small_for_explanations() {
+        let defs = routed_tool_defs(
+            Permission::FullAccess,
+            &mcp(),
+            "dsh",
+            "Explain how the settings loader works.",
+        );
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        for readable in ["read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill"] {
+            assert!(names.contains(&readable));
+        }
+        for unnecessary in [
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delete_file",
+            "git_commit",
+            "web_fetch",
+        ] {
+            assert!(
+                !names.contains(&unnecessary),
+                "explanation should not expose '{unnecessary}'"
+            );
+        }
+    }
+
+    #[test]
+    fn routed_tools_expand_for_change_and_explicit_git_intent() {
+        let defs = routed_tool_defs(
+            Permission::Ask,
+            &mcp(),
+            "dsh",
+            "Please implement the fix, run tests, then commit it.",
+        );
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
+        for expected in ["write_file", "edit_file", "run_command", "git_commit"] {
+            assert!(
+                names.contains(&expected),
+                "change request should expose '{expected}'"
+            );
+        }
+        assert!(!names.contains(&"delete_file"));
+    }
+
+    #[test]
+    fn routed_tools_rank_relevant_mcp_definitions() {
+        let mut defs = tool_defs(Permission::ReadOnly, &mcp(), "dsh");
+        defs.extend([
+            json!({"type":"function","function":{"name":"mcp__calendar__list_events","description":"List calendar events","parameters":{"type":"object"}}}),
+            json!({"type":"function","function":{"name":"mcp__github__create_issue","description":"Create a GitHub issue","parameters":{"type":"object"}}}),
+        ]);
+        let routed = route_tool_defs(defs, Permission::ReadOnly, "Open a GitHub issue for this bug");
+        let names: Vec<&str> = routed
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"mcp__github__create_issue"));
+        assert!(!names.contains(&"mcp__calendar__list_events"));
     }
 }

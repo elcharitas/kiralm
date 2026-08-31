@@ -23,6 +23,42 @@ use crate::tools::{self, Permission, ToolStep};
 
 const MAX_ITERATIONS: usize = 8;
 
+fn message_text(message: &ChatMessage) -> Option<String> {
+    match message.content.as_ref()? {
+        ChatContent::Text(text) => Some(text.clone()),
+        ChatContent::Parts(parts) => Some(
+            parts
+                .iter()
+                .filter_map(|part| match part {
+                    super::openai::ChatContentPart::Text { text } => Some(text.as_str()),
+                    super::openai::ChatContentPart::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+    }
+}
+
+fn routing_conversation(messages: &[ChatMessage]) -> String {
+    let mut recent = messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == "user")
+        .filter_map(message_text)
+        .take(4)
+        .collect::<Vec<_>>();
+    recent.reverse();
+    let combined = recent.join("\n");
+    combined
+        .chars()
+        .rev()
+        .take(8_000)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
 pub enum AgentError {
     /// A cloud 401 mid-loop, same treatment as the plain proxy path.
     AuthRequired(String),
@@ -50,7 +86,13 @@ pub async fn run(
     enable_thinking: bool,
 ) -> Result<(ChatCompletionResponse, Vec<ToolStep>), AgentError> {
     req.stream = false;
-    req.tools = Some(tools::tool_defs(permission, &app.mcp, &app.config.dsh.bin));
+    let routing_context = routing_conversation(&req.messages);
+    req.tools = Some(tools::routed_tool_defs(
+        permission,
+        &app.mcp,
+        &app.config.dsh.bin,
+        &routing_context,
+    ));
     // Off by default: Qwen3-style reasoning models otherwise burn the
     // whole max_tokens budget on hidden <think> content before ever
     // emitting a call. The composer's "Thinking" toggle controls this.

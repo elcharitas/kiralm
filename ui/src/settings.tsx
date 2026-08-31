@@ -7,6 +7,7 @@ import { api, type AppSettings } from "./api";
 // to work, without a loading state threaded through every call site.
 export const DEFAULT_SETTINGS: AppSettings = {
   default_permission: "read-only",
+  custom_instructions: "",
   send_on_enter: true,
   notify_on_finish: false,
   default_hot_on_pull: false,

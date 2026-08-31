@@ -248,8 +248,18 @@ async fn get_settings(State(app): State<SharedState>) -> Response {
 /// partial-patch merging to get wrong here.
 async fn put_settings(
     State(app): State<SharedState>,
-    Json(body): Json<crate::settings::Settings>,
+    Json(mut body): Json<crate::settings::Settings>,
 ) -> Response {
+    body.custom_instructions = body.custom_instructions.replace("\r\n", "\n");
+    if body.custom_instructions.len() > crate::prompts::MAX_USER_INSTRUCTION_BYTES {
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "custom instructions exceed {} bytes",
+                crate::prompts::MAX_USER_INSTRUCTION_BYTES
+            ),
+        );
+    }
     if let Err(e) = body.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
@@ -758,6 +768,7 @@ async fn create_chat(State(app): State<SharedState>, Json(body): Json<CreateChat
         permission: crate::tools::Permission::parse(&body.permission)
             .as_str()
             .to_string(),
+        system_prompt: String::new(),
         messages: json!([]),
     };
     let mut chats = app.chats.write();
@@ -772,10 +783,27 @@ async fn create_chat(State(app): State<SharedState>, Json(body): Json<CreateChat
 struct UpdateChatRequest {
     title: Option<String>,
     permission: Option<String>,
+    system_prompt: Option<String>,
     messages: Option<serde_json::Value>,
 }
 
-async fn update_chat(State(app): State<SharedState>, Path(id): Path<String>, Json(body): Json<UpdateChatRequest>) -> Response {
+async fn update_chat(
+    State(app): State<SharedState>,
+    Path(id): Path<String>,
+    Json(mut body): Json<UpdateChatRequest>,
+) -> Response {
+    if let Some(prompt) = &mut body.system_prompt {
+        *prompt = prompt.replace("\r\n", "\n");
+        if prompt.len() > crate::prompts::MAX_USER_INSTRUCTION_BYTES {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "chat instructions exceed {} bytes",
+                    crate::prompts::MAX_USER_INSTRUCTION_BYTES
+                ),
+            );
+        }
+    }
     let mut chats = app.chats.write();
     let Some(chat) = chats.chats.iter_mut().find(|c| c.id == id) else {
         return err(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
@@ -787,6 +815,9 @@ async fn update_chat(State(app): State<SharedState>, Path(id): Path<String>, Jso
         chat.permission = crate::tools::Permission::parse(&permission)
             .as_str()
             .to_string();
+    }
+    if let Some(system_prompt) = body.system_prompt {
+        chat.system_prompt = system_prompt;
     }
     if let Some(messages) = body.messages {
         chat.messages = messages;

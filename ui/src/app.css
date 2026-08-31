@@ -3548,6 +3548,18 @@
   border-color: var(--accent-dim);
 }
 
+.settings-instructions {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.modal-textarea {
+  min-height: 180px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
 .settings-detail-grid {
   margin-top: 16px;
 }
