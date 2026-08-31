@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Columns2,
   ExternalLink,
-  PanelBottomOpen,
   Pause,
   Play,
   Plus,
@@ -39,10 +38,14 @@ const HIDE_DOCK_HEIGHT = 92;
 
 export function RuntimeDock({
   session,
+  open,
+  onOpenChange,
   onGitRefresh,
   onChatsRefresh,
 }: {
   session: ChatSession;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onGitRefresh: () => void;
   onChatsRefresh: () => void;
 }) {
@@ -50,9 +53,6 @@ export function RuntimeDock({
   const { toast } = useDialogs();
   const [height, setHeight] = useState(() => Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
   const [dragging, setDragging] = useState(false);
-  // The runtime area is intentionally absent on launch. Its opener is
-  // separate from the Terminal tab because it reveals all runtime tools.
-  const [open, setOpen] = useState(false);
   const tab: RuntimeDockTab = settings.runtime_dock_tab === "timeline" || settings.runtime_dock_tab === "safety"
     ? settings.runtime_dock_tab
     : "terminal";
@@ -84,7 +84,7 @@ export function RuntimeDock({
       setDragging(false);
       if (nextHeight < HIDE_DOCK_HEIGHT) {
         setHeight(Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
-        setOpen(false);
+        onOpenChange(false);
       } else {
         setHeight(nextHeight);
         updateSettings({ runtime_dock_height: Math.round(nextHeight) });
@@ -94,22 +94,7 @@ export function RuntimeDock({
     window.addEventListener("pointerup", finish);
   };
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="runtime-dock-launcher"
-        title="Open runtime tools"
-        aria-label="Open runtime tools"
-        aria-controls="workspace-runtime-dock"
-        aria-expanded="false"
-        onClick={() => setOpen(true)}
-      >
-        <PanelBottomOpen size={15} />
-        <span>Runtime</span>
-      </button>
-    );
-  }
+  if (!open) return null;
 
   return (
     <section
@@ -129,7 +114,7 @@ export function RuntimeDock({
           type="button"
           title="Hide runtime tools"
           aria-label="Hide runtime tools"
-          onClick={() => setOpen(false)}
+          onClick={() => onOpenChange(false)}
         >
           <X size={14} />
         </button>

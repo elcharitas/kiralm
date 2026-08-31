@@ -50,6 +50,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [rightPanelMode, setRightPanelMode] = useState<"split" | "collapsed">("split");
   const [gitRefreshVersion, setGitRefreshVersion] = useState(0);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [rightPanelWidth, setRightPanelWidth] = useState(
     DEFAULT_RIGHT_PANEL_WIDTH,
@@ -435,10 +436,20 @@ export default function App() {
               onStreamingChange={setStreamingId}
               onSetPermission={setPermission}
               onSetSystemPrompt={setSystemPrompt}
+              runtimeOpen={runtimeOpen}
+              onRuntimeOpenChange={setRuntimeOpen}
               onGitRefresh={refreshGit}
               gitBusy={activeProjectBusy}
             />
-            {active && <RuntimeDock session={active} onGitRefresh={() => void refreshGit()} onChatsRefresh={() => void refreshSessions()} />}
+            {active && (
+              <RuntimeDock
+                session={active}
+                open={runtimeOpen}
+                onOpenChange={setRuntimeOpen}
+                onGitRefresh={() => void refreshGit()}
+                onChatsRefresh={() => void refreshSessions()}
+              />
+            )}
           </>
         )}
       </main>
