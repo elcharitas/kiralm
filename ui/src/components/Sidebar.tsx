@@ -98,7 +98,7 @@ export function Sidebar({
     const collapsed_workspaces = Object.entries(next)
       .filter(([, v]) => v)
       .map(([id]) => id);
-    saveSettings({ ...settings, collapsed_workspaces }).catch((e) =>
+    saveSettings({ collapsed_workspaces }).catch((e) =>
       toast(e instanceof Error ? e.message : String(e), "error"),
     );
   };

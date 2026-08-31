@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.kiralm.desktop",
   "build": {
-    "beforeBuildCommand": "npm --prefix ../ui run build",
-    "beforeDevCommand": "npm --prefix ../ui run build",
+    "beforeBuildCommand": "./scripts/prepare-sidecar.sh release",
+    "beforeDevCommand": "./scripts/prepare-sidecar.sh debug",
     "frontendDist": "../../ui/dist"
   },
   "app": {

@@ -141,7 +141,9 @@ export function ChatView({
   const [model, setModel] = useState("");
   // Off by default (matches the daemon's default): a Qwen3-style hidden
   // <think> pass before the real answer, only useful for reasoning models.
-  const [thinking, setThinking] = useState(false);
+  const [thinkingByChat, setThinkingByChat] = useState<Record<string, boolean>>({});
+  const thinkingKey = session?.id ?? "draft";
+  const thinking = thinkingByChat[thinkingKey] ?? false;
   const [input, setInput] = useState("");
   const [liveText, setLiveText] = useState("");
   const [sending, setSending] = useState(false);
@@ -153,6 +155,7 @@ export function ChatView({
   const [openFiles, setOpenFiles] = useState<Record<number, boolean>>({});
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({});
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement>(null);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
@@ -186,6 +189,24 @@ export function ChatView({
       api.releaseOneAttachment(attachment.id, reference).catch(() => {});
     }
   }, []);
+
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const closeOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (overflowRef.current?.contains(target) || target.closest(".select-menu")) return;
+      setOverflowOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOverflowOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [overflowOpen]);
 
   // Manual compaction: typing "/compact" replaces the older half of the
   // chat with one model-written summary instead of sending it as a
@@ -226,6 +247,9 @@ export function ChatView({
       return;
     }
     const target = session ?? (await onEnsureSession());
+    if (!session && thinking) {
+      setThinkingByChat((current) => ({ ...current, [target.id]: true }));
+    }
     setError(null);
     setInput("");
     setEditingMessage(null);
@@ -514,7 +538,7 @@ export function ChatView({
       const result = await api.knowledgeStatus().catch(() => null);
       if (cancelled || !result) return;
       setKnowledgeStatus(result);
-      if (result.running) timer = window.setTimeout(poll, 600);
+      timer = window.setTimeout(poll, result.running ? 600 : 2000);
     };
     poll();
     return () => {
@@ -729,7 +753,10 @@ export function ChatView({
         ariaLabel="Agent access and behavior"
         onChange={(value) => {
           if (value === "toggle-thinking") {
-            setThinking((current) => !current);
+            setThinkingByChat((current) => ({
+              ...current,
+              [thinkingKey]: !(current[thinkingKey] ?? false),
+            }));
           } else if (value === "edit-instructions") {
             void editChatInstructions();
           } else if (value === "toggle-knowledge") {
@@ -752,7 +779,7 @@ export function ChatView({
             options: [
               {
                 value: "toggle-thinking",
-                label: thinking ? "Disable thinking" : "Enable thinking",
+                label: thinking ? "Thinking enabled" : "Enable thinking",
                 icon: <Brain size={12} />,
               },
               {
@@ -1095,6 +1122,7 @@ export function ChatView({
                 />
                 <input
                   type="file"
+                  aria-label="Attach files"
                   multiple
                   disabled={uploadingAttachment}
                   accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,application/json"
@@ -1116,17 +1144,19 @@ export function ChatView({
               />
               {renderChatModeControls()}
               <div className="composer-chips-wide">{renderConfigChips()}</div>
-              <div className="composer-overflow">
+              <div ref={overflowRef} className="composer-overflow">
                 <button
                   type="button"
                   className="chip-select composer-overflow-btn"
                   title="More options"
+                  aria-label="More composer options"
+                  aria-expanded={overflowOpen}
                   onClick={() => setOverflowOpen((o) => !o)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {overflowOpen && (
-                  <div className="composer-overflow-menu" onMouseLeave={() => setOverflowOpen(false)}>
+                  <div className="composer-overflow-menu">
                     {renderConfigChips()}
                   </div>
                 )}

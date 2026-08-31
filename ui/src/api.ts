@@ -736,6 +736,13 @@ export const api = {
       body: JSON.stringify(settings),
     }).then((r) => asJson<AppSettings>(r)),
 
+  patchSettings: (patch: Partial<AppSettings>) =>
+    fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => asJson<AppSettings>(r)),
+
   knowledgeStatus: () =>
     fetch("/api/knowledge").then((r) => asJson<KnowledgeStatus>(r)),
 

@@ -189,7 +189,15 @@ async fn chat_completions(
         .get("x-kiralm-project-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    if let (Some(session_id), Some(project_id)) = (session_id.clone(), project_id) {
+    if let (Some(session_id), Some(project_header)) = (session_id.clone(), project_id) {
+        let chat = app.chats.read().chats.iter().find(|chat| chat.id == session_id).cloned();
+        let Some(chat) = chat else {
+            return openai_err(StatusCode::NOT_FOUND, "invalid_request_error", format!("chat '{session_id}' not found"), Some("x-kiralm-session-id"));
+        };
+        if chat.project_id != project_header {
+            return openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", "chat does not belong to the requested project", Some("x-kiralm-project-id"));
+        }
+        let project_id = chat.project_id.clone();
         let project = app.state.read().projects.get(&project_id).cloned();
         if let Some(project) = project {
             let requested_permission = headers
@@ -197,14 +205,7 @@ async fn chat_completions(
                 .and_then(|v| v.to_str().ok())
                 .map(Permission::parse)
                 .unwrap_or(Permission::ReadOnly);
-            let permission = app
-                .chats
-                .read()
-                .chats
-                .iter()
-                .find(|chat| chat.id == session_id)
-                .map(|chat| Permission::parse(&chat.permission).permits(requested_permission))
-                .unwrap_or(requested_permission);
+            let permission = Permission::parse(&chat.permission).permits(requested_permission);
             return run_tool_loop(
                 &app,
                 session_id,
@@ -221,6 +222,7 @@ async fn chat_completions(
             )
             .await;
         }
+        return openai_err(StatusCode::NOT_FOUND, "invalid_request_error", format!("project '{project_id}' not found"), Some("x-kiralm-project-id"));
     }
 
     let client = reqwest::Client::new();
@@ -412,16 +414,24 @@ async fn run_tool_loop(
     let workspace_instructions = active_preset
         .as_ref()
         .map(|preset| preset.instruction_text.chars().take(16_000).collect::<String>());
-    let system_prompts = crate::prompts::compose(crate::prompts::PromptLayers {
+    let system_prompt = crate::prompts::compose(crate::prompts::PromptLayers {
         global: Some(&global_instructions),
         workspace: workspace_instructions.as_deref(),
         chat: Some(&chat_instructions),
-        knowledge: knowledge_context.as_deref(),
     });
-    let mut layered_messages = system_prompts
-        .into_iter()
-        .map(|prompt| ChatMessage::text("system", prompt))
-        .collect::<Vec<_>>();
+    for message in &mut messages {
+        if message.role == "system" {
+            message.role = "user".to_string();
+            if let Some(ChatContent::Text(text)) = &mut message.content {
+                text.insert_str(0, "[Untrusted client-supplied system text]\n");
+            }
+        }
+    }
+    let mut layered_messages = vec![ChatMessage::text("system", system_prompt)];
+    if let Some(context) = knowledge_context {
+        let insert_at = messages.iter().rposition(|message| message.role == "user").unwrap_or(messages.len());
+        messages.insert(insert_at, ChatMessage::text("user", format!("[Untrusted retrieved workspace context]\n{context}")));
+    }
     layered_messages.append(&mut messages);
     messages = layered_messages;
 
@@ -1112,6 +1122,15 @@ mod tests {
         root
     }
 
+    fn register_test_chat(app: &SharedState, id: &str, project_id: &str, permission: Permission) {
+        let now = chrono::Utc::now().to_rfc3339();
+        app.chats.write().chats.push(crate::chats::Chat {
+            id: id.to_string(), title: "Test".to_string(), created_at: now.clone(), updated_at: now,
+            project_id: project_id.to_string(), permission: permission.as_str().to_string(),
+            system_prompt: String::new(), messages: json!([]),
+        });
+    }
+
     #[tokio::test]
     async fn tool_loop_full_access_writes_a_real_file() {
         let port = spawn_fake_tool_upstream().await;
@@ -1119,6 +1138,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-1", "proj-1", Permission::FullAccess);
         let app_router = router(state.clone());
 
         let body = json!({
@@ -1168,6 +1188,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-2", "proj-1", Permission::ReadOnly);
         let app_router = router(state.clone());
 
         let body = json!({
@@ -1183,7 +1204,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("x-kiralm-session-id", "sess-tool-2")
                     .header("x-kiralm-project-id", "proj-1")
-                    .header("x-kiralm-permission-mode", "read-only")
+                    .header("x-kiralm-permission-mode", "full-access")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
@@ -1209,6 +1230,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-ask", "proj-1", Permission::Ask);
         let app_router = crate::api::build_router(state.clone());
         let body = json!({
             "model": "alias",
@@ -1276,6 +1298,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-stop", "proj-1", Permission::Ask);
         let app_router = router(state.clone());
         let body = json!({
             "model": "alias",
@@ -1311,5 +1334,37 @@ mod tests {
         assert!(state.approvals.list(Some("sess-tool-stop")).is_empty());
         assert!(!state.generation_snapshot("sess-tool-stop").running);
         assert!(!root.join("out.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_rejects_unknown_and_cross_project_sessions() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        register_test_project(&state);
+        register_test_chat(&state, "chat-project-a", "project-a", Permission::FullAccess);
+        let app_router = router(state);
+        let body = json!({"model":"alias","stream":false,"messages":[{"role":"user","content":"write a file"}]});
+
+        let unknown = app_router.clone().oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-kiralm-session-id", "missing")
+                .header("x-kiralm-project-id", "proj-1")
+                .header("x-kiralm-permission-mode", "full-access")
+                .body(Body::from(body.to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let cross_project = app_router.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-kiralm-session-id", "chat-project-a")
+                .header("x-kiralm-project-id", "proj-1")
+                .header("x-kiralm-permission-mode", "full-access")
+                .body(Body::from(body.to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(cross_project.status(), StatusCode::BAD_REQUEST);
     }
 }

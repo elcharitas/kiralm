@@ -51,7 +51,7 @@ pub fn routes() -> Router<SharedState> {
     Router::new()
         .route("/api/status", get(status))
         .route("/api/config", post(update_config))
-        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/settings", get(get_settings).put(put_settings).patch(patch_settings))
         .route("/api/models/pull", post(start_pull))
         .route("/api/models/catalog", get(models_catalog))
         .route(
@@ -260,11 +260,40 @@ async fn put_settings(
             ),
         );
     }
+    let mut settings = app.settings.write();
     if let Err(e) = body.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
-    *app.settings.write() = body.clone();
+    *settings = body.clone();
     Json(body).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct SettingsPatch {
+    default_permission: Option<String>, custom_instructions: Option<String>,
+    send_on_enter: Option<bool>, notify_on_finish: Option<bool>, default_hot_on_pull: Option<bool>,
+    line_height: Option<String>, font: Option<String>, sidebar_collapsed: Option<bool>,
+    collapsed_workspaces: Option<Vec<String>>, auto_compact: Option<bool>,
+    runtime_dock_height: Option<u32>, runtime_dock_tab: Option<String>,
+}
+
+async fn patch_settings(State(app): State<SharedState>, Json(mut patch): Json<SettingsPatch>) -> Response {
+    if let Some(instructions) = &mut patch.custom_instructions {
+        *instructions = instructions.replace("\r\n", "\n");
+        if instructions.len() > crate::prompts::MAX_USER_INSTRUCTION_BYTES {
+            return err(StatusCode::BAD_REQUEST, format!("custom instructions exceed {} bytes", crate::prompts::MAX_USER_INSTRUCTION_BYTES));
+        }
+    }
+    let mut current = app.settings.write();
+    let mut next = current.clone();
+    macro_rules! apply { ($field:ident) => { if let Some(value) = patch.$field { next.$field = value; } }; }
+    apply!(default_permission); apply!(custom_instructions); apply!(send_on_enter);
+    apply!(notify_on_finish); apply!(default_hot_on_pull); apply!(line_height); apply!(font);
+    apply!(sidebar_collapsed); apply!(collapsed_workspaces); apply!(auto_compact);
+    apply!(runtime_dock_height); apply!(runtime_dock_tab);
+    if let Err(error) = next.save() { return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()); }
+    *current = next.clone();
+    Json(next).into_response()
 }
 
 /// The "merged-catalog read path": always serves the current registry
@@ -805,9 +834,10 @@ async fn update_chat(
         }
     }
     let mut chats = app.chats.write();
-    let Some(chat) = chats.chats.iter_mut().find(|c| c.id == id) else {
+    let Some(index) = chats.chats.iter().position(|c| c.id == id) else {
         return err(StatusCode::NOT_FOUND, format!("chat '{id}' not found"));
     };
+    let mut chat = chats.chats[index].clone();
     if let Some(title) = body.title {
         chat.title = title;
     }
@@ -824,9 +854,12 @@ async fn update_chat(
     }
     chat.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let updated = chat.clone();
-    if let Err(e) = chats.save() {
+    let mut next = chats.clone();
+    next.chats[index] = chat;
+    if let Err(e) = next.save() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
+    *chats = next;
     Json(updated).into_response()
 }
 

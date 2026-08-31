@@ -67,13 +67,7 @@ export function Select<T extends string>({
     optionRefs.current[next]?.focus();
   }, [flatOptions.length]);
 
-  // Measures the trigger + menu after the menu's first (off-screen)
-  // render, then places it -- runs before paint, so there's no flash.
-  useLayoutEffect(() => {
-    if (!open) {
-      setPos(null);
-      return;
-    }
+  const positionMenu = useCallback(() => {
     const trigger = triggerRef.current;
     const menu = menuRef.current;
     if (!trigger || !menu) return;
@@ -86,9 +80,32 @@ export function Select<T extends string>({
       top = rect.top - menuRect.height - 4;
     }
     top = Math.max(8, top);
-    setPos({ top, left, width: rect.width });
+    setPos((current) => {
+      const width = rect.width;
+      if (current && current.top === top && current.left === left && current.width === width) {
+        return current;
+      }
+      return { top, left, width };
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    positionMenu();
     focusOption(selectedIndex);
-  }, [focusOption, open, selectedIndex]);
+    const observer = new ResizeObserver(positionMenu);
+    if (triggerRef.current) observer.observe(triggerRef.current);
+    window.addEventListener("resize", positionMenu);
+    document.addEventListener("scroll", positionMenu, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", positionMenu);
+      document.removeEventListener("scroll", positionMenu, true);
+    };
+  }, [focusOption, open, positionMenu, selectedIndex]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -145,9 +162,9 @@ export function Select<T extends string>({
       tabIndex={-1}
       className={o.value === value ? "select-menu-active" : undefined}
       onClick={() => {
-        onChange(o.value);
         setOpen(false);
         triggerRef.current?.focus();
+        onChange(o.value);
       }}
     >
       <span className="select-menu-option-label truncate">

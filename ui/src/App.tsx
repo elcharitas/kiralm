@@ -66,10 +66,10 @@ export default function App() {
   const sidebarCollapsed = settings.sidebar_collapsed;
   const setSidebarCollapsed = useCallback(
     (next: boolean) =>
-      saveSettings({ ...settings, sidebar_collapsed: next }).catch((e) =>
+      saveSettings({ sidebar_collapsed: next }).catch((e) =>
         toast(e instanceof Error ? e.message : String(e), "error"),
       ),
-    [saveSettings, settings, toast],
+    [saveSettings, toast],
   );
   const { status, error, refresh } = useStatus();
   const {
@@ -443,6 +443,7 @@ export default function App() {
             />
             {active && (
               <RuntimeDock
+                key={active.projectId}
                 session={active}
                 open={runtimeOpen}
                 onOpenChange={setRuntimeOpen}

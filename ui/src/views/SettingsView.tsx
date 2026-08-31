@@ -277,7 +277,7 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
   // choice, not free text -- so it saves the instant it changes.
   const patchSettings = async (patch: Partial<typeof settings>) => {
     try {
-      await save({ ...settings, ...patch });
+      await save(patch);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     }

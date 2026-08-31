@@ -764,6 +764,12 @@
   right: 0;
   height: 9px;
   cursor: ns-resize;
+  touch-action: none;
+}
+
+.runtime-dock-resizer:focus-visible::after {
+  height: 3px;
+  background: var(--status-blue);
 }
 
 .runtime-dock-resizer::after {
@@ -900,7 +906,32 @@
 
 .terminal-tab {
   max-width: 180px;
-  padding-right: 5px;
+  padding: 0 4px 0 0;
+}
+
+.terminal-tab-main,
+.terminal-tab-close {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+
+.terminal-tab-main {
+  gap: 6px;
+  padding: 0 4px 0 9px;
+}
+
+.terminal-tab-close {
+  padding: 0 3px;
+  border-radius: var(--radius-sm);
+}
+
+.terminal-tab-close:hover {
+  background: var(--bg-raised);
 }
 
 .terminal-tab > span + * {
@@ -2471,6 +2502,11 @@
 
 .composer-input:focus {
   outline: none;
+}
+
+.composer-box:focus-within {
+  border-color: color-mix(in srgb, var(--status-blue) 65%, var(--border-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--status-blue) 18%, transparent);
 }
 
 .composer-preview {

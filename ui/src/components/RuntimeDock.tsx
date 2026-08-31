@@ -35,6 +35,8 @@ import { useSettings } from "../settings";
 
 const MIN_DOCK_HEIGHT = 160;
 const HIDE_DOCK_HEIGHT = 92;
+const MIN_CHAT_HEIGHT = 260;
+const KEYBOARD_RESIZE_STEP = 16;
 
 export function RuntimeDock({
   session,
@@ -52,57 +54,125 @@ export function RuntimeDock({
   const { settings, save } = useSettings();
   const { toast } = useDialogs();
   const [height, setHeight] = useState(() => Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
+  const [maxHeight, setMaxHeight] = useState(() => Math.max(MIN_DOCK_HEIGHT, window.innerHeight - MIN_CHAT_HEIGHT));
   const [dragging, setDragging] = useState(false);
+  const dockRef = useRef<HTMLElement>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const tab: RuntimeDockTab = settings.runtime_dock_tab === "timeline" || settings.runtime_dock_tab === "safety"
     ? settings.runtime_dock_tab
     : "terminal";
 
   const updateSettings = useCallback(
     (patch: Partial<typeof settings>) => {
-      void save({ ...settings, ...patch }).catch((error) =>
+      void save(patch).catch((error) =>
         toast(error instanceof Error ? error.message : String(error), "error"),
       );
     },
-    [save, settings, toast],
+    [save, toast],
   );
 
   const selectTab = (next: RuntimeDockTab) => updateSettings({ runtime_dock_tab: next });
 
+  const maxDockHeight = useCallback(() => {
+    const available = dockRef.current?.parentElement?.clientHeight ?? window.innerHeight;
+    return Math.max(MIN_DOCK_HEIGHT, available - MIN_CHAT_HEIGHT);
+  }, []);
+
+  const commitHeight = useCallback((nextHeight: number) => {
+    const bounded = Math.min(maxDockHeight(), Math.max(48, nextHeight));
+    if (bounded < HIDE_DOCK_HEIGHT) {
+      setHeight(Math.min(maxDockHeight(), Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height)));
+      onOpenChange(false);
+      return;
+    }
+    const visible = Math.max(MIN_DOCK_HEIGHT, bounded);
+    setHeight(visible);
+    updateSettings({ runtime_dock_height: Math.round(visible) });
+  }, [maxDockHeight, onOpenChange, settings.runtime_dock_height, updateSettings]);
+
+  useEffect(() => {
+    const parent = dockRef.current?.parentElement;
+    if (!parent) return;
+    const clamp = () => {
+      const nextMax = maxDockHeight();
+      setMaxHeight(nextMax);
+      setHeight((current) => Math.min(current, nextMax));
+    };
+    const observer = new ResizeObserver(clamp);
+    observer.observe(parent);
+    window.addEventListener("resize", clamp);
+    clamp();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", clamp);
+    };
+  }, [maxDockHeight, open]);
+
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
+
   const beginResize = (event: React.PointerEvent) => {
     event.preventDefault();
+    resizeCleanupRef.current?.();
+    event.currentTarget.setPointerCapture(event.pointerId);
     const originY = event.clientY;
     const originHeight = height;
-    const max = Math.max(MIN_DOCK_HEIGHT, window.innerHeight * 0.72);
+    let candidate = height;
     setDragging(true);
     const move = (next: PointerEvent) => {
-      setHeight(Math.min(max, Math.max(48, originHeight + originY - next.clientY)));
+      candidate = Math.min(maxDockHeight(), Math.max(48, originHeight + originY - next.clientY));
+      setHeight(candidate);
     };
-    const finish = (next: PointerEvent) => {
-      const nextHeight = Math.min(max, Math.max(48, originHeight + originY - next.clientY));
+    const cleanup = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("blur", finish);
+      resizeCleanupRef.current = null;
       setDragging(false);
-      if (nextHeight < HIDE_DOCK_HEIGHT) {
-        setHeight(Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
-        onOpenChange(false);
-      } else {
-        setHeight(nextHeight);
-        updateSettings({ runtime_dock_height: Math.round(nextHeight) });
-      }
     };
+    const finish = () => {
+      cleanup();
+      commitHeight(candidate);
+    };
+    resizeCleanupRef.current = cleanup;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+    window.addEventListener("blur", finish);
   };
 
   if (!open) return null;
 
   return (
     <section
+      ref={dockRef}
       id="workspace-runtime-dock"
       className={`runtime-dock ${dragging ? "runtime-dock-dragging" : ""}`}
-      style={{ height }}
+      style={{ height, minHeight: dragging ? 48 : MIN_DOCK_HEIGHT }}
     >
-      <div className="runtime-dock-resizer" onPointerDown={beginResize} />
+      <div
+        className="runtime-dock-resizer"
+        role="separator"
+        aria-label="Resize runtime tools"
+        aria-orientation="horizontal"
+        aria-valuemin={MIN_DOCK_HEIGHT}
+        aria-valuemax={Math.round(maxHeight)}
+        aria-valuenow={Math.round(height)}
+        tabIndex={0}
+        onPointerDown={beginResize}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            commitHeight(height + KEYBOARD_RESIZE_STEP);
+          } else if (event.key === "ArrowDown") {
+            event.preventDefault();
+            commitHeight(height - KEYBOARD_RESIZE_STEP);
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            commitHeight(MIN_DOCK_HEIGHT);
+          }
+        }}
+      />
       <header className="runtime-dock-header">
         <nav className="runtime-dock-tabs" aria-label="Workspace runtime">
           <DockTab icon={<SquareTerminal size={14} />} active={tab === "terminal"} onClick={() => selectTab("terminal")}>Terminal</DockTab>
@@ -131,7 +201,7 @@ export function RuntimeDock({
 }
 
 function DockTab({ active, icon, children, onClick }: { active: boolean; icon: React.ReactNode; children: React.ReactNode; onClick: () => void }) {
-  return <button type="button" className={`runtime-dock-tab ${active ? "active" : ""}`} onClick={onClick}>{icon}{children}</button>;
+  return <button type="button" role="tab" aria-selected={active} className={`runtime-dock-tab ${active ? "active" : ""}`} onClick={onClick}>{icon}{children}</button>;
 }
 
 function TerminalIsland({ projectId }: { projectId: string }) {
@@ -140,15 +210,22 @@ function TerminalIsland({ projectId }: { projectId: string }) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [splitId, setSplitId] = useState<string | null>(null);
   const autoStartPending = useRef(false);
+  const autoStarted = useRef(false);
+  const generation = useRef(0);
   const refresh = useCallback(() => {
+    const requestGeneration = generation.current;
     api.listTerminals(projectId).then(({ terminals: next }) => {
-      if (next.length === 0 && !autoStartPending.current) {
+      if (requestGeneration !== generation.current) return;
+      if (!next.some((terminal) => terminal.running) && !autoStarted.current && !autoStartPending.current) {
+        autoStarted.current = true;
         autoStartPending.current = true;
         api.createTerminal(projectId).then((terminal) => {
+          if (requestGeneration !== generation.current) return;
           autoStartPending.current = false;
-          setTerminals([terminal]);
+          setTerminals((items) => [...items.filter((item) => item.id !== terminal.id), terminal]);
           setActiveId(terminal.id);
         }).catch((error) => {
+          autoStarted.current = false;
           autoStartPending.current = false;
           toast(error instanceof Error ? error.message : String(error), "error");
         });
@@ -161,9 +238,15 @@ function TerminalIsland({ projectId }: { projectId: string }) {
   }, [projectId, toast]);
 
   useEffect(() => {
+    generation.current += 1;
+    autoStarted.current = false;
+    autoStartPending.current = false;
     refresh();
     const timer = window.setInterval(refresh, 4000);
-    return () => window.clearInterval(timer);
+    return () => {
+      generation.current += 1;
+      window.clearInterval(timer);
+    };
   }, [refresh]);
 
   const create = async () => {
@@ -190,7 +273,7 @@ function TerminalIsland({ projectId }: { projectId: string }) {
     }
   };
   const active = terminals.find((item) => item.id === activeId);
-  const split = terminals.find((item) => item.id === splitId);
+  const split = splitId === activeId ? undefined : terminals.find((item) => item.id === splitId);
   const toggleSplit = () => {
     if (splitId) setSplitId(null);
     else setSplitId(terminals.find((item) => item.id !== activeId)?.id ?? null);
@@ -201,15 +284,20 @@ function TerminalIsland({ projectId }: { projectId: string }) {
       <div className="terminal-toolbar">
         <div className="terminal-tabs">
           {terminals.map((terminal) => (
-            <button key={terminal.id} type="button" className={`terminal-tab ${terminal.id === activeId ? "active" : ""}`} onClick={() => setActiveId(terminal.id)}>
-              <span className={`runtime-dot ${terminal.running ? "live" : ""}`} />
-              {terminal.title}
-              <X size={12} onClick={(event) => { event.stopPropagation(); void close(terminal.id); }} />
-            </button>
+            <span key={terminal.id} className={`terminal-tab ${terminal.id === activeId ? "active" : ""}`}>
+              <button type="button" className="terminal-tab-main" onClick={() => {
+                if (terminal.id === splitId) setSplitId(activeId);
+                setActiveId(terminal.id);
+              }}>
+                <span className={`runtime-dot ${terminal.running ? "live" : ""}`} />
+                <span className="truncate">{terminal.title}</span>
+              </button>
+              <button type="button" className="terminal-tab-close" aria-label={`Close ${terminal.title}`} onClick={() => void close(terminal.id)}><X size={12} /></button>
+            </span>
           ))}
         </div>
-        <button type="button" className="runtime-icon-btn" title="New terminal" onClick={() => void create()}><Plus size={14} /></button>
-        <button type="button" className={`runtime-icon-btn ${splitId ? "active" : ""}`} title="Split terminal" disabled={terminals.length < 2} onClick={toggleSplit}><Columns2 size={14} /></button>
+        <button type="button" className="runtime-icon-btn" title="New terminal" aria-label="New terminal" onClick={() => void create()}><Plus size={14} /></button>
+        <button type="button" className={`runtime-icon-btn ${splitId ? "active" : ""}`} title="Split terminal" aria-label="Split terminal" disabled={terminals.length < 2} onClick={toggleSplit}><Columns2 size={14} /></button>
       </div>
       {active ? (
         <div className={`terminal-panes ${split ? "split" : ""}`}>
@@ -394,13 +482,17 @@ function SafetyIsland({ session, onGitRefresh, onChatsRefresh }: { session: Chat
 }
 
 function PolicyEditor({ document, projectId, onChange, onSave }: { document: PolicyDocument; projectId: string; onChange: (next: PolicyDocument) => void; onSave: () => void }) {
+  const workspaceRules = document.rules.filter((rule) => rule.project_id === projectId);
+  const inheritedRules = document.rules.filter((rule) => rule.project_id === null);
+  const workspaceHooks = document.hooks.filter((hook) => hook.project_id === projectId);
+  const inheritedHooks = document.hooks.filter((hook) => hook.project_id === null);
   const addRule = () => onChange({ ...document, rules: [...document.rules, { id: crypto.randomUUID(), name: "Workspace rule", enabled: true, project_id: projectId, effect: "ask", tool_pattern: "*", target_pattern: "*" }] });
   const updateRule = (id: string, patch: Record<string, unknown>) => onChange({ ...document, rules: document.rules.map((rule) => rule.id === id ? { ...rule, ...patch } : rule) });
   const removeRule = (id: string) => onChange({ ...document, rules: document.rules.filter((rule) => rule.id !== id) });
   const addHook = () => onChange({ ...document, hooks: [...document.hooks, { id: crypto.randomUUID(), name: "Workspace hook", enabled: true, project_id: projectId, phase: "post_tool", tool_pattern: "*", kind: "command", target: "", blocking: false, timeout_ms: 5000 }] });
   const updateHook = (id: string, patch: Record<string, unknown>) => onChange({ ...document, hooks: document.hooks.map((hook) => hook.id === id ? { ...hook, ...patch } : hook) });
   const removeHook = (id: string) => onChange({ ...document, hooks: document.hooks.filter((hook) => hook.id !== id) });
-  return <><div className="runtime-section-title"><span>Policies</span><div className="runtime-title-actions"><button className="btn" type="button" onClick={addRule}><Plus size={13} /> Rule</button><button className="btn btn-accent" type="button" onClick={onSave}>Save policy</button></div></div><div className="policy-list">{document.rules.map((rule) => <article className="policy-card" key={rule.id}><input value={rule.name} onChange={(event) => updateRule(rule.id, { name: event.target.value })} /><Select value={rule.effect} onChange={(effect) => updateRule(rule.id, { effect })} ariaLabel="Policy effect" triggerClassName="runtime-select" options={[{ value: "allow", label: "Allow" }, { value: "ask", label: "Ask" }, { value: "deny", label: "Deny" }]} /><input className="mono" value={rule.tool_pattern} title="Tool pattern" onChange={(event) => updateRule(rule.id, { tool_pattern: event.target.value })} /><input className="mono" value={rule.target_pattern} title="Target pattern" onChange={(event) => updateRule(rule.id, { target_pattern: event.target.value })} /><button className="runtime-icon-btn" type="button" onClick={() => removeRule(rule.id)}><Trash2 size={13} /></button></article>)}</div><div className="runtime-section-title"><span>Lifecycle hooks</span><button className="btn" type="button" onClick={addHook}><Plus size={13} /> Hook</button></div><div className="policy-list">{document.hooks.map((hook) => <article className="policy-card hook" key={hook.id}><input value={hook.name} onChange={(event) => updateHook(hook.id, { name: event.target.value })} /><Select value={hook.phase} onChange={(phase) => updateHook(hook.id, { phase })} ariaLabel="Hook phase" triggerClassName="runtime-select" options={[{ value: "pre_tool", label: "Before tool" }, { value: "post_tool", label: "After tool" }, { value: "run_completed", label: "Run completed" }, { value: "checkpoint_restored", label: "Checkpoint restored" }, { value: "terminal_started", label: "Terminal started" }]} /><Select value={hook.kind} onChange={(kind) => updateHook(hook.id, { kind })} ariaLabel="Hook kind" triggerClassName="runtime-select" options={[{ value: "command", label: "Command" }, { value: "http", label: "Webhook" }]} /><input className="mono" value={hook.target} placeholder={hook.kind === "command" ? "npm test" : "https://..."} onChange={(event) => updateHook(hook.id, { target: event.target.value })} /><label><input type="checkbox" checked={hook.blocking} onChange={(event) => updateHook(hook.id, { blocking: event.target.checked })} /> block on failure</label><button className="runtime-icon-btn" type="button" onClick={() => removeHook(hook.id)}><Trash2 size={13} /></button></article>)}</div></>;
+  return <><div className="runtime-section-title"><span>Workspace policies</span><div className="runtime-title-actions"><button className="btn" type="button" onClick={addRule}><Plus size={13} /> Rule</button><button className="btn btn-accent" type="button" onClick={onSave}>Save policy</button></div></div>{inheritedRules.length > 0 && <p className="settings-hint">{inheritedRules.length} global {inheritedRules.length === 1 ? "rule applies" : "rules apply"} in addition to this workspace.</p>}<div className="policy-list">{workspaceRules.map((rule) => <article className="policy-card" key={rule.id}><input aria-label="Rule name" value={rule.name} onChange={(event) => updateRule(rule.id, { name: event.target.value })} /><Select value={rule.effect} onChange={(effect) => updateRule(rule.id, { effect })} ariaLabel="Policy effect" triggerClassName="runtime-select" options={[{ value: "allow", label: "Allow" }, { value: "ask", label: "Ask" }, { value: "deny", label: "Deny" }]} /><input aria-label="Tool pattern" className="mono" value={rule.tool_pattern} title="Tool pattern" onChange={(event) => updateRule(rule.id, { tool_pattern: event.target.value })} /><input aria-label="Target pattern" className="mono" value={rule.target_pattern} title="Target pattern" onChange={(event) => updateRule(rule.id, { target_pattern: event.target.value })} /><button aria-label={`Delete ${rule.name}`} className="runtime-icon-btn" type="button" onClick={() => removeRule(rule.id)}><Trash2 size={13} /></button></article>)}</div><div className="runtime-section-title"><span>Workspace lifecycle hooks</span><button className="btn" type="button" onClick={addHook}><Plus size={13} /> Hook</button></div>{inheritedHooks.length > 0 && <p className="settings-hint">{inheritedHooks.length} global {inheritedHooks.length === 1 ? "hook applies" : "hooks apply"} in addition to this workspace.</p>}<div className="policy-list">{workspaceHooks.map((hook) => <article className="policy-card hook" key={hook.id}><input aria-label="Hook name" value={hook.name} onChange={(event) => updateHook(hook.id, { name: event.target.value })} /><Select value={hook.phase} onChange={(phase) => updateHook(hook.id, { phase })} ariaLabel="Hook phase" triggerClassName="runtime-select" options={[{ value: "pre_tool", label: "Before tool" }, { value: "post_tool", label: "After tool" }, { value: "run_completed", label: "Run completed" }, { value: "checkpoint_restored", label: "Checkpoint restored" }, { value: "terminal_started", label: "Terminal started" }]} /><Select value={hook.kind} onChange={(kind) => updateHook(hook.id, { kind })} ariaLabel="Hook kind" triggerClassName="runtime-select" options={[{ value: "command", label: "Command" }, { value: "http", label: "Webhook" }]} /><input aria-label="Hook target" className="mono" value={hook.target} placeholder={hook.kind === "command" ? "npm test" : "https://..."} onChange={(event) => updateHook(hook.id, { target: event.target.value })} /><label><input type="checkbox" checked={hook.blocking} onChange={(event) => updateHook(hook.id, { blocking: event.target.checked })} /> block on failure</label><button aria-label={`Delete ${hook.name}`} className="runtime-icon-btn" type="button" onClick={() => removeHook(hook.id)}><Trash2 size={13} /></button></article>)}</div></>;
 }
 
 function labelEvent(value: string) { return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }

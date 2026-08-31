@@ -53,6 +53,23 @@ use crate::config::Config;
 use crate::registry::ModelRegistry;
 use crate::state::{ModelManifest, State};
 
+#[cfg(unix)]
+fn acquire_daemon_lock(home: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join("daemon.lock"))?;
+    let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        anyhow::bail!("another KiraLM daemon is already using {}", home.display());
+    }
+    Ok(lock)
+}
+
 #[derive(Parser)]
 #[command(name = "kiralm", about = "Local AI inference gateway")]
 struct Cli {
@@ -194,6 +211,19 @@ pub async fn start_tunnel_listener(app: &Arc<AppState>) -> Result<(), String> {
 async fn run_serve(config: Config, http_listen: Option<String>) -> anyhow::Result<()> {
     let home = config::kiralm_home();
     std::fs::create_dir_all(&home)?;
+    #[cfg(unix)]
+    if config.unix_socket.exists()
+        && tokio::net::UnixStream::connect(&config.unix_socket)
+            .await
+            .is_ok()
+    {
+        anyhow::bail!(
+            "another KiraLM daemon is already listening on {}",
+            config.unix_socket.display()
+        );
+    }
+    #[cfg(unix)]
+    let _daemon_lock = acquire_daemon_lock(&home)?;
     std::fs::create_dir_all(&config.model_dir)?;
     std::fs::create_dir_all(home.join("logs"))?;
     std::fs::write(home.join("kiralm.pid"), std::process::id().to_string())?;
