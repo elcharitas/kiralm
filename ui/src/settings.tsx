@@ -16,7 +16,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sidebar_collapsed: false,
   collapsed_workspaces: [],
   auto_compact: true,
-  runtime_dock_collapsed: true,
   runtime_dock_height: 280,
   runtime_dock_tab: "terminal",
 };

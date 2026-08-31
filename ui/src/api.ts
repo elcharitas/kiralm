@@ -87,7 +87,6 @@ export interface AppSettings {
   // Whether a long chat gets its older messages summarized
   // automatically instead of always resending full history.
   auto_compact: boolean;
-  runtime_dock_collapsed: boolean;
   runtime_dock_height: number;
   runtime_dock_tab: RuntimeDockTab;
 }

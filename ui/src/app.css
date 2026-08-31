@@ -712,6 +712,7 @@
 /* Main body */
 
 .main-body {
+  position: relative;
   grid-column: 2;
   grid-row: 2;
   min-height: 0;
@@ -748,11 +749,6 @@
   background: #090909;
   border-top: 1px solid var(--border-strong);
   overflow: hidden;
-}
-
-.runtime-dock-collapsed {
-  min-height: 38px;
-  height: 38px;
 }
 
 .runtime-dock-dragging,
@@ -876,6 +872,42 @@
 .runtime-icon-btn:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+.runtime-dock-launcher {
+  position: absolute;
+  z-index: 18;
+  right: 16px;
+  bottom: 76px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(10px);
+}
+
+.runtime-dock-launcher:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--text-faint);
+}
+
+@container main-content (max-width: 520px) {
+  .runtime-dock-launcher {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .runtime-dock-launcher span {
+    display: none;
+  }
 }
 
 .runtime-dock-content,

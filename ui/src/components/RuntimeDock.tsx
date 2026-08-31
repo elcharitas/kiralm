@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Columns2,
   ExternalLink,
-  Maximize2,
-  Minimize2,
+  PanelBottomOpen,
   Pause,
   Play,
   Plus,
@@ -36,7 +35,7 @@ import { Select } from "./Select";
 import { useSettings } from "../settings";
 
 const MIN_DOCK_HEIGHT = 160;
-const COLLAPSE_HEIGHT = 92;
+const HIDE_DOCK_HEIGHT = 92;
 
 export function RuntimeDock({
   session,
@@ -49,9 +48,11 @@ export function RuntimeDock({
 }) {
   const { settings, save } = useSettings();
   const { toast } = useDialogs();
-  const [height, setHeight] = useState(settings.runtime_dock_height);
+  const [height, setHeight] = useState(() => Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
   const [dragging, setDragging] = useState(false);
-  const collapsed = settings.runtime_dock_collapsed;
+  // The runtime area is intentionally absent on launch. Its opener is
+  // separate from the Terminal tab because it reveals all runtime tools.
+  const [open, setOpen] = useState(false);
   const tab: RuntimeDockTab = settings.runtime_dock_tab === "timeline" || settings.runtime_dock_tab === "safety"
     ? settings.runtime_dock_tab
     : "terminal";
@@ -65,8 +66,7 @@ export function RuntimeDock({
     [save, settings, toast],
   );
 
-  const selectTab = (next: RuntimeDockTab) =>
-    updateSettings({ runtime_dock_tab: next, runtime_dock_collapsed: false });
+  const selectTab = (next: RuntimeDockTab) => updateSettings({ runtime_dock_tab: next });
 
   const beginResize = (event: React.PointerEvent) => {
     event.preventDefault();
@@ -82,23 +82,42 @@ export function RuntimeDock({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       setDragging(false);
-      if (nextHeight < COLLAPSE_HEIGHT) {
-        updateSettings({ runtime_dock_collapsed: true });
+      if (nextHeight < HIDE_DOCK_HEIGHT) {
+        setHeight(Math.max(MIN_DOCK_HEIGHT, settings.runtime_dock_height));
+        setOpen(false);
       } else {
         setHeight(nextHeight);
-        updateSettings({ runtime_dock_height: Math.round(nextHeight), runtime_dock_collapsed: false });
+        updateSettings({ runtime_dock_height: Math.round(nextHeight) });
       }
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
   };
 
+  if (!open) {
+    return (
+      <button
+        type="button"
+        className="runtime-dock-launcher"
+        title="Open runtime tools"
+        aria-label="Open runtime tools"
+        aria-controls="workspace-runtime-dock"
+        aria-expanded="false"
+        onClick={() => setOpen(true)}
+      >
+        <PanelBottomOpen size={15} />
+        <span>Runtime</span>
+      </button>
+    );
+  }
+
   return (
     <section
-      className={`runtime-dock ${collapsed ? "runtime-dock-collapsed" : ""} ${dragging ? "runtime-dock-dragging" : ""}`}
-      style={collapsed ? undefined : { height }}
+      id="workspace-runtime-dock"
+      className={`runtime-dock ${dragging ? "runtime-dock-dragging" : ""}`}
+      style={{ height }}
     >
-      {!collapsed && <div className="runtime-dock-resizer" onPointerDown={beginResize} />}
+      <div className="runtime-dock-resizer" onPointerDown={beginResize} />
       <header className="runtime-dock-header">
         <nav className="runtime-dock-tabs" aria-label="Workspace runtime">
           <DockTab icon={<SquareTerminal size={14} />} active={tab === "terminal"} onClick={() => selectTab("terminal")}>Terminal</DockTab>
@@ -108,21 +127,20 @@ export function RuntimeDock({
         <button
           className="runtime-icon-btn"
           type="button"
-          title={collapsed ? "Expand runtime" : "Collapse runtime"}
-          onClick={() => updateSettings({ runtime_dock_collapsed: !collapsed })}
+          title="Hide runtime tools"
+          aria-label="Hide runtime tools"
+          onClick={() => setOpen(false)}
         >
-          {collapsed ? <Maximize2 size={14} /> : <Minimize2 size={14} />}
+          <X size={14} />
         </button>
       </header>
-      {!collapsed && (
-        <div className="runtime-dock-content">
-          {tab === "terminal" && <TerminalIsland projectId={session.projectId} />}
-          {tab === "timeline" && <TimelineIsland sessionId={session.id} />}
-          {tab === "safety" && (
-            <SafetyIsland session={session} onGitRefresh={onGitRefresh} onChatsRefresh={onChatsRefresh} />
-          )}
-        </div>
-      )}
+      <div className="runtime-dock-content">
+        {tab === "terminal" && <TerminalIsland projectId={session.projectId} />}
+        {tab === "timeline" && <TimelineIsland sessionId={session.id} />}
+        {tab === "safety" && (
+          <SafetyIsland session={session} onGitRefresh={onGitRefresh} onChatsRefresh={onChatsRefresh} />
+        )}
+      </div>
     </section>
   );
 }
