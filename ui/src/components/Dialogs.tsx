@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, CornerLeftUp, Folder, Info, XCircle } from "lucide-react";
 import { api } from "../api";
 
@@ -14,6 +14,8 @@ type PromptOpts = {
   defaultValue?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  multiline?: boolean;
+  maxLength?: number;
 };
 type BrowseOpts = { title: string; startPath?: string };
 type ToastKind = "info" | "success" | "error";
@@ -168,6 +170,10 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [promptValue, setPromptValue] = useState("");
   const toastTimer = useRef<Record<string, number>>({});
+  const modalRef = useRef<HTMLDivElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const dialogTitleId = useId();
+  const browseTitleId = useId();
 
   const toast = useCallback((message: string, kind: ToastKind = "info") => {
     const id = crypto.randomUUID();
@@ -179,12 +185,14 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const confirm = useCallback((opts: ConfirmOpts) => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     return new Promise<boolean>((resolve) => {
       setDialog({ kind: "confirm", ...opts, resolve });
     });
   }, []);
 
   const prompt = useCallback((opts: PromptOpts) => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setPromptValue(opts.defaultValue ?? "");
     return new Promise<string | null>((resolve) => {
       setDialog({ kind: "prompt", ...opts, resolve });
@@ -192,6 +200,7 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const browseFolder = useCallback((opts: BrowseOpts) => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     return new Promise<string | null>((resolve) => {
       setBrowse({ ...opts, resolve });
     });
@@ -202,13 +211,61 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
     if (dialog.kind === "confirm") dialog.resolve(value as boolean);
     else dialog.resolve(value as string | null);
     setDialog(null);
+    window.setTimeout(() => returnFocusRef.current?.focus(), 0);
   };
 
   const closeBrowseWith = (value: string | null) => {
     if (!browse) return;
     browse.resolve(value);
     setBrowse(null);
+    window.setTimeout(() => returnFocusRef.current?.focus(), 0);
   };
+
+  useEffect(() => {
+    if (!dialog && !browse) return;
+    const frame = window.requestAnimationFrame(() => {
+      modalRef.current
+        ?.querySelector<HTMLElement>("textarea, input, button, [tabindex]:not([tabindex='-1'])")
+        ?.focus();
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (dialog) {
+          if (dialog.kind === "confirm") dialog.resolve(false);
+          else dialog.resolve(null);
+          setDialog(null);
+          window.setTimeout(() => returnFocusRef.current?.focus(), 0);
+        } else if (browse) {
+          browse.resolve(null);
+          setBrowse(null);
+          window.setTimeout(() => returnFocusRef.current?.focus(), 0);
+        }
+        return;
+      }
+      if (event.key !== "Tab" || !modalRef.current) return;
+      const focusable = Array.from(
+        modalRef.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
+        ),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [browse, dialog]);
 
   return (
     <DialogsContext.Provider value={{ confirm, prompt, browseFolder, toast }}>
@@ -216,22 +273,36 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
 
       {dialog && (
         <div className="modal-overlay" onMouseDown={() => closeWith(dialog.kind === "confirm" ? false : null)}>
-          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">{dialog.title}</h2>
+          <div ref={modalRef} className="modal" role="dialog" aria-modal="true" aria-labelledby={dialogTitleId} onMouseDown={(e) => e.stopPropagation()}>
+            <h2 id={dialogTitleId} className="modal-title">{dialog.title}</h2>
             {dialog.message && <p className="modal-message">{dialog.message}</p>}
-            {dialog.kind === "prompt" && (
+            {dialog.kind === "prompt" && (dialog.multiline ? (
+              <textarea
+                autoFocus
+                className="modal-input modal-textarea"
+                placeholder={dialog.placeholder}
+                value={promptValue}
+                maxLength={dialog.maxLength}
+                onChange={(e) => setPromptValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) closeWith(promptValue);
+                  if (e.key === "Escape") closeWith(null);
+                }}
+              />
+            ) : (
               <input
                 autoFocus
                 className="modal-input"
                 placeholder={dialog.placeholder}
                 value={promptValue}
+                maxLength={dialog.maxLength}
                 onChange={(e) => setPromptValue(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") closeWith(promptValue);
                   if (e.key === "Escape") closeWith(null);
                 }}
               />
-            )}
+            ))}
             <div className="modal-actions">
               <button type="button" className="btn" onClick={() => closeWith(dialog.kind === "confirm" ? false : null)}>
                 {dialog.cancelLabel ?? "Cancel"}
@@ -251,14 +322,14 @@ export function DialogsProvider({ children }: { children: ReactNode }) {
 
       {browse && (
         <div className="modal-overlay" onMouseDown={() => closeBrowseWith(null)}>
-          <div className="modal modal-browse" onMouseDown={(e) => e.stopPropagation()}>
-            <h2 className="modal-title">{browse.title}</h2>
+          <div ref={modalRef} className="modal modal-browse" role="dialog" aria-modal="true" aria-labelledby={browseTitleId} onMouseDown={(e) => e.stopPropagation()}>
+            <h2 id={browseTitleId} className="modal-title">{browse.title}</h2>
             <FolderBrowserBody startPath={browse.startPath} onSelect={(p) => closeBrowseWith(p)} onCancel={() => closeBrowseWith(null)} />
           </div>
         </div>
       )}
 
-      <div className="toast-stack">
+      <div className="toast-stack" role="status" aria-live="polite" aria-atomic="false">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.kind}`}>
             {t.kind === "success" ? <CheckCircle2 size={14} /> : t.kind === "error" ? <XCircle size={14} /> : <Info size={14} />}

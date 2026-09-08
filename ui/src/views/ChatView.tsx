@@ -8,9 +8,10 @@ import {
   Copy,
   Cpu,
   Database,
-  GitBranch,
+  FileText,
   Lock,
   MoreHorizontal,
+  PanelBottomOpen,
   Paperclip,
   Pencil,
   ShieldQuestion,
@@ -101,6 +102,12 @@ interface MessageMarker {
   index: number;
 }
 
+type AgentControlValue =
+  | PermissionMode
+  | "toggle-thinking"
+  | "edit-instructions"
+  | "toggle-knowledge";
+
 export function ChatView({
   status,
   session,
@@ -109,6 +116,9 @@ export function ChatView({
   onEnsureSession,
   onStreamingChange,
   onSetPermission,
+  onSetSystemPrompt,
+  runtimeOpen,
+  onRuntimeOpenChange,
   onGitRefresh,
   gitBusy,
 }: {
@@ -119,16 +129,21 @@ export function ChatView({
   onEnsureSession: () => Promise<ChatSession>;
   onStreamingChange: (id: string | null) => void;
   onSetPermission: (id: string, permission: PermissionMode) => void;
+  onSetSystemPrompt: (id: string, systemPrompt: string) => Promise<void>;
+  runtimeOpen: boolean;
+  onRuntimeOpenChange: (open: boolean) => void;
   onGitRefresh: () => Promise<void>;
   gitBusy: boolean;
 }) {
   const { settings } = useSettings();
-  const { toast } = useDialogs();
+  const { prompt, toast } = useDialogs();
   const models = status?.models ?? [];
   const [model, setModel] = useState("");
   // Off by default (matches the daemon's default): a Qwen3-style hidden
   // <think> pass before the real answer, only useful for reasoning models.
-  const [thinking, setThinking] = useState(false);
+  const [thinkingByChat, setThinkingByChat] = useState<Record<string, boolean>>({});
+  const thinkingKey = session?.id ?? "draft";
+  const thinking = thinkingByChat[thinkingKey] ?? false;
   const [input, setInput] = useState("");
   const [liveText, setLiveText] = useState("");
   const [sending, setSending] = useState(false);
@@ -140,6 +155,7 @@ export function ChatView({
   const [openFiles, setOpenFiles] = useState<Record<number, boolean>>({});
   const [openSteps, setOpenSteps] = useState<Record<number, boolean>>({});
   const [overflowOpen, setOverflowOpen] = useState(false);
+  const overflowRef = useRef<HTMLDivElement>(null);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const [presetState, setPresetState] = useState<WorkspacePresetList | null>(null);
@@ -173,6 +189,24 @@ export function ChatView({
       api.releaseOneAttachment(attachment.id, reference).catch(() => {});
     }
   }, []);
+
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const closeOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (overflowRef.current?.contains(target) || target.closest(".select-menu")) return;
+      setOverflowOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOverflowOpen(false);
+    };
+    document.addEventListener("mousedown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [overflowOpen]);
 
   // Manual compaction: typing "/compact" replaces the older half of the
   // chat with one model-written summary instead of sending it as a
@@ -213,6 +247,9 @@ export function ChatView({
       return;
     }
     const target = session ?? (await onEnsureSession());
+    if (!session && thinking) {
+      setThinkingByChat((current) => ({ ...current, [target.id]: true }));
+    }
     setError(null);
     setInput("");
     setEditingMessage(null);
@@ -274,8 +311,11 @@ export function ChatView({
       }
     } finally {
       const durationMs = performance.now() - start;
+      const snapshot = await api.generation(target.id).catch(() => null);
+      const followups = snapshot?.applied_followups ?? [];
       onUpdateMessages(target.id, [
         ...startMessages,
+        ...followups.map((content): StoredMessage => ({ role: "user", content })),
         { role: "assistant", content: assistantText, durationMs, steps: liveStepsRef.current },
       ]);
       setLiveText("");
@@ -455,6 +495,7 @@ export function ChatView({
       if (snap.text) {
         onUpdateMessages(sessionId, [
           ...session.messages,
+          ...snap.applied_followups.map((content): StoredMessage => ({ role: "user", content })),
           { role: "assistant", content: snap.text, steps: snap.steps },
         ]);
       } else if (snap.error) {
@@ -497,7 +538,7 @@ export function ChatView({
       const result = await api.knowledgeStatus().catch(() => null);
       if (cancelled || !result) return;
       setKnowledgeStatus(result);
-      if (result.running) timer = window.setTimeout(poll, 600);
+      timer = window.setTimeout(poll, result.running ? 600 : 2000);
     };
     poll();
     return () => {
@@ -585,6 +626,26 @@ export function ChatView({
     }
   };
 
+  const editChatInstructions = async () => {
+    const target = session ?? (await onEnsureSession());
+    const value = await prompt({
+      title: "Chat instructions",
+      message: "Applied only to this chat, after global and workspace instructions. Ctrl/Cmd+Enter saves.",
+      placeholder: "How should the agent approach this chat?",
+      defaultValue: target.systemPrompt,
+      confirmLabel: "Save instructions",
+      multiline: true,
+      maxLength: 16 * 1024,
+    });
+    if (value === null) return;
+    try {
+      await onSetSystemPrompt(target.id, value);
+      toast(value.trim() ? "Chat instructions saved" : "Chat instructions cleared", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+
   const switchBranch = async (name: string) => {
     if (
       !session ||
@@ -654,23 +715,6 @@ export function ChatView({
           {formatContextLength(effectiveModelObj.context_length)}
         </span>
       )}
-      <button
-        type="button"
-        className={
-          knowledgeStatus?.running
-            ? "chip-select chip-toggle chip-toggle-on"
-            : "chip-select chip-toggle"
-        }
-        title={
-          knowledgeStatus
-            ? `${knowledgeStatus.snapshot.files} indexed workspace files`
-            : "Index workspace files for retrieval"
-        }
-        onClick={() => void toggleKnowledgeIndex()}
-      >
-        <Database size={12} />
-        {knowledgeStatus?.running ? "Cancel indexing" : "Index knowledge"}
-      </button>
       {presetState && presetState.presets.length > 0 && (
         <Select
           triggerClassName="chip-select"
@@ -690,7 +734,7 @@ export function ChatView({
 
   const renderChatModeControls = () => (
     <div className="composer-mode-group">
-      <Select
+      <Select<AgentControlValue>
         triggerClassName={
           session?.permission === "full-access"
             ? "chip-select chip-toggle chip-toggle-on"
@@ -706,23 +750,52 @@ export function ChatView({
           )
         }
         value={session?.permission ?? "read-only"}
-        onChange={(permission) => session && onSetPermission(session.id, permission as PermissionMode)}
-        options={[
-          { value: "read-only", label: "Read only" },
-          { value: "ask", label: "Ask before changes" },
-          { value: "full-access", label: "Full access" },
+        ariaLabel="Agent access and behavior"
+        onChange={(value) => {
+          if (value === "toggle-thinking") {
+            setThinkingByChat((current) => ({
+              ...current,
+              [thinkingKey]: !(current[thinkingKey] ?? false),
+            }));
+          } else if (value === "edit-instructions") {
+            void editChatInstructions();
+          } else if (value === "toggle-knowledge") {
+            void toggleKnowledgeIndex();
+          } else if (session) {
+            onSetPermission(session.id, value);
+          }
+        }}
+        groups={[
+          {
+            section: "Tool access",
+            options: [
+              { value: "read-only", label: "Read only" },
+              { value: "ask", label: "Ask before changes" },
+              { value: "full-access", label: "Full access" },
+            ],
+          },
+          {
+            section: "Agent behavior",
+            options: [
+              {
+                value: "toggle-thinking",
+                label: thinking ? "Thinking enabled" : "Enable thinking",
+                icon: <Brain size={12} />,
+              },
+              {
+                value: "edit-instructions",
+                label: session?.systemPrompt.trim() ? "Edit instructions" : "Add instructions",
+                icon: <FileText size={12} />,
+              },
+              {
+                value: "toggle-knowledge",
+                label: knowledgeStatus?.running ? "Cancel indexing" : "Index knowledge",
+                icon: <Database size={12} />,
+              },
+            ],
+          },
         ]}
       />
-      <button
-        type="button"
-        className={thinking
-          ? "chip-select chip-toggle chip-toggle-on"
-          : "chip-select chip-toggle"}
-        title="Let reasoning models think before answering"
-        onClick={() => setThinking((current) => !current)}
-      >
-        <Brain size={12} /> {thinking ? "Thinking" : "Think"}
-      </button>
     </div>
   );
 
@@ -1049,6 +1122,7 @@ export function ChatView({
                 />
                 <input
                   type="file"
+                  aria-label="Attach files"
                   multiple
                   disabled={uploadingAttachment}
                   accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/plain,text/markdown,application/json"
@@ -1070,17 +1144,19 @@ export function ChatView({
               />
               {renderChatModeControls()}
               <div className="composer-chips-wide">{renderConfigChips()}</div>
-              <div className="composer-overflow">
+              <div ref={overflowRef} className="composer-overflow">
                 <button
                   type="button"
                   className="chip-select composer-overflow-btn"
                   title="More options"
+                  aria-label="More composer options"
+                  aria-expanded={overflowOpen}
                   onClick={() => setOverflowOpen((o) => !o)}
                 >
                   <MoreHorizontal size={14} />
                 </button>
                 {overflowOpen && (
-                  <div className="composer-overflow-menu" onMouseLeave={() => setOverflowOpen(false)}>
+                  <div className="composer-overflow-menu">
                     {renderConfigChips()}
                   </div>
                 )}
@@ -1107,14 +1183,22 @@ export function ChatView({
           </div>
         </form>
 
-        {gitStatus?.is_repo && (
-          <div className="composer-git-row">
-            <span className="composer-git-label">
-              <span className="topbar-icon">
-                <GitBranch size={12} />
-              </span>{" "}
-              Local checkout
-            </span>
+        <div className="composer-git-row">
+          <button
+            type="button"
+            className={runtimeOpen
+              ? "composer-runtime-button composer-runtime-button-active"
+              : "composer-runtime-button"}
+            title={runtimeOpen ? "Hide runtime tools" : "Open runtime tools"}
+            aria-label={runtimeOpen ? "Hide runtime tools" : "Open runtime tools"}
+            aria-controls="workspace-runtime-dock"
+            aria-expanded={runtimeOpen}
+            onClick={() => onRuntimeOpenChange(!runtimeOpen)}
+          >
+            <PanelBottomOpen size={13} />
+            <span>Runtime</span>
+          </button>
+          {gitStatus?.is_repo && (
             <Select
               triggerClassName="composer-git-branch-select mono"
               value={gitStatus.branch ?? ""}
@@ -1137,8 +1221,8 @@ export function ChatView({
                 })),
               ]}
             />
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,6 +10,7 @@ import {
 import { Sidebar } from "./components/Sidebar";
 import { TopBar } from "./components/TopBar";
 import { RightPanel } from "./components/RightPanel";
+import { RuntimeDock } from "./components/RuntimeDock";
 import { AppLogo } from "./components/AppLogo";
 import { ChatView } from "./views/ChatView";
 import { HomeView } from "./views/HomeView";
@@ -48,6 +50,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState("all");
   const [rightPanelMode, setRightPanelMode] = useState<"split" | "collapsed">("split");
   const [gitRefreshVersion, setGitRefreshVersion] = useState(0);
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [rightPanelWidth, setRightPanelWidth] = useState(
     DEFAULT_RIGHT_PANEL_WIDTH,
@@ -63,10 +66,10 @@ export default function App() {
   const sidebarCollapsed = settings.sidebar_collapsed;
   const setSidebarCollapsed = useCallback(
     (next: boolean) =>
-      saveSettings({ ...settings, sidebar_collapsed: next }).catch((e) =>
+      saveSettings({ sidebar_collapsed: next }).catch((e) =>
         toast(e instanceof Error ? e.message : String(e), "error"),
       ),
-    [saveSettings, settings, toast],
+    [saveSettings, toast],
   );
   const { status, error, refresh } = useStatus();
   const {
@@ -77,9 +80,11 @@ export default function App() {
     createSession,
     setMessages,
     setPermission,
+    setSystemPrompt,
     renameSession,
     deleteSession,
     deleteSessionsByProject,
+    refreshSessions,
   } = useSessions();
   const { projects, createProject, cloneProject, deleteProject, refresh: refreshProjects } = useProjects();
   const runningGenerations = useRunningGenerations();
@@ -191,7 +196,7 @@ export default function App() {
     [rightPanelMode, sidebarCollapsed],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const app = appRef.current;
     if (!app) return;
     const reclamp = () => {
@@ -207,12 +212,11 @@ export default function App() {
         updateIslandWidth("right", right);
       }
     };
-    const frame = window.requestAnimationFrame(reclamp);
+    reclamp();
     const observer = new ResizeObserver(reclamp);
     observer.observe(app);
     window.addEventListener("resize", reclamp);
     return () => {
-      window.cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", reclamp);
     };
@@ -422,17 +426,32 @@ export default function App() {
         ) : effectiveView === "home" ? (
           <HomeView onCreateProject={createProject} onCloneProject={cloneProject} onOpenProject={openProject} />
         ) : (
-          <ChatView
-            status={status}
-            session={active}
-            gitStatus={gitStatus}
-            onUpdateMessages={setMessages}
-            onEnsureSession={newChat}
-            onStreamingChange={setStreamingId}
-            onSetPermission={setPermission}
-            onGitRefresh={refreshGit}
-            gitBusy={activeProjectBusy}
-          />
+          <>
+            <ChatView
+              status={status}
+              session={active}
+              gitStatus={gitStatus}
+              onUpdateMessages={setMessages}
+              onEnsureSession={newChat}
+              onStreamingChange={setStreamingId}
+              onSetPermission={setPermission}
+              onSetSystemPrompt={setSystemPrompt}
+              runtimeOpen={runtimeOpen}
+              onRuntimeOpenChange={setRuntimeOpen}
+              onGitRefresh={refreshGit}
+              gitBusy={activeProjectBusy}
+            />
+            {active && (
+              <RuntimeDock
+                key={active.projectId}
+                session={active}
+                open={runtimeOpen}
+                onOpenChange={setRuntimeOpen}
+                onGitRefresh={() => void refreshGit()}
+                onChatsRefresh={() => void refreshSessions()}
+              />
+            )}
+          </>
         )}
       </main>
 

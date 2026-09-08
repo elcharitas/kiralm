@@ -23,6 +23,8 @@ pub struct Chat {
     pub project_id: String,
     pub permission: String,
     #[serde(default)]
+    pub system_prompt: String,
+    #[serde(default)]
     pub messages: serde_json::Value,
 }
 
@@ -54,5 +56,25 @@ fn migrate(version: u32, value: serde_json::Value) -> anyhow::Result<serde_json:
     match version {
         0 => Ok(value),
         _ => anyhow::bail!("no chats migration from schema version {version}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_chat_defaults_system_prompt() {
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat-1",
+            "title": "Legacy",
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "updated_at": "2026-01-01T00:00:00.000Z",
+            "project_id": "project-1",
+            "permission": "read-only",
+            "messages": []
+        }))
+        .unwrap();
+        assert!(chat.system_prompt.is_empty());
     }
 }

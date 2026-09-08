@@ -4,9 +4,11 @@
 //! This is what lets a model actually touch the filesystem, so both the
 //! sandbox and the permission check are load-bearing, not decoration.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// A session's tool-access level. Defaults to `ReadOnly` (new sessions
@@ -60,6 +62,8 @@ pub struct ToolStep {
     pub file_edit: Option<FileEdit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<MutationCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 /// A real file mutation from one `write_file` call: `before` is the
@@ -77,13 +81,13 @@ pub struct FileEdit {
     pub after: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MutationCheckpoint {
     pub operation: String,
     pub entries: Vec<PathSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathSnapshot {
     pub path: String,
     pub kind: String,
@@ -96,6 +100,12 @@ pub struct PathSnapshot {
 }
 
 const MAX_OUTPUT_CHARS: usize = 8_000;
+const MAX_READ_BYTES: u64 = 64 * 1024;
+const MAX_SEARCH_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SEARCH_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MUTATION_CONTENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_FETCH_BYTES: usize = 256 * 1024;
+const MAX_COMMAND_OUTPUT_BYTES: u64 = 256 * 1024;
 const RUN_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_WALK_FILES: usize = 5_000;
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -105,12 +115,56 @@ const MAX_CHECKPOINT_BYTES: u64 = 16 * 1024 * 1024;
 const WEB_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const SKIP_DIR_NAMES: [&str; 4] = ["node_modules", "target", "dist", ".venv"];
 
+#[cfg(unix)]
+struct ProcessGroupGuard(Option<i32>);
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn terminate(&mut self) {
+        if let Some(id) = self.0.take() {
+            unsafe { libc::kill(-id, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT_CHARS {
-        s.truncate(MAX_OUTPUT_CHARS);
+        let mut end = MAX_OUTPUT_CHARS;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
         s.push_str("\n… [truncated]");
     }
     s
+}
+
+async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut collected = Vec::with_capacity(limit.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    let mut limited = false;
+    loop {
+        let read = tokio::io::AsyncReadExt::read(&mut reader, &mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(collected.len());
+        if remaining > 0 {
+            collected.extend_from_slice(&chunk[..read.min(remaining)]);
+        }
+        limited |= read > remaining;
+    }
+    Ok((collected, limited))
 }
 
 /// `load_skill`'s description is rebuilt from the currently-enabled
@@ -151,7 +205,7 @@ fn load_skill_def() -> serde_json::Value {
 /// `run_dsh_profile` only shows up once there's actually a profile to
 /// run and a real `dsh` binary to run it with -- the one adapter where
 /// "not present" is the common, expected case.
-pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin: &str) -> Vec<serde_json::Value> {
+fn builtin_tool_defs(permission: Permission, dsh_bin: &str) -> Vec<serde_json::Value> {
     let mut defs = vec![
         json!({
             "type": "function",
@@ -333,8 +387,110 @@ pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin:
             }
         }));
     }
+    defs
+}
+
+#[cfg(test)]
+pub fn tool_defs(permission: Permission, mcp: &crate::mcp::McpRegistry, dsh_bin: &str) -> Vec<serde_json::Value> {
+    let mut defs = builtin_tool_defs(permission, dsh_bin);
     defs.extend(mcp.tool_defs());
     defs
+}
+
+const ROUTED_MCP_LIMIT: usize = 8;
+
+fn tool_name(definition: &serde_json::Value) -> &str {
+    definition["function"]["name"].as_str().unwrap_or_default()
+}
+
+fn routing_terms(text: &str) -> std::collections::HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about", "after", "again", "also", "and", "are", "can", "could", "does", "for",
+        "from", "have", "into", "its", "please", "should", "that", "the", "their", "then",
+        "this", "through", "use", "using", "want", "what", "when", "where", "which", "with",
+        "would", "you", "your",
+    ];
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|term| {
+            let term = term.to_ascii_lowercase();
+            (term.len() >= 2 && !STOP_WORDS.contains(&term.as_str())).then_some(term)
+        })
+        .collect()
+}
+
+fn mcp_relevance(
+    definition: &serde_json::Value,
+    query_terms: &std::collections::HashSet<String>,
+) -> usize {
+    let function = &definition["function"];
+    let searchable = format!(
+        "{} {}",
+        function["name"].as_str().unwrap_or_default().replace("mcp__", ""),
+        function["description"].as_str().unwrap_or_default(),
+    );
+    routing_terms(&searchable)
+        .iter()
+        .filter(|term| query_terms.contains(*term))
+        .count()
+}
+
+fn route_tool_defs(
+    definitions: Vec<serde_json::Value>,
+    _permission: Permission,
+    conversation: &str,
+) -> Vec<serde_json::Value> {
+    let normalized_body = conversation
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let normalized = format!(" {normalized_body} ");
+    let query_terms = routing_terms(&normalized);
+    let broad_mcp_request = normalized.contains(" mcp ") || normalized.contains(" connected tool ");
+    let mut selected = Vec::new();
+    let mut ranked_mcp = Vec::new();
+
+    for definition in definitions {
+        let name = tool_name(&definition);
+        if name.starts_with("mcp__") {
+            let score = mcp_relevance(&definition, &query_terms);
+            if score > 0 || broad_mcp_request {
+                ranked_mcp.push((score, name.to_string(), definition));
+            }
+            continue;
+        }
+
+        selected.push(definition);
+    }
+
+    ranked_mcp.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    selected.extend(
+        ranked_mcp
+            .into_iter()
+            .take(ROUTED_MCP_LIMIT)
+            .map(|(_, _, definition)| definition),
+    );
+    selected
+}
+
+/// Returns a prompt-relevant subset of the complete permission-scoped
+/// catalog, keeping the model's choice surface small without weakening
+/// the execution-time permission and policy checks.
+pub fn routed_tool_defs(
+    permission: Permission,
+    mcp: &crate::mcp::McpRegistry,
+    dsh_bin: &str,
+    conversation: &str,
+) -> Vec<serde_json::Value> {
+    let mut definitions = builtin_tool_defs(permission, dsh_bin);
+    definitions.extend(mcp.all_tool_defs());
+    route_tool_defs(definitions, permission, conversation)
 }
 
 fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
@@ -493,16 +649,24 @@ fn mutation_checkpoint(
         }
         _ => return Ok(None),
     };
+    checkpoint_paths(name, &paths, root).map(Some)
+}
+
+pub(crate) fn checkpoint_paths(
+    operation: &str,
+    paths: &[&str],
+    root: &Path,
+) -> Result<MutationCheckpoint, String> {
     let mut entries = Vec::new();
     let mut budget = CheckpointBudget::default();
     for path in paths {
         let resolved = resolve_in_root(root, path)?;
         snapshot_path(root, &resolved, &mut entries, &mut budget)?;
     }
-    Ok(Some(MutationCheckpoint {
-        operation: name.to_string(),
+    Ok(MutationCheckpoint {
+        operation: operation.to_string(),
         entries,
-    }))
+    })
 }
 
 #[derive(Default)]
@@ -647,10 +811,26 @@ pub async fn execute(
         None
     };
     let (ok, content, summary) = match name {
-        "read_file" => read_file(&args, root),
-        "list_directory" => list_directory(&args, root),
-        "search_files" => search_files(&args, root),
-        "glob" => glob_tool(&args, root),
+        "read_file" => {
+            let args = args.clone();
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || read_file(&args, &root)).await.unwrap_or_else(|_| err("read_file worker failed"))
+        },
+        "list_directory" => {
+            let args = args.clone();
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || list_directory(&args, &root)).await.unwrap_or_else(|_| err("list_directory worker failed"))
+        },
+        "search_files" => {
+            let args = args.clone();
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || search_files(&args, &root)).await.unwrap_or_else(|_| err("search_files worker failed"))
+        },
+        "glob" => {
+            let args = args.clone();
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || glob_tool(&args, &root)).await.unwrap_or_else(|_| err("glob worker failed"))
+        },
         "git_diff" => git_diff_tool(root).await,
         "load_skill" => load_skill(&args),
         "write_file" => {
@@ -693,6 +873,7 @@ pub async fn execute(
         ok,
         file_edit,
         checkpoint,
+        checkpoint_id: None,
     };
     (content, step)
 }
@@ -707,6 +888,7 @@ pub fn denied_step(name: &str, args_json: &str, reason: &str) -> (String, ToolSt
             ok: false,
             file_edit: None,
             checkpoint: None,
+            checkpoint_id: None,
         },
     )
 }
@@ -719,13 +901,23 @@ fn read_file(args: &serde_json::Value, root: &Path) -> (bool, String, String) {
         Ok(p) => p,
         Err(e) => return err(&e),
     };
-    match std::fs::read_to_string(&resolved) {
-        Ok(body) => {
-            let summary = format!("read {} bytes from {path}", body.len());
-            (true, truncate(body), summary)
-        }
-        Err(e) => err(&format!("failed to read '{path}': {e}")),
+    let total = std::fs::metadata(&resolved).map(|metadata| metadata.len()).unwrap_or(0);
+    let mut file = match std::fs::File::open(&resolved) {
+        Ok(file) => file,
+        Err(error) => return err(&format!("failed to read '{path}': {error}")),
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = file.by_ref().take(MAX_READ_BYTES + 1).read_to_end(&mut bytes) {
+        return err(&format!("failed to read '{path}': {error}"));
     }
+    let limited = bytes.len() as u64 > MAX_READ_BYTES;
+    bytes.truncate(MAX_READ_BYTES as usize);
+    let mut body = match String::from_utf8(bytes) {
+        Ok(body) => body,
+        Err(_) => return err(&format!("'{path}' is not a UTF-8 text file")),
+    };
+    if limited { body.push_str("\n… [read limit reached]"); }
+    (true, truncate(body), format!("read {total} bytes from {path}"))
 }
 
 fn list_directory(args: &serde_json::Value, root: &Path) -> (bool, String, String) {
@@ -774,12 +966,18 @@ fn write_file(
         return (err("write_file requires a 'path' argument"), None);
     };
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.len() as u64 > MAX_MUTATION_CONTENT_BYTES {
+        return (err("write_file content exceeds the 4 MiB safety limit"), None);
+    }
     let resolved = match resolve_in_root(root, path) {
         Ok(p) => p,
         Err(e) => return (err(&e), None),
     };
     // Captured before the write actually lands, so this is genuinely
     // the prior content (`None` means the file didn't exist yet).
+    if std::fs::metadata(&resolved).is_ok_and(|metadata| metadata.len() > MAX_MUTATION_CONTENT_BYTES) {
+        return (err("existing file exceeds the 4 MiB edit-history safety limit"), None);
+    }
     let before = std::fs::read_to_string(&resolved).ok();
     if let Some(parent) = resolved.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -814,8 +1012,14 @@ fn search_files(args: &serde_json::Value, root: &Path) -> (bool, String, String)
     // against that same canonical root, not the raw `root` argument.
     let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut matches = Vec::new();
+    let mut scanned_bytes = 0_u64;
     'files: for file in walk_files(&search_root) {
-        let Ok(bytes) = std::fs::read(&file) else { continue };
+        let Ok(metadata) = std::fs::metadata(&file) else { continue };
+        if metadata.len() > MAX_SEARCH_FILE_BYTES || scanned_bytes.saturating_add(metadata.len()) > MAX_SEARCH_TOTAL_BYTES { continue; }
+        scanned_bytes = scanned_bytes.saturating_add(metadata.len());
+        let Ok(mut source) = std::fs::File::open(&file) else { continue };
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        if source.by_ref().take(MAX_SEARCH_FILE_BYTES + 1).read_to_end(&mut bytes).is_err() { continue; }
         // A null byte in the first slice is a cheap, reliable-enough
         // binary check -- good enough to skip images/archives/etc.
         if bytes[..bytes.len().min(512)].contains(&0) {
@@ -901,11 +1105,17 @@ fn edit_file(
         return (err("edit_file requires an 'old_string' argument"), None);
     };
     let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+    if old_string.len() as u64 > MAX_MUTATION_CONTENT_BYTES || new_string.len() as u64 > MAX_MUTATION_CONTENT_BYTES {
+        return (err("edit_file content exceeds the 4 MiB safety limit"), None);
+    }
     let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
     let resolved = match resolve_in_root(root, path) {
         Ok(p) => p,
         Err(e) => return (err(&e), None),
     };
+    if std::fs::metadata(&resolved).is_ok_and(|metadata| metadata.len() > MAX_MUTATION_CONTENT_BYTES) {
+        return (err("file exceeds the 4 MiB edit-history safety limit"), None);
+    }
     let before = match std::fs::read_to_string(&resolved) {
         Ok(s) => s,
         Err(e) => return (err(&format!("failed to read '{path}': {e}")), None),
@@ -1013,13 +1223,28 @@ async fn web_fetch(args: &serde_json::Value, permission: Permission) -> (bool, S
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("html"));
-    let body = match resp.text().await {
-        Ok(b) => b,
-        Err(e) => return err(&format!("failed to read response body: {e}")),
-    };
     if !status.is_success() {
         return err(&format!("'{url}' returned {status}"));
     }
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    let mut limited = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return err(&format!("failed to read response body: {error}")),
+        };
+        let remaining = MAX_FETCH_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            limited = true;
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        if body.len() == MAX_FETCH_BYTES { limited = true; break; }
+    }
+    let mut body = String::from_utf8_lossy(&body).into_owned();
+    if limited { body.push_str("\n… [fetch limit reached]"); }
     let body = if is_html { strip_html_tags(&body) } else { body };
     let summary = format!("fetched {url} ({status})");
     (true, truncate(body), summary)
@@ -1033,33 +1258,71 @@ async fn run_command(args: &serde_json::Value, root: &Path, permission: Permissi
         return err("run_command requires a 'command' argument");
     };
     let root = root.to_path_buf();
-    let child = match tokio::process::Command::new("sh")
+    let mut process = tokio::process::Command::new("sh");
+    process
         .arg("-c")
         .arg(command)
         .current_dir(&root)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    process.process_group(0);
+    let mut child = match process.spawn() {
         Ok(c) => c,
         Err(e) => return err(&format!("failed to spawn command: {e}")),
     };
-
-    let output = tokio::time::timeout(RUN_COMMAND_TIMEOUT, child.wait_with_output()).await;
-    match output {
-        Ok(Ok(out)) => {
-            let mut body = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr);
+    #[cfg(unix)]
+    let mut process_group = ProcessGroupGuard(child.id().map(|id| id as i32));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_task = tokio::spawn(async move {
+        match stdout {
+            Some(stdout) => read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES as usize).await,
+            None => Ok((Vec::new(), false)),
+        }
+    });
+    let stderr_task = tokio::spawn(async move {
+        match stderr {
+            Some(stderr) => read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES as usize).await,
+            None => Ok((Vec::new(), false)),
+        }
+    });
+    match tokio::time::timeout(RUN_COMMAND_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            #[cfg(unix)]
+            process_group.terminate();
+            let (stdout, stdout_limited) = stdout_task.await.ok().and_then(Result::ok).unwrap_or_default();
+            let (stderr, stderr_limited) = stderr_task.await.ok().and_then(Result::ok).unwrap_or_default();
+            let limited = stdout_limited || stderr_limited;
+            let mut body = String::from_utf8_lossy(&stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr);
             if !stderr.is_empty() {
                 body.push_str("\n[stderr]\n");
                 body.push_str(&stderr);
             }
-            let code = out.status.code().unwrap_or(-1);
+            if limited { body.push_str("\n… [command output limit reached]"); }
+            let code = status.code().unwrap_or(-1);
             let summary = format!("ran '{command}' (exit {code})");
-            (out.status.success(), truncate(body), summary)
+            (status.success(), truncate(body), summary)
         }
-        Ok(Err(e)) => err(&format!("command failed: {e}")),
-        Err(_) => err(&format!("command timed out after {}s", RUN_COMMAND_TIMEOUT.as_secs())),
+        Ok(Err(e)) => {
+            #[cfg(unix)]
+            process_group.terminate();
+            stdout_task.abort();
+            stderr_task.abort();
+            err(&format!("command failed: {e}"))
+        },
+        Err(_) => {
+            #[cfg(unix)]
+            process_group.terminate();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            err(&format!("command timed out after {}s", RUN_COMMAND_TIMEOUT.as_secs()))
+        }
     }
 }
 
@@ -1098,6 +1361,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kiralm-tools-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn truncate_preserves_utf8_boundaries() {
+        let value = format!("{}é", "a".repeat(MAX_OUTPUT_CHARS - 1));
+        let truncated = truncate(value);
+        assert!(truncated.ends_with("… [truncated]"));
+        assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_drains_after_reaching_its_limit() {
+        let (mut writer, reader) = tokio::io::duplex(8);
+        let write = tokio::spawn(async move {
+            tokio::io::AsyncWriteExt::write_all(&mut writer, b"abcdefghijklmnop").await.unwrap();
+        });
+        let (output, limited) = read_bounded(reader, 5).await.unwrap();
+        write.await.unwrap();
+        assert_eq!(output, b"abcde");
+        assert!(limited);
     }
 
     #[test]
@@ -1596,11 +1879,21 @@ mod tests {
     #[test]
     fn read_only_sessions_are_not_offered_mutating_tools() {
         let defs = tool_defs(Permission::ReadOnly, &mcp(), "dsh");
-        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
         for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
             assert!(!names.contains(&mutating), "read-only session should not see '{mutating}'");
         }
-        for readable in ["read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill"] {
+        for readable in [
+            "read_file",
+            "list_directory",
+            "search_files",
+            "glob",
+            "git_diff",
+            "load_skill",
+        ] {
             assert!(names.contains(&readable), "'{readable}' should always be offered");
         }
     }
@@ -1612,5 +1905,64 @@ mod tests {
         for mutating in ["write_file", "run_command", "edit_file", "delete_file", "move_file", "git_commit", "web_fetch"] {
             assert!(names.contains(&mutating), "ask session should see '{mutating}'");
         }
+    }
+
+    #[test]
+    fn routed_tools_keep_permission_eligible_builtins_for_ambiguous_followups() {
+        let defs = routed_tool_defs(
+            Permission::FullAccess,
+            &mcp(),
+            "dsh",
+            "Review the concerns and address them.",
+        );
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["function"]["name"].as_str()).collect();
+        for expected in [
+            "read_file", "list_directory", "search_files", "glob", "git_diff", "load_skill",
+            "write_file",
+            "edit_file",
+            "run_command",
+            "delete_file",
+            "git_commit",
+            "web_fetch",
+        ] {
+            assert!(names.contains(&expected), "missing built-in '{expected}'");
+        }
+    }
+
+    #[test]
+    fn routed_tools_expand_for_change_and_explicit_git_intent() {
+        let defs = routed_tool_defs(
+            Permission::Ask,
+            &mcp(),
+            "dsh",
+            "Please implement the fix, run tests, then commit it.",
+        );
+        let names: Vec<&str> = defs
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
+        for expected in ["write_file", "edit_file", "run_command", "git_commit"] {
+            assert!(
+                names.contains(&expected),
+                "change request should expose '{expected}'"
+            );
+        }
+        assert!(names.contains(&"delete_file"));
+    }
+
+    #[test]
+    fn routed_tools_rank_relevant_mcp_definitions() {
+        let mut defs = tool_defs(Permission::ReadOnly, &mcp(), "dsh");
+        defs.extend([
+            json!({"type":"function","function":{"name":"mcp__calendar__list_events","description":"List calendar events","parameters":{"type":"object"}}}),
+            json!({"type":"function","function":{"name":"mcp__github__create_issue","description":"Create a GitHub issue","parameters":{"type":"object"}}}),
+        ]);
+        let routed = route_tool_defs(defs, Permission::ReadOnly, "Open a GitHub issue for this bug");
+        let names: Vec<&str> = routed
+            .iter()
+            .filter_map(|definition| definition["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"mcp__github__create_issue"));
+        assert!(!names.contains(&"mcp__calendar__list_events"));
     }
 }

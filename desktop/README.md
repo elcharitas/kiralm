@@ -7,12 +7,8 @@ reach the daemon through that socket, so the installed desktop app does not
 open a local HTTP URL. Closing the window hides it (menu bar icon:
 Show/Hide/Quit); Quit gracefully stops the daemon only if this app spawned it.
 
-Before building or running, copy the release daemon binary in as the
-sidecar (target-triple-suffixed, per Tauri's externalBin convention):
-
-```
-cargo build --release --manifest-path ../Cargo.toml
-cp ../target/release/kiralm src-tauri/binaries/kiralm-$(rustc -vV | sed -n 's/host: //p')
-```
-
-Then `cargo tauri dev` or `cargo tauri build` from `desktop/`.
+Run `cargo tauri dev` or `cargo tauri build` from `desktop/`. The Tauri
+pre-build hook rebuilds the UI and the matching daemon, then atomically
+places the target-triple-suffixed sidecar under `src-tauri/binaries/`.
+This is intentionally automatic so a release cannot silently package a
+daemon left over from an earlier source revision.

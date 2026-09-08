@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use parking_lot::RwLock;
 use rmcp::model::{CallToolRequestParams, ContentBlock, Tool};
 use rmcp::service::RunningService;
@@ -175,15 +176,22 @@ fn strip_namespace<'a>(full_name: &'a str, server: &str) -> Option<&'a str> {
 fn build_tool_defs(server: &str, tools: &[Tool]) -> Vec<serde_json::Value> {
     tools
         .iter()
-        .map(|t| {
-            json!({
+        .take(MAX_MCP_TOOLS_PER_SERVER)
+        .filter_map(|t| {
+            if serde_json::to_vec(&t.input_schema)
+                .is_ok_and(|schema| schema.len() > MAX_MCP_SCHEMA_BYTES)
+            {
+                tracing::warn!("mcp: omitting oversized schema for {server}/{}", t.name);
+                return None;
+            }
+            Some(json!({
                 "type": "function",
                 "function": {
                     "name": namespaced(server, &t.name),
                     "description": t.description.clone().unwrap_or_default(),
                     "parameters": serde_json::Value::Object((*t.input_schema).clone()),
                 }
-            })
+            }))
         })
         .collect()
 }
@@ -193,10 +201,17 @@ fn build_tool_defs(server: &str, tools: &[Tool]) -> Vec<serde_json::Value> {
 /// else stops dozens of servers from bloating every turn's request with
 /// tool schemas.
 const MAX_TOOL_DEFS: usize = 60;
+const MAX_MCP_TOOLS_PER_SERVER: usize = 256;
+const MAX_MCP_SCHEMA_BYTES: usize = 64 * 1024;
+const MCP_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_MCP_RENDER_CHARS: usize = 8_000;
 
 fn cap_tool_defs(all: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
     if all.len() > MAX_TOOL_DEFS {
-        tracing::warn!("mcp: {} tools available across connected servers, capping at {MAX_TOOL_DEFS}", all.len());
+        tracing::warn!(
+            "mcp: {} tools available across connected servers, capping at {MAX_TOOL_DEFS}",
+            all.len()
+        );
         all.into_iter().take(MAX_TOOL_DEFS).collect()
     } else {
         all
@@ -204,14 +219,30 @@ fn cap_tool_defs(all: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
 }
 
 fn render_content(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .map(|b| match b.as_text() {
-            Some(t) => t.text.clone(),
-            None => serde_json::to_string(b).unwrap_or_default(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut rendered = String::new();
+    for block in blocks {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        let text = match block.as_text() {
+            Some(text) => text.text.as_str(),
+            None => "[non-text MCP content omitted]",
+        };
+        let remaining = MAX_MCP_RENDER_CHARS.saturating_sub(rendered.len());
+        if remaining == 0 {
+            break;
+        }
+        let mut end = text.len().min(remaining);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        rendered.push_str(&text[..end]);
+        if end < text.len() {
+            rendered.push_str("\n… [truncated]");
+            break;
+        }
+    }
+    rendered
 }
 
 impl McpRegistry {
@@ -223,9 +254,11 @@ impl McpRegistry {
     /// best-effort: one server's failure is logged and leaves it out of
     /// `tool_defs()`, never aborts the rest or the caller.
     pub async fn connect_all_enabled(&self, configs: &[McpServerConfig]) {
-        for cfg in configs.iter().filter(|c| c.enabled) {
-            self.connect(cfg).await;
-        }
+        futures_util::stream::iter(configs.iter().filter(|config| config.enabled).cloned())
+            .for_each_concurrent(4, |config| async move {
+                self.connect(&config).await;
+            })
+            .await;
     }
 
     /// Spawns the server's process and handshakes over stdio. Replaces
@@ -235,15 +268,22 @@ impl McpRegistry {
         let mut cmd = tokio::process::Command::new(&cfg.command);
         cmd.args(&cfg.args).envs(&cfg.env);
         let entry = match TokioChildProcess::new(cmd) {
-            Ok(transport) => match ().serve(transport).await {
-                Ok(client) => match client.list_all_tools().await {
-                    Ok(tools) => McpEntry::Connected(Arc::new(McpConnection {
-                        client,
-                        tools: RwLock::new(tools),
-                    })),
-                    Err(e) => McpEntry::Failed(format!("tools/list failed: {e}")),
-                },
-                Err(e) => McpEntry::Failed(format!("mcp handshake failed: {e}")),
+            Ok(transport) => match tokio::time::timeout(MCP_OPERATION_TIMEOUT, ().serve(transport))
+                .await
+            {
+                Ok(Ok(client)) => {
+                    match tokio::time::timeout(MCP_OPERATION_TIMEOUT, client.list_all_tools()).await
+                    {
+                        Ok(Ok(tools)) => McpEntry::Connected(Arc::new(McpConnection {
+                            client,
+                            tools: RwLock::new(tools),
+                        })),
+                        Ok(Err(e)) => McpEntry::Failed(format!("tools/list failed: {e}")),
+                        Err(_) => McpEntry::Failed("tools/list timed out".to_string()),
+                    }
+                }
+                Ok(Err(e)) => McpEntry::Failed(format!("mcp handshake failed: {e}")),
+                Err(_) => McpEntry::Failed("mcp handshake timed out".to_string()),
             },
             Err(e) => McpEntry::Failed(format!("failed to spawn '{}': {e}", cfg.command)),
         };
@@ -282,8 +322,8 @@ impl McpRegistry {
 
     /// Every connected server's tools, namespaced and merge-ready for
     /// `tools::tool_defs()`. Failed servers contribute nothing.
-    pub fn tool_defs(&self) -> Vec<serde_json::Value> {
-        let all: Vec<_> = self
+    pub(crate) fn all_tool_defs(&self) -> Vec<serde_json::Value> {
+        let mut all: Vec<_> = self
             .conns
             .read()
             .iter()
@@ -292,7 +332,17 @@ impl McpRegistry {
                 McpEntry::Failed(_) => Vec::new(),
             })
             .collect();
-        cap_tool_defs(all)
+        all.sort_by(|left, right| {
+            left["function"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .cmp(right["function"]["name"].as_str().unwrap_or_default())
+        });
+        all
+    }
+
+    pub fn tool_defs(&self) -> Vec<serde_json::Value> {
+        cap_tool_defs(self.all_tool_defs())
     }
 
     /// Routes one `mcp__<server>__<tool>` call to its server's real
@@ -300,14 +350,19 @@ impl McpRegistry {
     /// all, so `tools::execute` can fall through to its own "unknown
     /// tool" error; anything under the `mcp__` prefix always gets a
     /// real (possibly error) result here.
-    pub async fn dispatch(&self, full_name: &str, args_json: &str) -> Option<(bool, String, String)> {
+    pub async fn dispatch(
+        &self,
+        full_name: &str,
+        args_json: &str,
+    ) -> Option<(bool, String, String)> {
         if !full_name.starts_with("mcp__") {
             return None;
         }
         let found = {
             let conns = self.conns.read();
             conns.iter().find_map(|(server, entry)| {
-                strip_namespace(full_name, server).map(|tool| (server.clone(), tool.to_string(), entry.clone()))
+                strip_namespace(full_name, server)
+                    .map(|tool| (server.clone(), tool.to_string(), entry.clone()))
             })
         };
         let Some((server, tool_name, entry)) = found else {
@@ -327,16 +382,21 @@ impl McpRegistry {
         let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or(json!({}));
         let params = CallToolRequestParams::new(tool_name.clone())
             .with_arguments(args.as_object().cloned().unwrap_or_default());
-        match conn.client.call_tool(params).await {
-            Ok(result) => {
+        match tokio::time::timeout(MCP_OPERATION_TIMEOUT, conn.client.call_tool(params)).await {
+            Ok(Ok(result)) => {
                 let ok = !result.is_error.unwrap_or(false);
                 let summary = format!("called mcp tool '{tool_name}' on '{server}'");
                 Some((ok, render_content(&result.content), summary))
             }
-            Err(e) => Some((
+            Ok(Err(e)) => Some((
                 false,
                 format!("Error: mcp tools/call to '{server}' failed: {e}"),
                 format!("mcp tools/call to '{server}' failed"),
+            )),
+            Err(_) => Some((
+                false,
+                format!("Error: mcp tools/call to '{server}' timed out"),
+                format!("mcp tools/call to '{server}' timed out"),
             )),
         }
     }

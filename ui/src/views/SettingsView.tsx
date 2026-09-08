@@ -277,7 +277,7 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
   // choice, not free text -- so it saves the instant it changes.
   const patchSettings = async (patch: Partial<typeof settings>) => {
     try {
-      await save({ ...settings, ...patch });
+      await save(patch);
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     }
@@ -379,6 +379,24 @@ function GeneralSettingsForm({ status }: { status: StatusResponse | null }) {
               { value: "full-access", label: "Full access" },
             ]}
           />
+        </div>
+        <div className="settings-field">
+          <label htmlFor="global-agent-instructions">Global agent instructions</label>
+          <textarea
+            id="global-agent-instructions"
+            className="settings-input settings-instructions"
+            defaultValue={settings.custom_instructions}
+            maxLength={16 * 1024}
+            placeholder="Preferences that should apply to every workspace and chat"
+            onBlur={(event) => {
+              if (event.currentTarget.value !== settings.custom_instructions) {
+                void patchSettings({ custom_instructions: event.currentTarget.value });
+              }
+            }}
+          />
+          <p className="settings-hint">
+            Applied after KiraLM’s core agent rules and before workspace or chat instructions.
+          </p>
         </div>
         <label className="settings-toggle">
           <span>Enter sends the message (unchecked: Enter for a newline, Ctrl/Cmd+Enter sends)</span>

@@ -20,6 +20,9 @@ pub fn settings_path() -> PathBuf {
 #[serde(default)]
 pub struct Settings {
     pub default_permission: String,
+    /// User-authored instructions applied to every agent turn, below
+    /// KiraLM's immutable core prompt and above workspace/chat layers.
+    pub custom_instructions: String,
     pub send_on_enter: bool,
     pub notify_on_finish: bool,
     pub default_hot_on_pull: bool,
@@ -37,12 +40,15 @@ pub struct Settings {
     /// summarization itself is client-driven (a plain chat-completion
     /// call), this flag just gates whether it fires automatically.
     pub auto_compact: bool,
+    pub runtime_dock_height: u32,
+    pub runtime_dock_tab: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             default_permission: "read-only".to_string(),
+            custom_instructions: String::new(),
             send_on_enter: true,
             notify_on_finish: false,
             default_hot_on_pull: false,
@@ -51,6 +57,8 @@ impl Default for Settings {
             sidebar_collapsed: false,
             collapsed_workspaces: Vec::new(),
             auto_compact: true,
+            runtime_dock_height: 280,
+            runtime_dock_tab: "terminal".to_string(),
         }
     }
 }
@@ -80,5 +88,18 @@ fn migrate(version: u32, value: serde_json::Value) -> anyhow::Result<serde_json:
     match version {
         0 => Ok(value),
         _ => anyhow::bail!("no settings migration from schema version {version}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_default_custom_instructions() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("custom_instructions");
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert!(settings.custom_instructions.is_empty());
     }
 }

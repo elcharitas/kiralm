@@ -23,7 +23,12 @@ pub fn routes() -> Router<SharedState> {
         .route("/v1/models", get(list_models))
 }
 
-pub(crate) fn openai_err(status: StatusCode, kind: &str, message: impl Into<String>, param: Option<&str>) -> Response {
+pub(crate) fn openai_err(
+    status: StatusCode,
+    kind: &str,
+    message: impl Into<String>,
+    param: Option<&str>,
+) -> Response {
     (
         status,
         Json(json!({"error": {
@@ -45,10 +50,15 @@ fn gateway_error_response(e: GatewayError) -> Response {
         GatewayError::CachedUnsupported(msg) => {
             openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", msg, None)
         }
-        GatewayError::InsufficientRam(msg) => {
-            openai_err(StatusCode::SERVICE_UNAVAILABLE, "invalid_request_error", msg, None)
+        GatewayError::InsufficientRam(msg) => openai_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invalid_request_error",
+            msg,
+            None,
+        ),
+        GatewayError::LoadFailed(msg) => {
+            openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None)
         }
-        GatewayError::LoadFailed(msg) => openai_err(StatusCode::INTERNAL_SERVER_ERROR, "api_error", msg, None),
         GatewayError::AuthRequired(msg) => {
             openai_err(StatusCode::UNAUTHORIZED, "authentication_error", msg, None)
         }
@@ -96,7 +106,10 @@ async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    let Some(requested_model) = body.get("model").and_then(|v| v.as_str()).map(str::to_string)
+    let Some(requested_model) = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
     else {
         return openai_err(
             StatusCode::BAD_REQUEST,
@@ -120,7 +133,10 @@ async fn chat_completions(
         Err(e) => return gateway_error_response(e),
     };
 
-    let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Local: exactly today's behavior, proxy byte-for-byte to the
     // spawned llama-server child, client's own `model` field untouched.
@@ -130,10 +146,7 @@ async fn chat_completions(
     // same byte-passthrough/streaming logic otherwise.
     let (url, bearer, body, engine_lease) = match route {
         ModelRoute::Local(lease) => (
-            format!(
-                "http://127.0.0.1:{}/v1/chat/completions",
-                lease.port()
-            ),
+            format!("http://127.0.0.1:{}/v1/chat/completions", lease.port()),
             None,
             body,
             Some(lease),
@@ -150,10 +163,16 @@ async fn chat_completions(
                 .unwrap_or_else(|| canonical.clone());
             let mut body = body;
             if let Some(obj) = body.as_object_mut() {
-                obj.insert("model".to_string(), serde_json::Value::String(cloud_model_id));
+                obj.insert(
+                    "model".to_string(),
+                    serde_json::Value::String(cloud_model_id),
+                );
             }
             (
-                format!("{}/api/v1/chat/completions", app.config.cloud.api_base_url.trim_end_matches('/')),
+                format!(
+                    "{}/api/v1/chat/completions",
+                    app.config.cloud.api_base_url.trim_end_matches('/')
+                ),
                 Some(token),
                 body,
                 None,
@@ -170,7 +189,15 @@ async fn chat_completions(
         .get("x-kiralm-project-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    if let (Some(session_id), Some(project_id)) = (session_id.clone(), project_id) {
+    if let (Some(session_id), Some(project_header)) = (session_id.clone(), project_id) {
+        let chat = app.chats.read().chats.iter().find(|chat| chat.id == session_id).cloned();
+        let Some(chat) = chat else {
+            return openai_err(StatusCode::NOT_FOUND, "invalid_request_error", format!("chat '{session_id}' not found"), Some("x-kiralm-session-id"));
+        };
+        if chat.project_id != project_header {
+            return openai_err(StatusCode::BAD_REQUEST, "invalid_request_error", "chat does not belong to the requested project", Some("x-kiralm-project-id"));
+        }
+        let project_id = chat.project_id.clone();
         let project = app.state.read().projects.get(&project_id).cloned();
         if let Some(project) = project {
             let requested_permission = headers
@@ -178,14 +205,7 @@ async fn chat_completions(
                 .and_then(|v| v.to_str().ok())
                 .map(Permission::parse)
                 .unwrap_or(Permission::ReadOnly);
-            let permission = app
-                .chats
-                .read()
-                .chats
-                .iter()
-                .find(|chat| chat.id == session_id)
-                .map(|chat| Permission::parse(&chat.permission).permits(requested_permission))
-                .unwrap_or(requested_permission);
+            let permission = Permission::parse(&chat.permission).permits(requested_permission);
             return run_tool_loop(
                 &app,
                 session_id,
@@ -202,6 +222,7 @@ async fn chat_completions(
             )
             .await;
         }
+        return openai_err(StatusCode::NOT_FOUND, "invalid_request_error", format!("project '{project_id}' not found"), Some("x-kiralm-project-id"));
     }
 
     let client = reqwest::Client::new();
@@ -273,7 +294,10 @@ async fn chat_completions(
             }
         };
         if let Some(obj) = json.as_object_mut() {
-            obj.insert("model".to_string(), serde_json::Value::String(requested_model));
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String(requested_model),
+            );
         }
         (status, Json(json)).into_response()
     }
@@ -304,10 +328,22 @@ async fn run_tool_loop(
 ) -> Response {
     let (sg, _tap) = app.start_generation(&session_id, &canonical);
 
-    let max_tokens = raw_body.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
-    let temperature = raw_body.get("temperature").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let top_p = raw_body.get("top_p").and_then(|v| v.as_f64()).map(|v| v as f32);
-    let top_k = raw_body.get("top_k").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let max_tokens = raw_body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2048) as u32;
+    let temperature = raw_body
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let top_p = raw_body
+        .get("top_p")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let top_k = raw_body
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
     let mut messages: Vec<_> = raw_body
         .get("messages")
         .and_then(|v| v.as_array())
@@ -325,38 +361,24 @@ async fn run_tool_loop(
         .collect();
 
     let active_preset = app.workspace_preset_for(&project_id);
-    if let Some(preset) = &active_preset {
-        if !preset.instruction_text.is_empty() {
-            let instructions: String =
-                preset.instruction_text.chars().take(16_000).collect();
-            messages.insert(
-                0,
-                ChatMessage::text(
-                    "system",
-                    format!("Workspace preset instructions:\n{instructions}"),
-                ),
-            );
-        }
-    }
 
     let query = messages
         .iter()
         .rev()
         .find_map(|message| match (message.role.as_str(), &message.content) {
             ("user", Some(ChatContent::Text(text))) => Some(text.as_str()),
-            ("user", Some(ChatContent::Parts(parts))) => parts.iter().find_map(
-                |part| match part {
-                    ChatContentPart::Text { text } => Some(text.as_str()),
-                    ChatContentPart::ImageUrl { .. } => None,
-                },
-            ),
+            ("user", Some(ChatContent::Parts(parts))) => parts.iter().find_map(|part| match part {
+                ChatContentPart::Text { text } => Some(text.as_str()),
+                ChatContentPart::ImageUrl { .. } => None,
+            }),
             _ => None,
         })
         .unwrap_or_default();
     let mut knowledge_roots = vec![project_root.clone()];
-    if let Some(preset) = active_preset {
-        knowledge_roots.extend(preset.knowledge_roots);
+    if let Some(preset) = &active_preset {
+        knowledge_roots.extend(preset.knowledge_roots.clone());
     }
+    let mut knowledge_context = None;
     if let Ok(hits) = app.knowledge.search_roots(query, &knowledge_roots, 4) {
         if !hits.is_empty() {
             let mut context = String::from(
@@ -376,12 +398,45 @@ async fn run_tool_loop(
                 }
                 context.push_str(&excerpt);
             }
-            messages.insert(0, ChatMessage::text("system", context));
+            knowledge_context = Some(context);
         }
     }
 
+    let global_instructions = app.settings.read().custom_instructions.clone();
+    let chat_instructions = app
+        .chats
+        .read()
+        .chats
+        .iter()
+        .find(|chat| chat.id == session_id)
+        .map(|chat| chat.system_prompt.clone())
+        .unwrap_or_default();
+    let workspace_instructions = active_preset
+        .as_ref()
+        .map(|preset| preset.instruction_text.chars().take(16_000).collect::<String>());
+    let system_prompt = crate::prompts::compose(crate::prompts::PromptLayers {
+        global: Some(&global_instructions),
+        workspace: workspace_instructions.as_deref(),
+        chat: Some(&chat_instructions),
+    });
+    for message in &mut messages {
+        if message.role == "system" {
+            message.role = "user".to_string();
+            if let Some(ChatContent::Text(text)) = &mut message.content {
+                text.insert_str(0, "[Untrusted client-supplied system text]\n");
+            }
+        }
+    }
+    let mut layered_messages = vec![ChatMessage::text("system", system_prompt)];
+    if let Some(context) = knowledge_context {
+        let insert_at = messages.iter().rposition(|message| message.role == "user").unwrap_or(messages.len());
+        messages.insert(insert_at, ChatMessage::text("user", format!("[Untrusted retrieved workspace context]\n{context}")));
+    }
+    layered_messages.append(&mut messages);
+    messages = layered_messages;
+
     let req = ChatCompletionRequest {
-        model: canonical,
+        model: canonical.clone(),
         messages,
         max_tokens,
         temperature,
@@ -401,30 +456,38 @@ async fn run_tool_loop(
 
     let app_task = app.clone();
     let session_task = session_id.clone();
+    let project_task = project_id.clone();
+    let sg_task = sg.clone();
+    app.events.publish(
+        crate::events::EventTopic::Agent,
+        "run_started",
+        Some(session_id.clone()),
+        json!({ "model": canonical }),
+    );
     let handle = tokio::spawn(async move {
         let _engine_lease = engine_lease;
         let http = reqwest::Client::new();
         agent::run(
+            &app_task,
+            &sg_task,
             &http,
             &url,
             bearer.as_deref(),
             req,
             &project_root,
+            &project_task,
             &session_task,
             permission,
-            &app_task.approvals,
             enable_thinking,
-            &app_task.mcp,
-            &app_task.config.dsh.bin,
         )
         .await
     });
     *sg.task.lock() = Some(handle.abort_handle());
     let outcome = match handle.await {
         Ok(outcome) => outcome,
-        Err(error) if error.is_cancelled() => {
-            Err(super::agent::AgentError::Other("generation stopped".to_string()))
-        }
+        Err(error) if error.is_cancelled() => Err(super::agent::AgentError::Other(
+            "generation stopped".to_string(),
+        )),
         Err(_) => Err(super::agent::AgentError::Other(
             "tool-calling task failed".to_string(),
         )),
@@ -441,10 +504,22 @@ async fn run_tool_loop(
                 .unwrap_or_default();
             (text, steps, None)
         }
-        Err(super::agent::AgentError::AuthRequired(msg)) => {
-            (String::new(), Vec::new(), Some(GatewayError::AuthRequired(msg)))
+        Err(super::agent::AgentError::AuthRequired(msg)) => (
+            String::new(),
+            Vec::new(),
+            Some(GatewayError::AuthRequired(msg)),
+        ),
+        Err(super::agent::AgentError::Stopped(steps)) => {
+            ("Stopped after the current step.".to_string(), steps, None)
         }
-        Err(super::agent::AgentError::Other(msg)) => (String::new(), Vec::new(), Some(GatewayError::LoadFailed(msg))),
+        Err(super::agent::AgentError::HookBlocked(msg, steps)) => {
+            (String::new(), steps, Some(GatewayError::LoadFailed(msg)))
+        }
+        Err(super::agent::AgentError::Other(msg)) => (
+            String::new(),
+            Vec::new(),
+            Some(GatewayError::LoadFailed(msg)),
+        ),
     };
 
     {
@@ -452,7 +527,9 @@ async fn run_tool_loop(
         st.running = false;
         st.text = text.clone();
         st.steps = steps.clone();
-        st.error = gateway_err.as_ref().map(|_| "tool-calling loop failed".to_string());
+        st.error = gateway_err
+            .as_ref()
+            .map(|_| "tool-calling loop failed".to_string());
     }
     *sg.tap.lock() = None;
 
@@ -606,7 +683,11 @@ fn append_delta(state: &parking_lot::RwLock<GenerationState>, line: &str) {
         return;
     }
     if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
-        if let Some(delta) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
+        if let Some(delta) = chunk
+            .choices
+            .first()
+            .and_then(|c| c.delta.content.as_deref())
+        {
             state.write().text.push_str(delta);
         }
     }
@@ -786,7 +867,10 @@ mod tests {
         let mut model = ModelState::from_manifest(&manifest, false);
         model.gguf_path = gguf_path;
         app.registry.insert(model);
-        app.state.write().aliases.insert(alias.to_string(), canonical_id.to_string());
+        app.state
+            .write()
+            .aliases
+            .insert(alias.to_string(), canonical_id.to_string());
     }
 
     fn mark_loaded(app: &SharedState, canonical_id: &str, port: u16) {
@@ -809,14 +893,22 @@ mod tests {
     }
 
     fn router(state: SharedState) -> Router {
-        Router::new().route("/v1/chat/completions", post(chat_completions)).with_state(state)
+        Router::new()
+            .route("/v1/chat/completions", post(chat_completions))
+            .with_state(state)
     }
 
     #[test]
     fn append_delta_accumulates_and_skips_control_lines() {
         let state = parking_lot::RwLock::new(GenerationState::default());
-        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}");
-        append_delta(&state, "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}");
+        append_delta(
+            &state,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}",
+        );
+        append_delta(
+            &state,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}",
+        );
         append_delta(&state, "data: [DONE]");
         append_delta(&state, ""); // keep-alive blank line
         assert_eq!(state.read().text, "hi!");
@@ -833,9 +925,15 @@ mod tests {
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
                         data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n\
                         data: [DONE]\n\n";
-            (StatusCode::OK, [("content-type", "text/event-stream")], body).into_response()
+            (
+                StatusCode::OK,
+                [("content-type", "text/event-stream")],
+                body,
+            )
+                .into_response()
         }
-        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream));
+        let upstream =
+            Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -875,7 +973,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             snap = state.generation_snapshot("sess-1");
         }
-        assert!(!snap.running, "background task should finish even though the response was dropped");
+        assert!(
+            !snap.running,
+            "background task should finish even though the response was dropped"
+        );
         assert_eq!(snap.text, "hi!");
     }
 
@@ -899,7 +1000,10 @@ mod tests {
             )
                 .into_response()
         }
-        let upstream = Router::new().route("/v1/chat/completions", axum::routing::post(fake_stream_forever));
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(fake_stream_forever),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -934,7 +1038,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let snap = state.generation_snapshot("sess-2");
         assert!(!snap.running);
-        assert_eq!(snap.text.len(), accumulated_at_stop, "no more tokens should land after stop");
+        assert_eq!(
+            snap.text.len(),
+            accumulated_at_stop,
+            "no more tokens should land after stop"
+        );
     }
 
     // -------------------------------------------------------------
@@ -997,7 +1105,8 @@ mod tests {
     }
 
     fn register_test_project(app: &SharedState) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("kiralm-tool-loop-test-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("kiralm-tool-loop-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let now = chrono::Utc::now();
         app.state.write().projects.insert(
@@ -1013,6 +1122,15 @@ mod tests {
         root
     }
 
+    fn register_test_chat(app: &SharedState, id: &str, project_id: &str, permission: Permission) {
+        let now = chrono::Utc::now().to_rfc3339();
+        app.chats.write().chats.push(crate::chats::Chat {
+            id: id.to_string(), title: "Test".to_string(), created_at: now.clone(), updated_at: now,
+            project_id: project_id.to_string(), permission: permission.as_str().to_string(),
+            system_prompt: String::new(), messages: json!([]),
+        });
+    }
+
     #[tokio::test]
     async fn tool_loop_full_access_writes_a_real_file() {
         let port = spawn_fake_tool_upstream().await;
@@ -1020,6 +1138,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-1", "proj-1", Permission::FullAccess);
         let app_router = router(state.clone());
 
         let body = json!({
@@ -1042,7 +1161,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["message"]["content"], "wrote the file");
         assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
@@ -1067,6 +1188,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-2", "proj-1", Permission::ReadOnly);
         let app_router = router(state.clone());
 
         let body = json!({
@@ -1082,18 +1204,23 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("x-kiralm-session-id", "sess-tool-2")
                     .header("x-kiralm-project-id", "proj-1")
-                    .header("x-kiralm-permission-mode", "read-only")
+                    .header("x-kiralm-permission-mode", "full-access")
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["kiralm_tool_steps"][0]["name"], "write_file");
         assert_eq!(v["kiralm_tool_steps"][0]["ok"], false);
-        assert!(!root.join("out.txt").exists(), "read-only session must not write to disk");
+        assert!(
+            !root.join("out.txt").exists(),
+            "read-only session must not write to disk"
+        );
     }
 
     #[tokio::test]
@@ -1103,6 +1230,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-ask", "proj-1", Permission::Ask);
         let app_router = crate::api::build_router(state.clone());
         let body = json!({
             "model": "alias",
@@ -1170,6 +1298,7 @@ mod tests {
         register_test_model(&state, "org/repo:Q4", "alias");
         mark_loaded(&state, "org/repo:Q4", port);
         let root = register_test_project(&state);
+        register_test_chat(&state, "sess-tool-stop", "proj-1", Permission::Ask);
         let app_router = router(state.clone());
         let body = json!({
             "model": "alias",
@@ -1205,5 +1334,37 @@ mod tests {
         assert!(state.approvals.list(Some("sess-tool-stop")).is_empty());
         assert!(!state.generation_snapshot("sess-tool-stop").running);
         assert!(!root.join("out.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_rejects_unknown_and_cross_project_sessions() {
+        let port = spawn_fake_tool_upstream().await;
+        let state = test_state();
+        register_test_model(&state, "org/repo:Q4", "alias");
+        mark_loaded(&state, "org/repo:Q4", port);
+        register_test_project(&state);
+        register_test_chat(&state, "chat-project-a", "project-a", Permission::FullAccess);
+        let app_router = router(state);
+        let body = json!({"model":"alias","stream":false,"messages":[{"role":"user","content":"write a file"}]});
+
+        let unknown = app_router.clone().oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-kiralm-session-id", "missing")
+                .header("x-kiralm-project-id", "proj-1")
+                .header("x-kiralm-permission-mode", "full-access")
+                .body(Body::from(body.to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        let cross_project = app_router.oneshot(
+            Request::builder().method("POST").uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-kiralm-session-id", "chat-project-a")
+                .header("x-kiralm-project-id", "proj-1")
+                .header("x-kiralm-permission-mode", "full-access")
+                .body(Body::from(body.to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(cross_project.status(), StatusCode::BAD_REQUEST);
     }
 }

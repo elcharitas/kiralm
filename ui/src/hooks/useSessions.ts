@@ -12,6 +12,7 @@ function fromDto(c: ChatDto): ChatSession {
     projectId: c.project_id,
     permission:
       c.permission === "full-access" ? "full-access" : c.permission === "ask" ? "ask" : "read-only",
+    systemPrompt: c.system_prompt ?? "",
     messages: (c.messages as StoredMessage[] | null) ?? [],
   };
 }
@@ -25,15 +26,16 @@ export function useSessions() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const { settings } = useSettings();
 
-  useEffect(() => {
-    api
+  const refreshSessions = async () => {
+    const { chats } = await api
       .listChats()
-      .then(({ chats }) => {
-        const loaded = chats.map(fromDto);
-        setSessions(loaded);
-        setActiveId((cur) => cur ?? loaded[0]?.id ?? null);
-      })
-      .catch(() => {});
+    const loaded = chats.map(fromDto);
+    setSessions(loaded);
+    setActiveId((cur) => cur && loaded.some((chat) => chat.id === cur) ? cur : loaded[0]?.id ?? null);
+  };
+
+  useEffect(() => {
+    refreshSessions().catch(() => {});
   }, []);
 
   const createSession = async (projectId: string) => {
@@ -48,6 +50,11 @@ export function useSessions() {
   const setPermission = (id: string, permission: ChatSession["permission"]) => {
     setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, permission } : s)));
     api.updateChat(id, { permission }).catch(() => {});
+  };
+
+  const setSystemPrompt = async (id: string, systemPrompt: string) => {
+    await api.updateChat(id, { system_prompt: systemPrompt });
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, systemPrompt } : s)));
   };
 
   const renameSession = (id: string, title: string) => {
@@ -98,8 +105,10 @@ export function useSessions() {
     createSession,
     setMessages,
     setPermission,
+    setSystemPrompt,
     renameSession,
     deleteSession,
     deleteSessionsByProject,
+    refreshSessions,
   };
 }
